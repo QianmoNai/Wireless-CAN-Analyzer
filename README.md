@@ -1,55 +1,139 @@
-# BLE CAN Scope
+<p align="center">
+  <img src="docs/assets/hero.svg" alt="BLE CAN Scope — ESP32-S3 蓝牙 CAN 分析仪与 Android App" width="100%">
+</p>
 
-**蓝牙 CAN 分析仪：ESP32-S3 固件与 Android App 完整源码。**
+<h1 align="center">BLE CAN Scope</h1>
 
-通过 Bluetooth LE（BLE）将经典 CAN 数据无线传输到手机，支持多通道设备连接、大疆与达妙电机状态监测、达妙 IMU 数据解析、实时曲线和 CAN 报文查看。设备端配备屏幕与按键，可独立查看总线状态。
+<p align="center">
+  <strong>把 CAN 总线状态，带到你的手机上。</strong><br>
+  ESP32-S3 固件 × Android App · 蓝牙无线监控 · 电机与 IMU · 本机屏幕
+</p>
 
-Bluetooth LE CAN analyzer with ESP32-S3 firmware and Android app source code. Multi-device BLE connectivity, DJI/Damiao motor monitoring, Damiao IMU decoding, live charts, CAN frame inspection, and onboard display support.
+<p align="center">
+  <a href="https://github.com/QianmoNai/BLE-CAN-Scope/releases/tag/v1.19.0"><img src="https://img.shields.io/badge/Firmware-1.19.0-65e6cb?style=flat-square&amp;labelColor=17212f" alt="Firmware 1.19.0"></a>
+  <a href="https://github.com/QianmoNai/BLE-CAN-Scope/releases/tag/v1.19.0"><img src="https://img.shields.io/badge/Android_App-1.18.1-88baff?style=flat-square&amp;labelColor=17212f" alt="Android App 1.18.1"></a>
+  <img src="https://img.shields.io/badge/Transport-Bluetooth_LE-65e6cb?style=flat-square&amp;labelColor=17212f" alt="Bluetooth LE">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPL--3.0-ccd6e0?style=flat-square&amp;labelColor=17212f" alt="GPL-3.0-only"></a>
+</p>
 
-## 主要功能
+<p align="center">
+  <a href="#download"><strong>下载安装</strong></a> ·
+  <a href="#preview">界面预览</a> ·
+  <a href="#quickstart">快速上手</a> ·
+  <a href="#hardware">硬件接线</a> ·
+  <a href="#build">源码构建</a> ·
+  <a href="#docs">文档</a>
+</p>
 
-- **无线多设备监控**：App 同时管理多个 BLE CAN 通道，一键重连上次成功连接的设备。
-- **电机总览**：卡片显示通道、电机 ID、反馈 CAN ID 和连接状态；左滑删除、右滑配置、长按拖动排序。
-- **独立详情**：按电机/IMU 查看反馈参数、动态曲线与对应 CAN 数据流；曲线支持横屏全屏。
-- **协议支持**：大疆 C620/M3508、C610/M2006、GM6020、GM3510；达妙多种电机预设及自定义解码范围；DM-IMU-L1 主动上报。
-- **达妙状态查询**：每台电机独立设置查询频率，默认 100Hz，可调 1～1000Hz；实际速率取决于总线与无线带宽。
-- **报文监控**：CAN ID、RX/TX 筛选、独立保存上限、通信失败原因、设备端速率统计与估算负载。
-- **配置管理**：导入/导出通道、电机及重连记录，设备蓝牙名称断电保存。
-- **本机显示**：ST7789 总览、最近报文和设置页面，支持按键、背光 PWM、声音提示及 180° 翻转。
+---
 
-App 以状态监测为主，不提供电机运动控制界面。固件仍保留历史原始发帧/受限控制协议，详见协议文档；本机按键不会触发这些控制指令。CAN 接口正常参与 ACK，并非纯监听分析仪。
+**BLE CAN Scope** 是一套包含 ESP32-S3 固件和 Android App 完整源码的蓝牙 CAN 监控工具。通过 BLE 同时连接多个 CAN 通道，在手机上查看电机状态、IMU 参数、实时曲线和原始报文；也可以通过设备上的屏幕与按键查看总线状态。
 
-**支持经典 CAN，不支持 CAN FD。** `LOAD EST.` 按成功收发帧的基础位数估算，不包含位填充、错误帧及失败重试。高频 CAN 到 BLE 的转发不保证逐帧无损。
+<sub>Bluetooth LE CAN analyzer with ESP32-S3 firmware and an Android app. Multi-device monitoring, motor and IMU decoding, live charts, and an onboard display.</sub>
 
-## 版本与目录
+<a id="preview"></a>
 
-当前固件 **1.19.0**，Android App **1.18.1**（最低 Android 8.0 / API 26）。版本号独立，当前两者配套使用。
+## 从设备总览，到每一帧反馈
+
+<table>
+  <tr>
+    <td align="center" width="50%"><strong>多通道设备总览</strong><br><sub>通道、设备 ID 与连接状态，一屏查看</sub></td>
+    <td align="center" width="50%"><strong>单设备参数曲线</strong><br><sub>独立详情、实时反馈、点击曲线全屏查看</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/assets/app-overview.png" width="330" alt="App 首页：多通道电机卡片，使用模拟数据"></td>
+    <td align="center"><img src="docs/assets/app-detail.png" width="330" alt="App 电机详情：参数曲线，页面向下滚动，使用模拟数据"></td>
+  </tr>
+</table>
+
+<sub>以上为实际 App WebView 页面在浏览器中的渲染，使用模拟 CAN 数据，不是手机实测截图。详情图展示向下滚动后的曲线区域。</sub>
+
+### 离开手机，也能查看总线
+
+<p align="center">
+  <img src="docs/local-panel-preview.png" alt="ST7789 总览、CAN 报文、设置三个页面，模拟数据" width="850">
+</p>
+
+<sub>本机页面由固件实际绘制代码生成，使用模拟数据。支持背光亮度、声音开关与 180° 翻转，设置断电保存。</sub>
+
+## 为机器人调试准备
+
+| 能力 | 可以做什么 |
+| --- | --- |
+| **蓝牙多通道** | 同时连接多台 ESP32，按通道管理设备，一键重连上次成功连接的设备 |
+| **电机状态卡片** | 显示来源通道、电机 ID、反馈 CAN ID；左滑删除、右滑配置、长按拖动排序 |
+| **实时参数曲线** | 独立查看电机或 IMU 参数，点击曲线进入横屏全屏，查看对应 CAN 数据流 |
+| **达妙持续查询** | 每台电机独立开关与频率，默认 100Hz，可调 1～1000Hz |
+| **CAN 报文监控** | CAN ID 与 RX/TX 筛选、记录保存上限、发送失败原因、设备端帧率和估算负载 |
+| **配置备份** | 导入/导出通道、电机及重连记录，设备蓝牙名称断电保存 |
+| **本机屏幕** | 总览、最近报文和设置三个页面，三个按键、PWM 背光及蜂鸣器提示 |
+
+### 支持的设备
+
+| 类别 | 型号 / 协议 | 说明 |
+| --- | --- | --- |
+| 大疆电机 | C620 / M3508、C610 / M2006、GM6020、GM3510 | 按型号解析反馈；GM3510 部分参数保留原始值 |
+| 达妙电机 | DM4310 及更多型号预设、自定义解码范围 | 独立 ID / Master ID 配置，支持状态查询 |
+| 达妙 IMU | DM-IMU-L1 | 主动 CAN 上报，加速度、角速度、姿态角、四元数等 |
+
+具体型号、量程与协议来源见 [电机型号表](docs/MOTOR_CATALOG.md) 和 [DM-IMU-L1 说明](docs/DM_IMU_L1.md)。
+
+<a id="download"></a>
+
+## 下载与安装
+
+**[前往 Release 下载 →](https://github.com/QianmoNai/BLE-CAN-Scope/releases/tag/v1.19.0)**
+
+| 下载内容 | 版本 | 适用环境 |
+| --- | --- | --- |
+| [Android APK](https://github.com/QianmoNai/BLE-CAN-Scope/releases/download/v1.19.0/BLE-CAN-Scope-Android-1.18.1-debug.apk) | **1.18.1** | Android 8.0 / API 26 及以上，支持 BLE |
+| [ESP32-S3 烧录包](https://github.com/QianmoNai/BLE-CAN-Scope/releases/download/v1.19.0/BLE-CAN-Scope-ESP32-S3-1.19.0.zip) | **1.19.0** | ESP32-S3 Mini，4MB Flash；包含三个镜像与烧录说明 |
+| [SHA-256 校验文件](https://github.com/QianmoNai/BLE-CAN-Scope/releases/download/v1.19.0/SHA256SUMS) | 本次发行 | 核对下载附件完整性 |
+
+> 固件与 App 独立编号，以上版本配套使用。仓库当前为私有，下载需要登录具有访问权限的 GitHub 账号。APK 使用开发签名；更换签名需要卸载时，请先导出配置。
+
+<a id="quickstart"></a>
+
+## 快速上手
+
+1. **接线与供电** — 连接 SN65HVD230 与 ESP32，CANH/CANL 对应接入总线，所有模块及被测设备共地。
+2. **烧录与安装** — 下载固件包，按包内 `README.txt` 烧录；安装 Android APK。
+3. **蓝牙连接** — 开启手机蓝牙，授予扫描与连接权限，在 App 添加设备建立通道。
+4. **配置设备** — 设置与总线一致的 CAN 波特率，添加电机或 IMU，填写设备 ID 和反馈 CAN ID。
+5. **开始监控** — 点击首页卡片查看曲线；达妙电机按需开启持续查询，IMU 使用主动上报。在通道页查看原始 CAN 报文。
 
 ```text
-firmware/       ESP-IDF 工程、ESP32-S3 固件
-android/        Android Java + WebView App 及构建脚本
-hardware/       硬件连接说明（不含尚未提供的 PCB 原始文件）
-docs/           蓝牙协议、电机/IMU 说明与本机面板说明
-tests/          C、Java、JavaScript 与界面回归测试
-scripts/        主机测试脚本
+电机 / IMU ── CAN 总线 ── SN65HVD230 ── ESP32-S3 ── BLE ── Android App
+                                         │
+                                  ST7789 屏幕 + 按键
 ```
 
-## 硬件
+每台 ESP32 对应一条 CAN 总线；App 可以同时管理多个 BLE 通道。详情页按当前设备订阅所需数据，减少无关蓝牙传输。
 
-ESP32-S3 Mini + SN65HVD230 + 1.47 英寸 172×320 ST7789 SPI 屏、三个按键及 3V 有源蜂鸣器。CAN 默认 **1Mbit/s**。
+<a id="hardware"></a>
 
-| 功能 | GPIO |
-| --- | --- |
-| CAN CTX / CRX | 4 / 5 |
-| BT1 / BT2 / BT3（另一端接 GND） | 1 / 2 / 7 |
-| 背光 MOSFET 栅极 | 6 |
-| LCD RESET / D-C / CS | 8 / 9 / 10 |
-| LCD MOSI / SCLK | 11 / 12 |
-| 有源蜂鸣器 MOSFET 栅极 | 13 |
+## 硬件接线
 
-所有模块与被测设备共地，CANH/CANL 对应连接；终端电阻按总线两端布置。详情见 [硬件接线](hardware/README.md)与[本机面板操作](docs/LOCAL_PANEL.md)。
+**ESP32-S3 Mini + SN65HVD230 + 1.47 英寸 ST7789（172×320）**，配三个按键和 3V 有源蜂鸣器。CAN 默认 **1Mbit/s**。
 
-## 构建 ESP32 固件
+| 功能 | GPIO | 连接 |
+| --- | --- | --- |
+| CAN 发送 / 接收 | **4 / 5** | SN65HVD230 CTX / CRX |
+| BT1 / BT2 / BT3 | **1 / 2 / 7** | 按键另一端接 GND，内部上拉 |
+| 背光 PWM | **6** | 背光 MOSFET 栅极 |
+| LCD RESET / D-C / CS | **8 / 9 / 10** | 屏幕复位、命令、片选 |
+| LCD MOSI / SCLK | **11 / 12** | SPI 数据与时钟 |
+| 有源蜂鸣器 | **13** | 蜂鸣器 MOSFET 栅极 |
+
+CAN 终端电阻按总线两端布置。完整供电、插座引脚顺序及面板适配说明见 [硬件文档](hardware/README.md) 和 [本机面板操作](docs/LOCAL_PANEL.md)。
+
+<a id="build"></a>
+
+## 从源码构建
+
+在仓库根目录执行下面的命令。
+
+### ESP32-S3 固件
 
 已验证工具链：**ESP-IDF v6.0.2**。先安装 ESP-IDF 并激活环境，再执行：
 
@@ -64,7 +148,7 @@ bash firmware/idf.sh -p /dev/ttyACM0 monitor
 
 保留旧 ESP32 目标兼容路径：`CAN_IDF_TARGET=esp32 bash firmware/idf.sh build`；旧目标使用 GPIO21/22，默认不启用本机屏幕。本次发布主要验证 ESP32-S3。
 
-## 构建 Android App
+### Android App
 
 需要 **JDK 17、Android SDK Platform 35、Build Tools 35.0.0、Python 3**。当前项目使用命令行 SDK 构建脚本，不依赖 Gradle。
 
@@ -75,28 +159,56 @@ bash android/build.sh
 
 产物：`android/dist/CAN-Scope-debug.apk`。脚本在本机生成开发签名，密钥不随源码分发。自行构建 APK 的签名与作者 APK 不同，可能无法直接覆盖安装；如需卸载旧版本，请先在 App 内导出配置。
 
-## 使用
+<details>
+<summary><strong>目录结构</strong></summary>
 
-1. 给 CAN 模块、ESP32 与被测设备正确接线、共地并供电。
-2. 手机打开蓝牙，允许 App 的蓝牙扫描/连接权限，添加设备建立通道。
-3. 设置与总线相同的 CAN 波特率，添加电机或 IMU，填写电机 ID 与反馈 CAN ID。
-4. 从首页卡片进入详情页查看参数；达妙电机按需开启持续查询，IMU 使用主动上报模式。
-5. 在通道的 CAN 监控页查看报文和速率；配置可导出备份。
+```text
+BLE-CAN-Scope/
+├── firmware/     ESP-IDF 工程与 ESP32-S3 固件
+├── android/      Android Java + WebView App
+├── hardware/     接线说明（尚未纳入 PCB 原始工程）
+├── docs/         协议、型号、面板说明与预览素材
+├── tests/        C / Java / JavaScript / 浏览器测试
+└── scripts/      主机测试脚本
+```
 
-## 文档与测试
+</details>
 
-- [蓝牙通信协议](docs/PROTOCOL.md)
-- [电机协议与量程说明](docs/MOTOR_PROTOCOLS.md)
-- [支持的电机型号](docs/MOTOR_CATALOG.md)
-- [达妙 DM-IMU-L1](docs/DM_IMU_L1.md)
-- [本机屏幕、按键与声音](docs/LOCAL_PANEL.md)
-- [构建与测试](tests/README.md)
-- [外部依赖与协议来源](docs/DEPENDENCIES.md)
+<a id="docs"></a>
 
-![本机屏幕示意，模拟数据](docs/local-panel-preview.png)
+## 文档导航
 
-固件已在 ESP32-S3 完成烧录与启动检查，并观察到实时 CAN 接收；不代表所有型号、电气工况、手机或面板均已完成实物验证。浏览器测试使用模拟传输，不等同于手机 BLE 实测。
+| 我想了解… | 文档 |
+| --- | --- |
+| 蓝牙数据包、页面订阅与统计协议 | [BLE 通信协议](docs/PROTOCOL.md) |
+| 电机帧格式、型号和参数量程 | [电机协议](docs/MOTOR_PROTOCOLS.md) · [型号目录](docs/MOTOR_CATALOG.md) |
+| 达妙 IMU 的 CAN 数据解析 | [DM-IMU-L1](docs/DM_IMU_L1.md) |
+| 屏幕、按键、亮度与声音设置 | [本机面板](docs/LOCAL_PANEL.md) |
+| 编译检查、测试方法与验证结果 | [测试指南](tests/README.md) · [发布验证](docs/VALIDATION.md) |
+| 外部框架和协议资料来源 | [依赖与来源](docs/DEPENDENCIES.md) |
+
+## 使用范围
+
+- **经典 CAN**：不支持 CAN FD。接口正常参与 ACK，并非纯监听分析仪。
+- **状态监测**：App 不提供电机运动控制界面；固件保留历史原始发帧及受限控制协议，本机按键不会触发这些控制指令。
+- **频率与带宽**：查询和采样配置上限不代表实际吞吐，高频 CAN 经 BLE 转发不保证逐帧无损。
+- **估算负载**：`LOAD EST.` 使用成功收发帧的基础位数，不包含位填充、错误帧或失败尝试，不是精确物理占用率。
+- **验证范围**：已完成构建、相关回归及 ESP32-S3 启动/CAN 接收检查；实体屏幕、全部电机型号和手机尚未逐项实测。Release 中重新构建的镜像验证范围以发布说明为准。
+
+## 参与开发
+
+运行 `bash scripts/test-host.sh` 检查主机测试。界面改动可按 [测试指南](tests/README.md) 执行 Playwright 回归；反馈问题时附上固件/App 版本、设备型号、CAN 波特率与复现步骤。
 
 ## 许可证
 
-本项目采用 [GNU GPL v3.0](LICENSE)（SPDX：`GPL-3.0-only`）。Copyright (C) 2026 QianmoNai。外部依赖与协议资料按各自许可使用，见 [依赖说明](docs/DEPENDENCIES.md)。
+[GNU GPL v3.0](LICENSE) · `GPL-3.0-only` · Copyright © 2026 QianmoNai。
+
+外部依赖和协议资料遵守各自许可。本项目不隶属于大疆、达妙或乐鑫，品牌与型号用于说明兼容设备。
+
+---
+
+<p align="center">
+  <a href="https://github.com/QianmoNai/BLE-CAN-Scope">GitHub</a> ·
+  <a href="https://gitee.com/qianmonai/BLE-CAN-Scope">Gitee</a> ·
+  <a href="https://github.com/QianmoNai/BLE-CAN-Scope/releases/tag/v1.19.0">Release</a>
+</p>
