@@ -1,0 +1,30 @@
+# Build outputs and machine-specific configuration
+**/build/
+**/dist/
+**/sdkconfig
+**/sdkconfig.old
+*.sdkconfig
+*.sdkconfig.old
+**/managed_components/
+.vscode/
+.idea/
+.clangd
+compile_commands.json
+local.properties
+# Signing keys and credentials (generated outside the repository)
+*.keystore
+*.jks
+*.p12
+*.pem
+.env
+.env.*
+!.env.example
+# Local tests and caches
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+node_modules/
+.DS_Store
+*.log

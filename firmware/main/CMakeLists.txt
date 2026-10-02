@@ -1,0 +1,1 @@
+idf_component_register(SRCS "can_demo.c" "ble_bridge.c" "name_store.c" "feedback_poll.c" "home_status.c" "can_load.c" "can_rates.c" "ack_delivery.c" "notify_resource.c" "board_ui.c" "board_ui_model.c" "board_ui_render.c" "board_ui_data.c" INCLUDE_DIRS "." REQUIRES esp_driver_twai bt nvs_flash esp_timer esp_lcd esp_driver_spi esp_driver_gpio esp_driver_ledc)

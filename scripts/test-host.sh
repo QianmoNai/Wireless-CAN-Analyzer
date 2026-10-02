@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname -- "${BASH_SOURCE[0]}")/.."
+test_build_dir="$(mktemp -d)"
+trap 'rm -rf -- "$test_build_dir"' EXIT
+compile_run() {
+    local name="$1"; shift
+    cc -std=c11 -Ifirmware/main -Itests/stubs "tests/$name.c" "$@" -o "$test_build_dir/$name"
+    "$test_build_dir/$name"
+}
+compile_run test_board_ui firmware/main/board_ui_model.c firmware/main/board_ui_render.c firmware/main/board_ui_data.c
+compile_run test_firmware -DCONFIG_IDF_TARGET_ESP32S3=1
+compile_run test_home_status firmware/main/home_status.c
+compile_run test_can_load firmware/main/can_load.c
+compile_run test_can_rates firmware/main/can_rates.c
+compile_run test_ack_delivery firmware/main/ack_delivery.c
+compile_run test_feedback_poll firmware/main/feedback_poll.c firmware/main/ack_delivery.c
+compile_run test_notify_resource firmware/main/notify_resource.c firmware/main/ack_delivery.c
+cc -std=c11 -Itests/name_stubs -Ifirmware/main tests/test_name_store.c firmware/main/name_store.c -o "$test_build_dir/test_name_store"
+"$test_build_dir/test_name_store"
+python3 tests/test_query_tx_filter.py
+node tests/test_imu.js
+node tests/test_motor_catalog.js
+java_src=android/app/src/main/java/dev/qianmo/canview
+javac -encoding UTF-8 -d "$test_build_dir/java" \
+    "$java_src/MonitorCommands.java" "$java_src/FeedbackQueries.java" "$java_src/HomeTelemetry.java" \
+    "$java_src/PollingStatus.java" "$java_src/ReconnectHistory.java" tests/*Test.java
+for name in FeedbackQueriesTest HomeTelemetryTest MonitorCommandsTest PollingStatusTest ReconnectHistoryTest; do
+    java -cp "$test_build_dir/java" "dev.qianmo.canview.$name"
+done

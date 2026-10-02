@@ -1,0 +1,24 @@
+menu "CAN analyzer local panel"
+config CAN_LOCAL_PANEL
+    bool "ST7789 screen, buttons, backlight and buzzer"
+    depends on IDF_TARGET_ESP32S3
+    default y
+config CAN_LCD_X_GAP
+    int "ST7789 column offset"
+    depends on CAN_LOCAL_PANEL
+    range 0 68
+    default 34
+config CAN_LCD_Y_GAP
+    int "ST7789 row offset"
+    depends on CAN_LOCAL_PANEL
+    range 0 0
+    default 0
+config CAN_LCD_INVERT
+    bool "Invert panel colors (typical IPS panel)"
+    depends on CAN_LOCAL_PANEL
+    default y
+config CAN_LCD_BGR
+    bool "Use BGR instead of RGB color order"
+    depends on CAN_LOCAL_PANEL
+    default n
+endmenu
