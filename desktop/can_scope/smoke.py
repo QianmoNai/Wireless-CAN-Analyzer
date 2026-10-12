@@ -74,7 +74,11 @@ def run(app, window, output):
         report=dict(ready=sorted(window.ready),js_errors=window.js_errors,checks=checks)
         output.with_suffix('.json').write_text(json.dumps(report,ensure_ascii=False,indent=2))
         ok=(not window.js_errors and checks.get('isolated') and checks.get('overview',{}).get('cards')==1 and checks.get('detail',{}).get('samples')==50 and checks.get('live',{}).get('visible'))
-        window.close()
-        app.exit(0 if ok else 1)
+        print("Smoke checks completed", flush=True)
+        # Leave the JavaScript result callback before tearing down its page.
+        def quit_test():
+            window.close()
+            app.exit(0 if ok else 1)
+        QTimer.singleShot(0, quit_test)
     QTimer.singleShot(60000, lambda: failure('UI test timed out'))
     QTimer.singleShot(2500,begin)

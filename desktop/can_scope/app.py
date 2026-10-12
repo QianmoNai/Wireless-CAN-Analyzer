@@ -259,10 +259,14 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--smoke', type=Path, help='offline UI smoke test; writes PNG and report')
     options = parser.parse_args()
+    if options.smoke:
+        import faulthandler
+        faulthandler.enable()
+        faulthandler.dump_traceback_later(30, repeat=True)
     app = QApplication(sys.argv[:1])
     app.setOrganizationName('Qianmo')
     app.setApplicationName('CAN Scope Desktop')
-    temp = tempfile.TemporaryDirectory(prefix='can-desktop-smoke-') if options.smoke else None
+    temp = tempfile.TemporaryDirectory(prefix='can-desktop-smoke-', ignore_cleanup_errors=True) if options.smoke else None
     folder = Path(temp.name) if temp else Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation))
     folder.mkdir(parents=True, exist_ok=True)
     if os.name != 'nt':
@@ -274,6 +278,8 @@ def main():
         from .smoke import run
         run(app, window, options.smoke)
     code = app.exec()
+    if options.smoke:
+        print("Smoke event loop exited", flush=True)
     # Destroy pages before profiles so Chromium releases its storage handles.
     for view in window.views.values():
         page = view.page()
