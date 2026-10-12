@@ -242,6 +242,11 @@ class Window(QMainWindow):
         self.statusBar().showMessage('已导出 '+path, 5000)
 
     def closeEvent(self, event):
+        # Stop WebChannel callbacks before joining workers or destroying Chromium.
+        for view in self.views.values():
+            view.page().setWebChannel(None)
+            view.stop()
+        self.runtime.message.disconnect(self.deliver)
         try:
             self.runtime.stop()
         except Exception:

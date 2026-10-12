@@ -28,6 +28,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libegl1 libopengl0 libxkbcommon-x11-0 libxcb-cursor0 libnss3 libasound2t64 fonts-noto-cjk
       - run: python -m unittest discover -s desktop/tests -v
       - name: UI smoke test
+        timeout-minutes: 3
         env:
           QT_QPA_PLATFORM: offscreen
           QTWEBENGINE_CHROMIUM_FLAGS: --disable-gpu
@@ -40,6 +41,7 @@ jobs:
           QTWEBENGINE_CHROMIUM_FLAGS: --disable-gpu
         run: desktop/dist/CAN-Scope/CAN-Scope --smoke desktop/build/packaged.png
       - name: Packaged UI smoke test (Windows)
+        timeout-minutes: 3
         if: runner.os == 'Windows'
         env:
           QT_QPA_PLATFORM: offscreen
