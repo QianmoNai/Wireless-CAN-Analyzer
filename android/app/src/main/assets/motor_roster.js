@@ -34,7 +34,7 @@ function commitWatch(raw,existing=null){
  if(conflict)throw Error('与「'+(conflict.config.name||Motors.profiles[conflict.config.profile].name)+'」的反馈地址重复或无法区分；请检查返回帧 ID 和电机 ID');
  if(watchedMotors.some(m=>m!==existing&&Motors.profiles[m.config.profile].family===Motors.profiles[c.profile].family&&m.config.id===c.id&&(Motors.profiles[c.profile].feedbackBase===Motors.profiles[m.config.profile].feedbackBase)))throw Error('此型号的电机 ID 已在列表中，请编辑已有电机');
  if(existing)stopMotorPolling(existing,"配置已更新，查询已停止");
- const m=existing||{};Object.assign(m,{config:c,feedback:null,time:0,mode:null,polling:false,queryMessage:''});
+ const m=existing||{};Object.assign(m,{config:c,feedback:null,time:0,homeTemperature:null,temperatureAt:0,mode:null,polling:false,queryMessage:''});
  if(!existing)watchedMotors.push(m);
  saveWatchedMotors();renderWatchedMotors();return m;
 }
@@ -108,27 +108,39 @@ function refreshWatchedMotors(){
  const disabled=watchBusy()||!watchedMotors.length;
  $('watchSelect').disabled=disabled;$('watchEditSelected').disabled=disabled;$('watchRemoveSelected').disabled=disabled;
  watchedDirty=false;
- if(window.refreshDetail)refreshDetail();
+ if(window.requestDetailPaint)requestDetailPaint();
 }
-function watchedPacket(a){
+function watchedPacket(a,age=0){
  if(document.body.classList.contains('motor-detail')||!connected||a[1]!==1||(a[2]&3)||a[3]>8)return;
  const id=u32(a,4),data=Array.from(a.slice(8,8+a[3]));
  for(const m of watchedMotors){try{const c=m.config,p=Motors.profiles[c.profile];
   const f=p.family==='imu'?Motors.imuFeedback(c.feedbackId,id,data):p.family==='dji'?Motors.djiFeedback(c.profile,c.id,id,data,c.feedbackId):Motors.dmFeedback(c.id,c.master,id,data,c.limits);
   if(!f)continue;if(f.mode!==undefined){m.mode=f.mode;watchedDirty=true;continue}
-  m.feedback=f;m.time=Date.now();watchedDirty=true;
+  m.feedback=f;m.time=Date.now()-Math.max(0,age);watchedDirty=true;
  }catch(e){/* An invalid packet must not interrupt other motors or raw CAN monitoring. */}}
 }
-function resetWatchedFeedback(){homeQuiet=false;summaryAt=0;for(const m of watchedMotors){m.feedback=null;m.time=0;m.mode=null;m.polling=false;m.queryMessage="查询已关闭"}refreshWatchedMotors()}
+function resetWatchedFeedback(){homeQuiet=false;summaryAt=0;for(const m of watchedMotors){m.feedback=null;m.time=0;m.homeTemperature=null;m.temperatureAt=0;m.mode=null;m.polling=false;m.queryMessage="查询已关闭"}refreshWatchedMotors()}
 populateWatchProfiles('c620');
 (function(){try{const saved=ConfigIO.readField('watchedMotors');if(Array.isArray(saved))for(const raw of saved.slice(0,32)){try{const c=validateWatch(raw);if(!watchedMotors.some(m=>watchConflict(c,m.config)))watchedMotors.push({config:c,feedback:null,time:0,mode:null})}catch(e){}}}catch(e){}renderWatchedMotors()})();
 // Batch DOM work independently of bus packet rate; stale status updates even without packets.
 setInterval(()=>{if(watchedDirty||!$('view-motor').hidden)refreshWatchedMotors()},250);
 
 // Native Activity combines these independent channel snapshots into the home page.
-function dashboardSnapshot(){const now=Date.now();return watchedMotors.map(m=>({key:JSON.stringify(m.config),name:m.config.name||Motors.profiles[m.config.profile].name,model:Motors.profiles[m.config.profile].name,id:watchHex(m.config.id),feedbackId:watchHex(m.config.feedbackId),family:Motors.profiles[m.config.profile].family,sampleHz:window.detailRateFor?detailRateFor(m):100,connectionStatus:homeQuiet?(summaryAt?m.summaryState||'waiting':'waiting'):(m.time?(now-m.time<2000?'online':'offline'):'waiting'),statusAge:homeQuiet?(summaryAt?now-summaryAt:3000):0}))}
-window.motorTelemetryMode=function(data){homeQuiet=!!data.quiet;summaryAt=0;for(const m of watchedMotors){m.summaryState='waiting';if(!homeQuiet){m.feedback=null;m.time=0;m.mode=null}}refreshWatchedMotors();publishDashboard()};
-window.motorOnlineSummary=function(data){if(!connected||!homeQuiet||data.count!==watchedMotors.length)return;summaryAt=Date.now();watchedMotors.forEach((m,i)=>{m.summaryState=(data.online>>>i)&1?'online':(data.seen>>>i)&1?'offline':'waiting'});publishDashboard()};
+function dashboardSnapshot(){const now=Date.now();return watchedMotors.map(m=>{
+ const p=Motors.profiles[m.config.profile],temperatureSupported=p.family!=='imu'&&m.config.profile!=='c610'&&!p.rawAngle;
+ const temperature=homeQuiet?m.homeTemperature:m.feedback&&m.feedback.values&&m.feedback.values.temperature;
+ const temperatureAt=homeQuiet?m.temperatureAt:m.time;
+ const sampleHz=window.detailRateFor?detailRateFor(m):100;
+ if(!m.dashboardMetadata||m.dashboardMetadata.sampleHz!==sampleHz||m.dashboardMetadata.config!==m.config)m.dashboardMetadata={config:m.config,key:JSON.stringify(m.config),name:m.config.name||p.name,model:p.name,id:watchHex(m.config.id),feedbackId:watchHex(m.config.feedbackId),family:p.family,sampleHz,temperatureSupported};
+ const {config,...metadata}=m.dashboardMetadata;
+ return {...metadata,connectionStatus:homeQuiet?(summaryAt?m.summaryState||'waiting':'waiting'):(m.time?(now-m.time<2000?'online':'offline'):'waiting'),statusAge:homeQuiet?(summaryAt?now-summaryAt:3000):0,temperature:temperatureSupported&&Number.isFinite(temperature)?temperature:null,temperatureAge:temperatureAt?now-temperatureAt:3000};
+ })}
+window.motorTelemetryMode=function(data){homeQuiet=!!data.quiet;summaryAt=0;for(const m of watchedMotors){m.summaryState='waiting';m.homeTemperature=null;m.temperatureAt=0;if(!homeQuiet){m.feedback=null;m.time=0;m.mode=null}}refreshWatchedMotors();publishDashboard()};
+window.motorOnlineSummary=function(data){if(!connected||!homeQuiet||data.count!==watchedMotors.length)return;summaryAt=Date.now()-Math.max(0,Number(data.age)||0);watchedMotors.forEach((m,i)=>{m.summaryState=(data.online>>>i)&1?'online':(data.seen>>>i)&1?'offline':'waiting'});scheduleDashboard()};
+window.motorTemperatures=function(data){
+ if(!connected||!homeQuiet||data.count!==watchedMotors.length||!Number.isInteger(data.start)||data.start<0||!Array.isArray(data.temperatures)||data.start+data.temperatures.length>watchedMotors.length)return;
+ const now=Date.now()-Math.max(0,Number(data.age)||0);data.temperatures.forEach((temperature,i)=>{const m=watchedMotors[data.start+i];m.homeTemperature=Number.isInteger(temperature)&&temperature>=0&&temperature<=255?temperature:null;m.temperatureAt=now});scheduleDashboard();
+};
 
 window.dashboardDelete=function(key){
  const m=watchedMotors.find(m=>JSON.stringify(m.config)===key);
@@ -139,8 +151,10 @@ window.dashboardDelete=function(key){
 };
 window.dashboardEdit=function(key){const m=watchedMotors.find(m=>JSON.stringify(m.config)===key);if(!m)return;closeMotorDetail(false);showTab('motor');openWatchEditor(m)};
 window.dashboardOpen=function(key){const m=watchedMotors.find(m=>JSON.stringify(m.config)===key);if(m){openMotorDetail(m)}else{$('rosterPanel').scrollIntoView();watchMessage('该电机配置已更新，请从列表重新选择')}};
-function publishDashboard(){if(window.CanAndroid&&typeof CanAndroid.dashboard==='function')CanAndroid.dashboard(JSON.stringify(dashboardSnapshot()))}
-setInterval(publishDashboard,500);publishDashboard();
+let dashboardTimer=0,dashboardPublishedAt=0;
+function scheduleDashboard(){if(!dashboardTimer)dashboardTimer=setTimeout(publishDashboard,75)}
+function publishDashboard(){clearTimeout(dashboardTimer);dashboardTimer=0;dashboardPublishedAt=Date.now();if(window.CanAndroid&&typeof CanAndroid.dashboard==='function')CanAndroid.dashboard(JSON.stringify(dashboardSnapshot()))}
+setInterval(()=>{if(!dashboardTimer&&Date.now()-dashboardPublishedAt>=950)publishDashboard()},1000);publishDashboard();
 
 // Activation is session-only: never exported, persisted or resumed after reconnect.
 function stopMotorPolling(m,message){
@@ -159,7 +173,7 @@ window.motorQueryState=function(data){const m=watchedMotors.find(m=>JSON.stringi
 window.setMotorQueryHz=function(key,hz){
  const m=watchedMotors.find(m=>JSON.stringify(m.config)===key);if(!m||Motors.profiles[m.config.profile].family!=='dm')return;
  try{if(watchBusy())throw Error('请等待设备设置完成');hz=Motors.number(hz,'查询频率',1,1000,true);
-  if(hz!==m.config.pollHz){stopMotorPolling(m,'');m.config.pollHz=hz;saveWatchedMotors();m.queryMessage='已保存 '+hz+' Hz · 查询已关闭';}
+  if(hz!==m.config.pollHz){stopMotorPolling(m,'');m.config.pollHz=hz;m.dashboardMetadata=null;saveWatchedMotors();m.queryMessage='已保存 '+hz+' Hz · 查询已关闭';}
  }catch(e){m.queryMessage=e.message}
  renderWatchedMotors();publishDashboard();if(window.detailRetarget)detailRetarget(m);
 };

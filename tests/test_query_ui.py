@@ -37,6 +37,8 @@ with sync_playwright() as p:
  page.evaluate("showTab('motor')");page.select_option('#watchSelect','2');page.locator('#watchEditSelected').click();assert not page.evaluate('watchedMotors[2].polling')
  page.evaluate('closeWatchEditor();dashboardOpen(JSON.stringify(watchedMotors[1].config))');page.locator('#detailQuery').check()
  page.evaluate("onNative('queryState',{key:JSON.stringify(watchedMotors[1].config),enabled:false,message:'CAN 查询发送失败，已停止'})")
+ assert not page.evaluate('watchedMotors[1].polling'), 'query state must stop immediately'
+ page.wait_for_function("!document.querySelector('#detailQuery').checked")
  assert not page.locator('#detailQuery').is_checked()
  assert '发送失败' in page.locator('#detailQueryNote').inner_text()
  page.locator('#detailQuery').check()
@@ -45,10 +47,13 @@ with sync_playwright() as p:
  assert [m.get('pollHz') for m in exported['motors']]==[None,250,1000]
  # A query-management timeout stops renewals but keeps monitoring connected.
  page.evaluate("onNative('queryState',{key:JSON.stringify(watchedMotors[1].config),enabled:false,message:'查询配置确认超时，已停止续租；正在确认设备停止，等待停止确认或租约到期后可重开'})")
+ assert not page.evaluate('watchedMotors[1].polling'), 'timeout must stop immediately'
+ page.wait_for_function("!document.querySelector('#detailQuery').checked")
  assert page.evaluate('connected') and page.locator('#badgeText').inner_text()=='已连接'
  assert not page.locator('#detailQuery').is_checked()
  assert '正在确认设备停止' in page.locator('#detailQueryNote').inner_text()
  page.evaluate("onNative('queryState',{key:JSON.stringify(watchedMotors[1].config),enabled:false,message:'查询已停止，可重新开启'})")
+ page.wait_for_function("document.querySelector('#detailQueryNote').textContent.includes('可重新开启')")
  assert '可重新开启' in page.locator('#detailQueryNote').inner_text()
  page.evaluate("onNative('state',{value:'idle',message:'断开'})");assert not page.locator('#detailQuery').is_checked()
  page.evaluate("onNative('state',{value:'ready',name:'ESP32-A'})");assert not page.evaluate('watchedMotors[1].polling')

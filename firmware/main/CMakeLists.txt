@@ -1,1 +1,5 @@
-idf_component_register(SRCS "can_demo.c" "ble_bridge.c" "name_store.c" "feedback_poll.c" "home_status.c" "can_load.c" "can_rates.c" "ack_delivery.c" "notify_resource.c" "board_ui.c" "board_ui_model.c" "board_ui_render.c" "board_ui_data.c" INCLUDE_DIRS "." REQUIRES esp_driver_twai bt nvs_flash esp_timer esp_lcd esp_driver_spi esp_driver_gpio esp_driver_ledc)
+idf_component_register(SRCS "dual_crypto.c" "dual_protocol.c" "dual_session.c" "dual_link.c" "network_protocol.c" "network_identity.c" "network_link.c" "can_demo.c" "ble_bridge.c" "name_store.c" "feedback_poll.c" "home_status.c" "can_load.c" "can_rates.c" "ack_delivery.c" "notify_resource.c" "board_ui.c" "board_buzzer.c" "board_ui_model.c" "board_ui_animation.c" "board_ui_render.c" "board_ui_font.c" "board_ui_data.c" INCLUDE_DIRS "." REQUIRES esp_wifi esp_netif esp_event esp-tls mbedtls esp_driver_twai bt nvs_flash esp_timer esp_lcd esp_driver_spi esp_driver_gpio esp_driver_ledc)
+option(CAN_PANEL_BENCHMARK "Temporarily exercise local page transitions and print frame times" OFF)
+if(CAN_PANEL_BENCHMARK)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE CAN_PANEL_BENCHMARK=1)
+endif()

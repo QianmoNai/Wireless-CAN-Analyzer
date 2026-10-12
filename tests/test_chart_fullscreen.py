@@ -84,13 +84,14 @@ def live_isolation_and_preservation(page):
             $('detailChartSvg').querySelector('.trace').getAttribute('d')!==path)
             throw Error('unrelated motor changed fullscreen chart');
     }""", {"key": other, "hex": sample(dji(speed=999), 1100)})
-    # Assert the value AND SVG update in the same JS task as every accepted frame.
-    page.evaluate("""d => {
+    # Value and SVG follow the next screen refresh; storage remains immediate.
+    page.evaluate("""async d => {
         const before=$('detailChartSvg').querySelector('.trace').getAttribute('d');
         onNative('motorSample',d);
+        await new Promise(requestAnimationFrame);
         if(!$('detailChartValue').textContent.includes('250')||
             $('detailChartSvg').querySelector('.trace').getAttribute('d')===before)
-            throw Error('fullscreen chart did not update per frame');
+            throw Error('fullscreen chart did not update on screen refresh');
     }""", {"key": key, "hex": sample(dji(angle=2048, speed=250, effort=75), 1100)})
     assert page.evaluate("detailSamples.length") == 3
     assert page.evaluate("watchedMotors[1].feedback") is None
@@ -189,12 +190,13 @@ def dm_two_traces_and_query_settings(page):
     assert page.locator("#detailChartUnit").inner_text() == "°C"
     assert "L" in page.locator(TRACE).get_attribute("d")
     assert "L" in page.locator(EXTRA).get_attribute("d")
-    page.evaluate("""d => {
+    page.evaluate("""async d => {
         const svg=$('detailChartSvg'),before=Array.from(svg.querySelectorAll('.trace,.trace-extra'),p=>p.getAttribute('d'));
         onNative('motorSample',d);
+        await new Promise(requestAnimationFrame);
         const after=Array.from(svg.querySelectorAll('.trace,.trace-extra'),p=>p.getAttribute('d'));
         if(after.some((path,i)=>path===before[i])||!$('detailChartValue').textContent.includes('51')||!$('detailChartValue').textContent.includes('49'))
-            throw Error('DM motor/MOS temperature traces did not both update per frame');
+            throw Error('DM motor/MOS temperature traces did not both update on screen refresh');
     }""", {"key": key, "hex": sample(dm(49, 51), 2100)})
     page.locator("#detailChartClose").click()
     assert page.evaluate("detailSamples===dmHistoryReference&&detailMotor.polling&&detailMotor.config.pollHz===25&&JSON.stringify(detailMotor.config)===dmConfigBefore&&detailRateFor(detailMotor)===dmRateBefore")
@@ -299,7 +301,7 @@ def main():
         lifecycle_cleanup(page)
         assert not errors, errors
         browser.close()
-    print("PASS: fullscreen selected-series isolation and per-frame updates, shared pause/windows, no transport changes, keyboard/native Back, lifecycle cleanup, landscape layout, DM dual traces and bounded 60k history.")
+    print("PASS: fullscreen selected-series isolation and screen-paced updates, shared pause/windows, no transport changes, keyboard/native Back, lifecycle cleanup, landscape layout, DM dual traces and bounded 60k history.")
 
 
 if __name__ == "__main__":

@@ -38,6 +38,7 @@ static home_status_t home_status;
 static int home_lock;
 static atomic_bool subscribed;
 static atomic_uint dropped;
+bool ble_bridge_connected(void){return atomic_load(&subscribed);}
 int64_t esp_timer_get_time(void){return 0;}
 BaseType_t xQueueSend(QueueHandle_t q,const void *p,unsigned wait){
     if(q->count==q->limit)return pdFALSE;
@@ -68,6 +69,16 @@ int main(void){
         assert(atomic_load(&dropped)==0);
     }
     reset(0);assert(!home_redundant(&rates));home_status.mode=1;assert(home_redundant(&rates));
+    // Home temperature summaries are control telemetry only for their current
+    // quiet-mode revision, and are rechecked before queued delivery.
+    bridge_packet_t temperatures={.bytes={1,16,0,1}};wire_put_u32(temperatures.bytes+16,7);
+    for(unsigned mode=0;mode<=3;mode++){
+        reset(mode);home_status.revision=7;ble_bridge_publish(&temperatures);
+        assert(control.count==(mode==1)&&raw.count==0&&acks.count==0&&atomic_load(&dropped)==0);
+        home_status.mode=2;assert(home_redundant(&temperatures));
+    }
+    reset(1);home_status.revision=8;ble_bridge_publish(&temperatures);
+    assert(control.count==0&&atomic_load(&dropped)==0&&home_redundant(&temperatures));
     bridge_packet_t query={.bytes={1,2,0,4}};
     wire_put_u32(query.bytes+4,0x7ff);memcpy(query.bytes+8,(uint8_t[]){1,0,0xcc,0},4);
     for(unsigned mode=0;mode<=3;mode++)for(unsigned type=2;type<=3;type++){

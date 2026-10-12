@@ -19,7 +19,8 @@ import android.view.inputmethod.InputMethodManager;
 import android.widget.*;
 import org.json.*;
 import java.util.*;
-import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.io.*;
 import java.nio.charset.StandardCharsets;
 import android.net.Uri;
@@ -45,6 +46,9 @@ public class MainActivity extends Activity {
     private Button add;
     private WebView home;
     private boolean homeReady;
+    private boolean homeUpdatePending;
+    private final Runnable homeUpdate=()->{homeUpdatePending=false;updateHome();};
+    private void scheduleHomeUpdate(){if(!homeReady||selected!=null||homeUpdatePending)return;homeUpdatePending=true;ui.postDelayed(homeUpdate,75);}
     private volatile boolean configBusy;
     private boolean restoring;
     private String exportText, configMessage="";
@@ -165,10 +169,11 @@ public class MainActivity extends Activity {
     }
     private void showHome(){exitChartFullscreen(true);selected=null;for(DevicePanel p:panels){p.detailKey="";p.web.evaluateJavascript("window.closeMotorDetail&&closeMotorDetail(false)",null);p.web.setVisibility(View.GONE);p.configureTelemetry();}home.setVisibility(View.VISIBLE);renderTabs();updateHome();}
     private void updateHome(){
+        ui.removeCallbacks(homeUpdate);homeUpdatePending=false;
         if(!homeReady||selected!=null)return;
         JSONArray channels=new JSONArray();
         for(DevicePanel p:panels)try{
-            JSONObject data=new JSONObject();data.put("slot",p.slot);data.put("name",p.deviceName);data.put("address",p.address);data.put("connected",p.ready);data.put("connecting",p.gatt!=null&&!p.ready);data.put("canReconnect",p.history.known()&&!p.ready&&p.gatt==null&&!p.scanning&&p.pageReady);data.put("connectionMessage",p.connectionMessage);data.put("label",p.label);data.put("motors",p.snapshot);data.put("imuSupported",p.imuSupported);data.put("age",SystemClock.elapsedRealtime()-p.snapshotTime);channels.put(data);
+            JSONObject data=new JSONObject();data.put("slot",p.slot);data.put("name",p.deviceName);data.put("address",p.address);data.put("connected",p.ready);data.put("connecting",(p.gatt!=null||p.lanConnecting)&&!p.ready);data.put("canReconnect",(p.connectionMode.equals("wifi")?!p.networkPin.isEmpty()&&!p.networkIp.isEmpty():p.history.known())&&!p.ready&&p.gatt==null&&!p.lanConnecting&&!p.scanning&&p.pageReady);data.put("connectionMessage",p.connectionMessage);data.put("label",p.label);data.put("motors",p.snapshot);data.put("imuSupported",p.imuSupported);data.put("age",SystemClock.elapsedRealtime()-p.snapshotTime);channels.put(data);
         }catch(JSONException ignored){}
         home.evaluateJavascript("window.updateHome("+channels.toString()+")",null);
         publishReconnectStatus();
@@ -246,7 +251,7 @@ public class MainActivity extends Activity {
     }
     private List<ReconnectHistory.Channel> reconnectChannels(){
         List<ReconnectHistory.Channel> result=new ArrayList<>();
-        for(DevicePanel p:panels)result.add(new ReconnectHistory.Channel(p.slot,p.history.address(),p.gatt==null?"":p.address,p.ready,p.gatt!=null||p.scanning,p.pageReady,p.closed));
+        for(DevicePanel p:panels)result.add(new ReconnectHistory.Channel(p.slot,p.connectionMode.equals("wifi")?(!p.networkPin.isEmpty()&&!p.networkIp.isEmpty()?p.networkAddress:""):p.history.address(),p.gatt==null&&p.lan==null?"":p.address,p.ready,p.gatt!=null||p.lanConnecting||p.scanning,p.pageReady,p.closed));
         return result;
     }
     private boolean connectionPermission(){return Build.VERSION.SDK_INT<31||checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)==PackageManager.PERMISSION_GRANTED;}
@@ -266,23 +271,27 @@ public class MainActivity extends Activity {
     private void resumeReconnect(){
         if(!reconnectGate.canStart())return;
         if(configBusy||selected!=null){cancelReconnect("连接已取消，请返回首页后重试");return;}
-        if(!connectionPermission()){
-            reconnectGate.prompt(ReconnectHistory.Gate.PERMISSION);reconnectMessage="请允许附近设备权限，以连接已保存的设备";publishReconnectStatus();
-            try{requestPermissions(new String[]{Manifest.permission.BLUETOOTH_CONNECT},RECONNECT_PERMISSION);}catch(Exception e){reconnectGate.result(ReconnectHistory.Gate.PERMISSION,false);cancelReconnect("无法申请蓝牙权限，请在系统设置允许");}return;
-        }
-        BluetoothAdapter adapter=bluetoothAdapter();
-        if(adapter==null){cancelReconnect("这台手机不支持蓝牙");return;}
-        try{
-            if(!adapter.isEnabled()){
+        boolean needsBle=false;
+        for(ReconnectHistory.Choice choice:ReconnectHistory.plan(reconnectChannels()))if(choice.kind==ReconnectHistory.CONNECT)
+            for(DevicePanel p:panels)if(p.slot==choice.channel.slot&&p.connectionMode.equals("ble"))needsBle=true;
+        BluetoothAdapter adapter=null;
+        if(needsBle){
+            if(!connectionPermission()){
+                reconnectGate.prompt(ReconnectHistory.Gate.PERMISSION);reconnectMessage="请允许附近设备权限，以连接已保存的设备";publishReconnectStatus();
+                try{requestPermissions(new String[]{Manifest.permission.BLUETOOTH_CONNECT},RECONNECT_PERMISSION);}catch(Exception e){reconnectGate.result(ReconnectHistory.Gate.PERMISSION,false);cancelReconnect("无法申请蓝牙权限，请在系统设置允许");}return;
+            }
+            adapter=bluetoothAdapter();if(adapter==null){cancelReconnect("这台手机不支持蓝牙");return;}
+            try{if(!adapter.isEnabled()){
                 reconnectGate.prompt(ReconnectHistory.Gate.ENABLE);reconnectMessage="请开启蓝牙，开启后将继续连接";publishReconnectStatus();
                 try{startActivityForResult(new Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE),RECONNECT_ENABLE);}catch(Exception e){reconnectGate.result(ReconnectHistory.Gate.ENABLE,false);cancelReconnect("无法开启蓝牙，请在系统设置开启后重试");}return;
-            }
-        }catch(SecurityException e){cancelReconnect("蓝牙权限已失效，请重新授权后连接");return;}
+            }}catch(SecurityException e){cancelReconnect("蓝牙权限已失效，请重新授权后连接");return;}
+        }
         reconnectLaunching=true;reconnectGate.finish();
         for(ReconnectHistory.Choice choice:ReconnectHistory.plan(reconnectChannels())){
             DevicePanel p=null;for(DevicePanel candidate:panels)if(candidate.slot==choice.channel.slot){p=candidate;break;}
             if(p==null)continue;
             if(choice.kind!=ReconnectHistory.CONNECT){recordReconnectSkip(p,choice);continue;}
+            if(p.connectionMode.equals("wifi")){p.connectLan(p.networkIp);if(p.lanConnecting)reconnectAttempts.add(p);else{reconnectFailed++;reconnectResults.put(p.slot,"局域网连接未发起，请检查配网信息");}continue;}
             try{BluetoothDevice device=adapter.getRemoteDevice(choice.channel.successAddress);p.startConnection(device,choice.channel.successAddress,p.history.name(),true);}
             catch(Exception e){reconnectFailed++;p.connectionMessage="无法连接保存的设备："+e.getMessage();reconnectResults.put(p.slot,p.connectionMessage);}
         }
@@ -338,7 +347,7 @@ public class MainActivity extends Activity {
         if(!reconnectGate.pending())cancelReconnect("App 已进入后台，请点击连接重试");
         if(!manualPermissionWaiting&&!manualEnableWaiting){permissionPanel=null;manualResumePanel=null;}
         super.onStop();
-        for(DevicePanel p:panels){p.disconnectDevice();p.state("idle","App 已进入后台，请重新连接");}
+        for(DevicePanel p:panels){if(p.networkBusy()){int session=p.generation;ui.postDelayed(()->{if(!foreground&&session==p.generation){p.disconnectDevice();p.state("idle","配网界面已关闭，请重新连接");}},65000);}else{p.disconnectDevice();p.state("idle","App 已进入后台，请重新连接");}}
     }
     @Override protected void onDestroy(){
         exitChartFullscreen(false);
@@ -443,7 +452,7 @@ public class MainActivity extends Activity {
             if(!prefs.putString("channels",slots.toString()).commit())throw new IOException("无法保存配置");
             cancelReconnect("配置已导入，请在首页连接设备");
             restoring=true;configNotice("正在恢复各通道…",true);
-            for(DevicePanel p:panels){p.history.clear();p.shutdown();content.removeView(p.web);}panels.clear();
+            for(DevicePanel p:panels){p.clearNetworkIdentity();p.history.clear();p.shutdown();content.removeView(p.web);}panels.clear();
             for(int i=0;i<channels.length();i++)createChannel(channels.getJSONObject(i).getInt("slot"));showHome();
         }catch(Exception e){configNotice("导入未完成："+e.getMessage()+"；请重新打开 App 检查",false);}
     }
@@ -470,6 +479,7 @@ public class MainActivity extends Activity {
     private final UUID SERVICE = UUID.fromString("c0de0001-1212-efde-1523-785feabcd123");
     private final UUID WRITE = UUID.fromString("c0de0002-1212-efde-1523-785feabcd123");
     private final UUID NOTIFY = UUID.fromString("c0de0003-1212-efde-1523-785feabcd123");
+    private final UUID NETWORK = UUID.fromString("c0de0004-1212-efde-1523-785feabcd123");
     private final UUID CCCD = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
     private final Handler main = new Handler(Looper.getMainLooper());
     private WebView web;
@@ -477,6 +487,75 @@ public class MainActivity extends Activity {
     private BluetoothLeScanner scanner;
     private volatile BluetoothGatt gatt;
     private volatile BluetoothGattCharacteristic writer;
+    private volatile LanTransport lan;
+    private volatile boolean lanConnecting,deviceWifiMode;
+    private volatile WifiProvisioner provisioner;
+    private String connectionMode="ble";
+    private String networkId="",networkIp="",networkPin="",networkToken="",networkAddress="";
+    private int discoveryGeneration;
+    private void clearNetworkIdentity(){
+        networkId=networkIp=networkPin=networkToken=networkAddress="";connectionMode="ble";
+        android.content.SharedPreferences.Editor edit=getPreferences(MODE_PRIVATE).edit();
+        for(String key:new String[]{"network_id_","network_ip_","network_pin_","network_token_","network_address_","connection_mode_"})edit.remove(key+slot);
+        edit.apply();networkState();
+    }
+    private boolean networkBusy(){return provisioner!=null&&provisioner.active();}
+    private void networkState(){emit("networkMode",obj("mode",connectionMode,"id",networkId,"ip",networkIp,"paired",!networkPin.isEmpty(),"busy",networkBusy()));}
+    private void chooseConnectionMode(String mode){
+        if(!mode.equals("ble")&&!mode.equals("wifi"))return;
+        if(networkBusy()){error("请先完成 Wi-Fi 配置");networkState();return;}
+        if(!connectionMode.equals(mode)){disconnectDevice();connectionMode=mode;getPreferences(MODE_PRIVATE).edit().putString("connection_mode_"+slot,mode).apply();state("idle",mode.equals("wifi")?"请把设备屏幕的通信模式切换为 Wi-Fi，再连接局域网":"请选择蓝牙设备");}
+        networkState();
+    }
+    private void scanLan(){
+        if(closed||!foreground||configBusy||ready||lanConnecting)return;
+        if(networkId.isEmpty()||networkPin.isEmpty()){error("请先通过蓝牙进入设备设置，完成 Wi-Fi 配置和安全配对");return;}
+        int scan=++discoveryGeneration;state("scanning","正在搜索局域网中的已配对设备…");emit("scanStart",obj());
+        if(!networkIp.isEmpty())emit("device",obj("address","wifi:"+networkIp,"name",deviceName,"rssi",0,"transport","wifi"));
+        LanTransport.discover(networkId,new LanTransport.Discovery(){
+            public void found(String ip,String id){main.post(()->{if(scan!=discoveryGeneration||closed||!foreground)return;networkIp=ip;getPreferences(MODE_PRIVATE).edit().putString("network_ip_"+slot,ip).apply();networkState();emit("device",obj("address","wifi:"+ip,"name",deviceName,"rssi",0,"transport","wifi"));});}
+            public void finished(){main.post(()->{if(scan==discoveryGeneration&&!closed&&!ready&&!lanConnecting)state("idle","搜索完成；未发现时可输入屏幕显示的 IP 地址");});}
+        });
+    }
+    private void connectLan(String ip){
+        if(closed||!foreground||!pageReady||configBusy||networkBusy()||ready||lanConnecting)return;
+        if(networkPin.isEmpty()||networkToken.isEmpty()){error("请先通过蓝牙完成配网");return;}
+        try{LanTransport.validateIp(ip);}catch(IllegalArgumentException e){error(e.getMessage());return;}
+        for(DevicePanel p:panels)if(p!=this&&(p.ready||p.lanConnecting)&&networkId.equals(p.networkId)){error("设备已由通道 "+p.slot+" 连接");return;}
+        disconnectDevice();networkIp=ip;connectionMode="wifi";getPreferences(MODE_PRIVATE).edit().putString("network_ip_"+slot,ip).putString("connection_mode_"+slot,"wifi").apply();
+        lanConnecting=true;state("connecting","正在验证设备并连接局域网…");networkState();
+        LanTransport next=new LanTransport(new LanTransport.Listener(){
+            public void connected(LanTransport source){main.post(()->{if(lan!=source||closed||!foreground){source.close();return;}synchronized(transportLock){ready=true;lanConnecting=false;}state("ready","局域网已连接 · "+networkIp);networkState();});}
+            public void packet(LanTransport source,byte[] packet){if(lan!=source)return;if(packet[1]==18){enqueueControl(null,packet[2]&255,null,SystemClock.elapsedRealtime());return;}receive(null,packet);}
+            public void failed(LanTransport source,String message){main.post(()->{if(lan==source)fail(message);});}
+        });lan=next;next.connect(ip,32323,networkPin,networkToken);
+    }
+    private void configureWifi(int op,String ssid,String password){
+        if(closed||configBusy||!ready||gatt==null||networkBusy()){error("请先通过蓝牙连接设备，并等待当前配置结束");return;}
+        BluetoothGattService service=gatt.getService(SERVICE);BluetoothGattCharacteristic c=service==null?null:service.getCharacteristic(NETWORK);
+        if(c==null){error("请将 ESP32 更新到支持 Wi-Fi 的固件");return;}
+        int session=generation;
+        try{
+            WifiProvisioner next=new WifiProvisioner(gatt,c,main,new WifiProvisioner.Listener(){
+                public void status(JSONObject data){
+                    if(session!=generation)return;
+                    String id=data.optString("id"),pin=data.optString("fp"),token=data.optString("token");
+                    if(id.matches("[0-9a-f]{12}")&&pin.matches("[0-9a-f]{64}")&&token.matches("[0-9a-f]{64}")){
+                        networkId=id;networkPin=pin;networkToken=token;networkAddress=address;
+                        if(!data.optString("ip").isEmpty())networkIp=data.optString("ip");
+                        getPreferences(MODE_PRIVATE).edit().putString("network_id_"+slot,networkId).putString("network_pin_"+slot,networkPin).putString("network_token_"+slot,networkToken).putString("network_address_"+slot,networkAddress).putString("network_ip_"+slot,networkIp).apply();
+                    }
+                    data.remove("token");data.remove("fp");emit("wifiStatus",data);networkState();
+                }
+                public void networks(JSONArray rows){if(session==generation)emit("wifiScan",obj("rows",rows));}
+                public void finished(String message){if(session==generation){emit("wifiResult",obj("message",message,"busy",false));}}
+            },op,ssid,password);
+            provisioner=next;emit("wifiResult",obj("message","正在安全配网；首次使用请在手机输入屏幕上的六位配对码","busy",true));
+            long until=SystemClock.elapsedRealtime()+6500;
+            main.post(new Runnable(){public void run(){if(session!=generation||!next.active())return;if(writing){if(SystemClock.elapsedRealtime()>until){next.cancel();emit("wifiResult",obj("message","设备忙，请稍后重试","busy",false));}else main.postDelayed(this,50);return;}next.start();}});
+        }catch(IllegalArgumentException e){error(e.getMessage());}
+    }
+
     private volatile BluetoothGattDescriptor subscriptionDescriptor;
     private volatile boolean scanning, ready, writing, pageReady, closed;
     private volatile int generation = 0;
@@ -486,7 +565,20 @@ public class MainActivity extends Activity {
     private long snapshotTime;
     private final Map<String,String> scanNames=new HashMap<>();
     private final Map<String, BluetoothDevice> devices = new HashMap<>();
-    private final ArrayDeque<String> packets = new ArrayDeque<>();
+    private final TelemetryInbox received=new TelemetryInbox(512,64);
+    private final AtomicBoolean receiveDrainScheduled=new AtomicBoolean();
+    private boolean telemetryDeliveryPending;
+    private int pageGeneration;
+    private String registrySignature="";
+    private final ConnectionPriority linkPriority=new ConnectionPriority();
+    private boolean monitorVisible;
+    private final Runnable priorityTask=new Runnable(){public void run(){
+        if(closed||!ready||gatt==null)return;
+        int requested=linkPriority.poll(SystemClock.elapsedRealtime(),true);
+        if(requested>=0){boolean accepted=false;try{accepted=gatt.requestConnectionPriority(requested==1?BluetoothGatt.CONNECTION_PRIORITY_HIGH:BluetoothGatt.CONNECTION_PRIORITY_BALANCED);}catch(SecurityException ignored){}linkPriority.result(requested,accepted);}
+        long delay=linkPriority.delay(SystemClock.elapsedRealtime());if(delay>=0)main.postDelayed(this,Math.max(16,delay));
+    }};
+    private void updatePriority(){long now=SystemClock.elapsedRealtime();linkPriority.want(selected==this&&(monitorVisible||!detailKey.isEmpty()),now);main.removeCallbacks(priorityTask);long delay=linkPriority.delay(now);if(ready&&delay>=0)main.postDelayed(priorityTask,delay);}
     private int uiDropped;
     private final FeedbackQueries queries=new FeedbackQueries();
     private volatile long settingsHoldUntil;
@@ -503,7 +595,8 @@ public class MainActivity extends Activity {
     private final Handler control;
     private long writeDeadline,telemetryRetryAt;
     private FeedbackQueries.Request currentQueryWrite;
-    private final ConcurrentLinkedQueue<ControlEvent> controlEvents=new ConcurrentLinkedQueue<>();
+    private final ArrayBlockingQueue<ControlEvent> controlEvents=new ArrayBlockingQueue<>(128);
+    private final AtomicBoolean receiveOverflowPending=new AtomicBoolean();
     private final Map<String,Long> queryUiVersions=new HashMap<>();
     private long queryUiSequence;
     private final class ControlEvent {
@@ -511,6 +604,7 @@ public class MainActivity extends Activity {
         ControlEvent(BluetoothGatt source,int status,byte[] ack,long arrived){this.source=source;this.session=generation;this.sequence=writeSequence;this.status=status;this.ack=ack;this.arrived=arrived;}
     }
     private void configureTelemetry(){synchronized(transportLock){
+        updatePriority();
         boolean wantLoad=selected==this&&detailKey.isEmpty();
         if(wantsBusLoad!=wantLoad){wantsBusLoad=wantLoad;busLoadActive=false;emit("busLoadReset",obj());}
         try{int[][] rows=new int[snapshot.length()][3];
@@ -525,7 +619,7 @@ public class MainActivity extends Activity {
             }else telemetry.configure(selected==this?0:1,0,rows);
         }catch(JSONException ignored){}
     }}
-    private String packetHex(byte[] data){StringBuilder h=new StringBuilder(40);for(byte v:data)h.append(String.format(Locale.ROOT,"%02x",v&255));return h.toString();}
+    private String packetHex(byte[] data){char[] out=new char[data.length*2];final String digits="0123456789abcdef";for(int i=0;i<data.length;i++){out[i*2]=digits.charAt((data[i]&255)>>>4);out[i*2+1]=digits.charAt(data[i]&15);}return new String(out);}
     private void queryStatus(String key,boolean enabled,String message){
         int session=generation;long version=++queryUiSequence;queryUiVersions.put(key,version);
         JSONObject data=obj("key",key,"enabled",enabled,"message",message);
@@ -538,13 +632,13 @@ public class MainActivity extends Activity {
     private void queryFailure(FeedbackQueries.Failure failure){
         if(failure==null)return;
         android.util.Log.w("CANScope","channel "+slot+" query recovery kind="+failure.kind);
-        String message=failure.kind==FeedbackQueries.Failure.CONFIRMATION?"查询配置确认超时，已停止续租；蓝牙监控保持连接。正在确认设备停止，等待停止确认或租约到期后可重开":failure.kind==FeedbackQueries.Failure.SUBMISSION?"蓝牙查询配置连续提交失败，已停止续租；监控保持连接，正在确认设备停止": "尚未确认设备停止，已停止续租；蓝牙监控保持连接，等待查询租约到期";
+        String message=failure.kind==FeedbackQueries.Failure.CONFIRMATION?"查询配置确认超时，已停止续租；监控保持连接。正在确认设备停止，等待停止确认或租约到期后可重开":failure.kind==FeedbackQueries.Failure.SUBMISSION?"查询配置连续提交失败，已停止续租；监控保持连接，正在确认设备停止": "尚未确认设备停止，已停止续租；监控保持连接，等待查询租约到期";
         for(String key:failure.keys)queryStatus(key,false,message);
     }
     private void enqueueControl(BluetoothGatt source,int status,byte[] ack,long arrived){
         if(closed||source!=gatt)return;
         // Receipt is recorded before taking any lock also used by the UI.
-        controlEvents.add(new ControlEvent(source,status,ack,arrived));
+        if(!controlEvents.offer(new ControlEvent(source,status,ack,arrived))){receiveOverflow();return;}
         control.post(()->{synchronized(transportLock){drainControlEvents();}});
     }
     private void drainControlEvents(){
@@ -576,12 +670,12 @@ public class MainActivity extends Activity {
             // This runs outside the WebView/UI Looper, so per-frame drawing cannot
             // delay lease renewals or discard a confirmation already in the inbox.
             drainControlEvents();
-            if(writing&&now>=writeDeadline){fail("蓝牙写入超时，请重新连接");}
+            if(writing&&now>=writeDeadline){fail("通信写入超时，请重新连接");}
             queryFailure(queries.expire(now));
             for(String key:queries.recovered(now))queryStatus(key,false,"查询已停止，可重新开启");
-            FeedbackQueries.Request request=queries.poll(now,ready&&devicePolling&&!writing&&now>=settingsHoldUntil);
+            FeedbackQueries.Request request=queries.poll(now,ready&&!deviceWifiMode&&devicePolling&&!writing&&!networkBusy()&&now>=settingsHoldUntil);
             if(request!=null)writePacket(packetHex(request.packet),request);
-            else if(ready&&homeTelemetrySupported&&!writing&&!queries.waiting()&&now>=settingsHoldUntil&&now>=telemetryRetryAt){byte[] packet=telemetry.poll(now,true);if(packet!=null)writePacket(packetHex(packet),null);}
+            else if(ready&&!deviceWifiMode&&homeTelemetrySupported&&!writing&&!networkBusy()&&!queries.waiting()&&now>=settingsHoldUntil&&now>=telemetryRetryAt){byte[] packet=telemetry.poll(now,true);if(packet!=null)writePacket(packetHex(packet),null);}
         }
         control.postDelayed(this,20);
     }};
@@ -594,6 +688,10 @@ public class MainActivity extends Activity {
     DevicePanel(int slot) {
         this.slot = slot;
         controlThread=new HandlerThread("CAN-BLE-"+slot);controlThread.start();control=new Handler(controlThread.getLooper());
+        connectionMode=getPreferences(MODE_PRIVATE).getString("connection_mode_"+slot,"ble");
+        networkAddress=getPreferences(MODE_PRIVATE).getString("network_address_"+slot,"");
+        networkId=getPreferences(MODE_PRIVATE).getString("network_id_"+slot,"");networkIp=getPreferences(MODE_PRIVATE).getString("network_ip_"+slot,"");
+        networkPin=getPreferences(MODE_PRIVATE).getString("network_pin_"+slot,"");networkToken=getPreferences(MODE_PRIVATE).getString("network_token_"+slot,"");
         deviceName=getPreferences(MODE_PRIVATE).getString("name_"+slot,"ESP32-CAN");
         address=getPreferences(MODE_PRIVATE).getString("address_"+slot,"");
         history=new ReconnectHistory(getPreferences(MODE_PRIVATE).getString("last_success_address_"+slot,""),getPreferences(MODE_PRIVATE).getString("last_success_name_"+slot,"ESP32-CAN"));
@@ -608,7 +706,7 @@ public class MainActivity extends Activity {
         web.setWebViewClient(new WebViewClient() {
             @Override public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
                 String url = request.getUrl().toString();
-                if (url.equals(origin + "index.html") || url.equals(origin + "motors.js") || url.equals(origin + "monitor.js") || url.equals(origin + "motor_roster.js") || url.equals(origin + "motor_detail.js") || url.equals(origin + "device_settings.js") || url.equals(origin + "config_io.js")) {
+                if (url.equals(origin + "index.html") || url.equals(origin + "motors.js") || url.equals(origin + "history.js") || url.equals(origin + "monitor.js") || url.equals(origin + "motor_roster.js") || url.equals(origin + "motor_detail.js") || url.equals(origin + "device_settings.js") || url.equals(origin + "network_settings.js") || url.equals(origin + "config_io.js")) {
                     String asset = request.getUrl().getLastPathSegment();
                     try { return new WebResourceResponse(asset.endsWith(".js") ? "application/javascript" : "text/html", "UTF-8", getAssets().open(asset)); }
                     catch (Exception e) { return new WebResourceResponse("text/plain", "UTF-8", 500, "Error", null, null); }
@@ -616,6 +714,9 @@ public class MainActivity extends Activity {
                 return new WebResourceResponse("text/plain", "UTF-8", 403, "Blocked", null, null);
             }
             @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) { return true; }
+            @Override public void onPageStarted(WebView view,String url,android.graphics.Bitmap favicon) {
+                pageReady=false;pageGeneration++;telemetryDeliveryPending=false;
+            }
             @Override public void onPageFinished(WebView view, String url) {
                 if (closed) return;
                 applyStoredImport(DevicePanel.this);
@@ -625,21 +726,29 @@ public class MainActivity extends Activity {
         BluetoothManager manager = (BluetoothManager)getSystemService(BLUETOOTH_SERVICE);
         adapter = manager == null ? null : manager.getAdapter();
         web.loadUrl(origin + "index.html");
-        main.postDelayed(flushPackets, 100);
+
         control.postDelayed(queryTick,50);
     }
 
-    private final Runnable flushPackets = new Runnable() {
-        public void run() {
-            if (closed) return;
-            if (!packets.isEmpty() && pageReady) {
-                JSONArray batch = new JSONArray();
-                for (int i = 0; i < 128 && !packets.isEmpty(); i++) batch.put(packets.removeFirst());
-                emit("packets", obj("items", batch, "dropped", uiDropped));
-            }
-            main.postDelayed(this, 100);
+    private void scheduleReceiveDrain(){if(!closed&&receiveDrainScheduled.compareAndSet(false,true))main.postDelayed(drainReceived,16);}
+    private final Runnable drainReceived=new Runnable(){public void run(){
+        if(closed){receiveDrainScheduled.set(false);return;}
+        int session=generation,page=pageGeneration;JSONArray raw=new JSONArray(),samples=new JSONArray();String key=detailKey;
+        for(TelemetryInbox.Frame frame:received.drain(128,!telemetryDeliveryPending)){
+            if(frame.session!=generation||!ready)continue;
+            processReceived(frame,raw,samples,key);
         }
-    };
+        uiDropped=received.dropped();
+        if(pageReady&&(raw.length()>0||samples.length()>0)){
+            String type=samples.length()>0?"motorSamples":"packets";
+            JSONArray batch=samples.length()>0?samples:raw;
+            JSONObject data=obj("items",batch,"dropped",uiDropped,"key",key,"packets",samples.length()>0?raw:new JSONArray(),"sentAt",System.currentTimeMillis());
+            telemetryDeliveryPending=true;
+            web.evaluateJavascript("window.onNative("+JSONObject.quote(type)+","+data+")",value->{if(session!=generation||page!=pageGeneration||closed)return;telemetryDeliveryPending=false;if(received.pending(true))scheduleReceiveDrain();});
+        }
+        receiveDrainScheduled.set(false);
+        if(received.pending(!telemetryDeliveryPending))scheduleReceiveDrain();
+    }};
     private JSONObject obj(Object... pairs) {
         JSONObject out = new JSONObject();
         try { for (int i = 0; i < pairs.length; i += 2) out.put((String)pairs[i], pairs[i + 1]); }
@@ -647,9 +756,9 @@ public class MainActivity extends Activity {
         return out;
     }
     private void emit(String type, JSONObject data) {
-        int session=generation;
+        int session=generation;if(data.has("age"))try{data.put("sentAt",System.currentTimeMillis());}catch(JSONException ignored){}
         Runnable delivery=()->{if(!closed&&pageReady&&session==generation)web.evaluateJavascript("window.onNative("+JSONObject.quote(type)+","+data.toString()+")",null);};
-        main.post(delivery);
+        if(Looper.myLooper()==Looper.getMainLooper())delivery.run();else main.post(delivery);
     }
     private void state(String value, String message) {
         if(Looper.myLooper()!=Looper.getMainLooper()){int session=generation;main.post(()->{if(session==generation)state(value,message);});return;}
@@ -658,20 +767,26 @@ public class MainActivity extends Activity {
         label = value.equals("ready") ? "已连接" : value.equals("connecting") ? "连接中" : value.equals("scanning") ? "扫描中" : "未连接";
         if(value.equals("ready")||value.equals("idle"))finishReconnectAttempt(this,value.equals("ready"),message);
         renderTabs();
-        emit("state", obj("value", value, "message", message, "name", deviceName + (address.isEmpty() ? "" : " · " + address)));
+        emit("state", obj("value", value, "message", message, "transport",connectionMode,"name", deviceName + (connectionMode.equals("wifi")?" · "+networkIp:address.isEmpty()?"":" · "+address)));
     }
     private void error(String message) { emit("error", obj("message", message)); }
     private class Bridge {
+        @JavascriptInterface public void connectionMode(String mode){main.post(()->chooseConnectionMode(mode));}
+        @JavascriptInterface public void networkState(){main.post(()->DevicePanel.this.networkState());}
+        @JavascriptInterface public void wifiConfigure(int operation,String ssid,String password){main.post(()->configureWifi(operation,ssid,password));}
+        @JavascriptInterface public void connectLan(String ip){main.post(()->DevicePanel.this.connectLan(ip));}
+
         @JavascriptInterface public void showDetail(String key){int session=generation;main.post(()->{if(closed||session!=generation)return;boolean found=false;for(int i=0;i<snapshot.length();i++)if(key.equals(snapshot.optJSONObject(i).optString("key")))found=true;if(!found)return;detailKey=key;select(DevicePanel.this);});}
         @JavascriptInterface public void setChartFullscreen(boolean enabled){int session=generation;String motorKey=detailKey;main.post(()->{if(closed||session!=generation||!motorKey.equals(detailKey))return;if(enabled)enterChartFullscreen(DevicePanel.this,session,motorKey);else if(chartPanel==DevicePanel.this&&chartMotorKey.equals(motorKey))exitChartFullscreen(false);});}
         @JavascriptInterface public void leaveDetail(){int session=generation;main.post(()->{if(closed||session!=generation)return;if(chartPanel==DevicePanel.this)exitChartFullscreen(true);detailKey="";for(DevicePanel p:panels)p.configureTelemetry();renderTabs();});}
         @JavascriptInterface public void home(){main.post(()->showHome());}
+        @JavascriptInterface public void setMonitorVisible(boolean visible){int session=generation;main.post(()->{if(closed||session!=generation)return;monitorVisible=visible;updatePriority();});}
         @JavascriptInterface public void dashboard(String json) { main.post(()->{
             if(closed||!pageReady||json==null||json.length()>65536)return;
-            try{JSONArray list=new JSONArray(json);if(list.length()<=32){snapshot=list;snapshotTime=SystemClock.elapsedRealtime();configureTelemetry();updateHome();}}catch(JSONException ignored){}
+            try{JSONArray list=new JSONArray(json);if(list.length()<=32){JSONArray rules=new JSONArray();for(int i=0;i<list.length();i++){JSONObject motor=list.getJSONObject(i);rules.put(motor.getString("key")+"|"+motor.optInt("sampleHz",100));}String signature=rules.toString();snapshot=list;snapshotTime=SystemClock.elapsedRealtime();if(!registrySignature.equals(signature)){registrySignature=signature;configureTelemetry();}scheduleHomeUpdate();}}catch(JSONException ignored){}
         }); }
-        @JavascriptInterface public void scan() { int epoch=connectionEpoch;main.post(() -> {if(epoch==connectionEpoch)beginScan();}); }
-        @JavascriptInterface public void connect(String address) { int epoch=connectionEpoch;main.post(() -> {if(epoch==connectionEpoch)connectDevice(address);}); }
+        @JavascriptInterface public void scan() { int epoch=connectionEpoch;main.post(() -> {if(epoch==connectionEpoch){if(connectionMode.equals("wifi"))scanLan();else beginScan();}}); }
+        @JavascriptInterface public void connect(String address) { int epoch=connectionEpoch;main.post(() -> {if(epoch==connectionEpoch){if(address.startsWith("wifi:"))connectLan(address.substring(5));else connectDevice(address);}}); }
         @JavascriptInterface public void disconnect() { main.post(() -> { disconnectDevice(); state("idle", "已断开连接"); }); }
         @JavascriptInterface public void setPolling(String key,int motorId,boolean enabled,int hz){int session=generation;control.post(()->{synchronized(transportLock){
             if(closed||session!=generation)return;
@@ -763,11 +878,13 @@ public class MainActivity extends Activity {
     }
     private void startConnection(BluetoothDevice device,String address,String name,boolean batch) {
         if(closed||!foreground||!pageReady||configBusy){if(batch){reconnectFailed++;reconnectResults.put(slot,"页面或配置处理中，请稍后重试");}return;}
-        if(ready||gatt!=null){if(batch)reconnectResults.put(slot,"已连接或正在连接，已跳过");return;}
+        if(ready||gatt!=null||lanConnecting){if(batch)reconnectResults.put(slot,"已连接或正在连接，已跳过");return;}
         if(!connectionPermission()){if(batch){reconnectFailed++;reconnectResults.put(slot,"蓝牙连接权限已失效");}else error("需要附近设备权限，请先扫描授权");return;}
         int owner=ReconnectHistory.claimingSlot(reconnectChannels(),address,slot);
         if(owner!=0){String message="该设备已在通道 "+owner+" 连接，请切换到该通道操作";if(batch)reconnectResults.put(slot,message);else error(message);return;}
         disconnectDevice();
+        if(!networkAddress.isEmpty()&&!networkAddress.equals(address))clearNetworkIdentity();
+        connectionMode="ble";
         this.address = address;
         deviceName = name;
         history.begin(address);
@@ -782,17 +899,20 @@ public class MainActivity extends Activity {
         } catch (Exception e) { fail("连接失败：" + e.getMessage()); }
     }
     private void disconnectDevice() {
+        discoveryGeneration++;
+        WifiProvisioner pending=provisioner;if(pending!=null)pending.cancel();provisioner=null;
+        LanTransport oldLan=lan;lan=null;lanConnecting=false;if(oldLan!=null)oldLan.close();
         BluetoothGatt old;
         synchronized(transportLock){
             imuSupported=false;devicePolling=false;homeTelemetrySupported=false;detailSupported=false;detailMaxHz=0;busLoadActive=false;telemetry.reset();
             generation++;for(String key:queries.keys())queryStatus(key,false,"连接已断开，查询已停止");queries.reset();queryUiVersions.clear();controlEvents.clear();settingsHoldUntil=0;
-            ready=false;writing=false;writer=null;subscriptionDescriptor=null;currentQueryWrite=null;telemetryWrite=queryWrite=false;telemetryRetryAt=0;history.failed();
+            ready=false;deviceWifiMode=false;writing=false;writer=null;subscriptionDescriptor=null;currentQueryWrite=null;telemetryWrite=queryWrite=false;telemetryRetryAt=0;history.failed();
             old=gatt;gatt=null;
             emit("busLoadReset",obj());
         }
         closeChartForDisconnectedPanel(this);
         stopScan();
-        int session=generation;Runnable cleanup=()->{if(session==generation)packets.clear();};if(Looper.myLooper()==Looper.getMainLooper())cleanup.run();else main.post(cleanup);
+        int session=generation;Runnable cleanup=()->{if(session==generation){received.clear();receiveOverflowPending.set(false);telemetryDeliveryPending=false;receiveDrainScheduled.set(false);main.removeCallbacks(drainReceived);main.removeCallbacks(priorityTask);linkPriority.reset();}};if(Looper.myLooper()==Looper.getMainLooper())cleanup.run();else main.post(cleanup);
         if(old!=null){try{old.disconnect();}catch(Exception ignored){}old.close();}
     }
     private void fail(String message) { disconnectDevice(); state("idle", message); error(message); }
@@ -823,7 +943,7 @@ public class MainActivity extends Activity {
             if (g != gatt||descriptor!=subscriptionDescriptor||!CCCD.equals(descriptor.getUuid())||descriptor.getCharacteristic()==null||!NOTIFY.equals(descriptor.getCharacteristic().getUuid())) return;
             if (status != 0) { fail("订阅失败：" + status); return; }
             synchronized(transportLock){if(g!=gatt||ready)return;ready=true;subscriptionDescriptor=null;if(history.subscribed(address,deviceName))saveReconnectHistory();}
-            g.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH);
+            updatePriority();
             state("ready", "已连接 · 正在接收实时数据");
         }); }
         @Override public void onCharacteristicChanged(BluetoothGatt g, BluetoothGattCharacteristic characteristic, byte[] value) {
@@ -832,67 +952,89 @@ public class MainActivity extends Activity {
         @Override public void onCharacteristicChanged(BluetoothGatt g, BluetoothGattCharacteristic characteristic) {
             if (Build.VERSION.SDK_INT < 33 && NOTIFY.equals(characteristic.getUuid())) receive(g, characteristic.getValue());
         }
+        @Override public void onCharacteristicRead(BluetoothGatt g,BluetoothGattCharacteristic c,byte[] value,int status){networkRead(g,c,value,status);}
+        @Override public void onCharacteristicRead(BluetoothGatt g,BluetoothGattCharacteristic c,int status){if(Build.VERSION.SDK_INT<33)networkRead(g,c,c.getValue(),status);}
+        private void networkRead(BluetoothGatt g,BluetoothGattCharacteristic c,byte[] value,int status){if(NETWORK.equals(c.getUuid()))main.post(()->{WifiProvisioner p=provisioner;if(g==gatt&&p!=null&&p.gatt==g)p.readResult(status,value);});}
         @Override public void onCharacteristicWrite(BluetoothGatt g,BluetoothGattCharacteristic characteristic,int status){
+            if(NETWORK.equals(characteristic.getUuid())){main.post(()->{WifiProvisioner p=provisioner;if(g==gatt&&p!=null&&p.gatt==g)p.written(status);});return;}
+
             if(WRITE.equals(characteristic.getUuid()))enqueueControl(g,status,null,SystemClock.elapsedRealtime());
         }
 
     };
+    private void receiveOverflow(){if(receiveOverflowPending.compareAndSet(false,true)){int session=generation;main.post(()->{if(session==generation&&!closed)fail("设备状态队列拥塞，请重新连接");});}}
     private void receive(BluetoothGatt g, byte[] data) {
-        if (data == null || data.length != 20 || data[0] != 1) return;
-        if(data[1]==8){enqueueControl(g,0,data.clone(),SystemClock.elapsedRealtime());return;}
-        char[] encoded=new char[40];final String digits="0123456789abcdef";
-        for(int i=0;i<20;i++){encoded[i*2]=digits.charAt((data[i]&255)>>>4);encoded[i*2+1]=digits.charAt(data[i]&15);}
-        String value=new String(encoded);
-        main.post(() -> {
-            if (g != gatt || !ready) return;
+        if(closed||g!=gatt||data==null||data.length!=20||data[0]!=1)return;
+        if(data[1]==17&&g!=null){int session=generation;boolean wifi=data[2]!=0;main.post(()->{
+            if(session!=generation||g!=gatt||wifi==deviceWifiMode)return;
+            synchronized(transportLock){deviceWifiMode=wifi;for(String key:queries.keys())queryStatus(key,false,"设备通信模式已切换，查询已停止");queries.reset();telemetry.reset();devicePolling=homeTelemetrySupported=false;writing=false;currentQueryWrite=null;received.clear();}
+            state("ready",wifi?"设备为 Wi-Fi 模式：蓝牙可配网；接收数据请切换 App 通信方式":"设备已切回蓝牙，可重新开启查询");emit("deviceMode",obj("wifi",wifi));
+        });return;}
+        long arrived=SystemClock.elapsedRealtime();
+        if(data[1]==8){enqueueControl(g,0,data.clone(),arrived);return;}
+        if(!received.offer(data,generation,arrived)){
+            receiveOverflow();return;
+        }
+        scheduleReceiveDrain();
+    }
+    private void processReceived(TelemetryInbox.Frame frame,JSONArray raw,JSONArray samples,String batchKey){
+        byte[] data=frame.data;long age=Math.max(0,SystemClock.elapsedRealtime()-frame.arrived);
+        String value=packetHex(data);
             synchronized(transportLock){
                 if(settingType==0x13&&data[1]==7&&data[2]!=0)settingsHoldUntil=0;
                 if(settingType==0x12&&data[1]==5){int token=(data[16]&255)|((data[17]&255)<<8)|((data[18]&255)<<16)|((data[19]&255)<<24);if(token==settingToken&&token!=0)settingsHoldUntil=0;}
             }
             if(data[1]==15){synchronized(transportLock){imuSupported=(data[2]&1)!=0;configureTelemetry();updateHome();}return;}
             if(data[1]==5){synchronized(transportLock){devicePolling=(data[3]&8)!=0;homeTelemetrySupported=(data[3]&64)!=0;detailSupported=(data[3]&128)!=0;int max=java.nio.ByteBuffer.wrap(data).order(java.nio.ByteOrder.LITTLE_ENDIAN).getInt(12);detailMaxHz=detailSupported&&max>=1&&max<=1000?max:0;configureTelemetry();}}
+            if(data[1]==16){synchronized(transportLock){
+                Integer[] values=telemetry.temperatures(data);
+                if(values!=null){
+                    JSONArray temperatures=new JSONArray();for(Integer temperature:values)temperatures.put(temperature==null?JSONObject.NULL:temperature);
+                    emit("motorTemperatures",obj("start",data[2]&255,"count",data[3]&255,"temperatures",temperatures,"age",age));
+                }
+                return;
+            }}
             if(data[1]==9||data[1]==10){synchronized(transportLock){
                 java.nio.ByteBuffer b=java.nio.ByteBuffer.wrap(data).order(java.nio.ByteOrder.LITTLE_ENDIAN);
                 int revision=b.getInt(16);
                 if(telemetry.accept(revision)){
-                    if(data[1]==10){telemetry.acknowledge(revision);packets.clear();busLoadActive=wantsBusLoad&&data[2]==0;emit("telemetryMode",obj("quiet",data[2]==1,"mode",data[2]&255,"hz",b.getInt(8)));}
-                    else emit("onlineSummary",obj("online",b.getInt(4),"seen",b.getInt(8),"count",data[3]&255));
+                    if(data[1]==10){telemetry.acknowledge(revision);received.discardData();busLoadActive=wantsBusLoad&&data[2]==0;emit("telemetryMode",obj("quiet",data[2]==1,"mode",data[2]&255,"hz",b.getInt(8)));}
+                    else emit("onlineSummary",obj("online",b.getInt(4),"seen",b.getInt(8),"count",data[3]&255,"age",age));
                 }
                 return;
             }}
             if(data[1]==11){synchronized(transportLock){
                 int revision=java.nio.ByteBuffer.wrap(data).order(java.nio.ByteOrder.LITTLE_ENDIAN).getInt(4);
                 if(selected==this&&!detailKey.isEmpty()&&telemetry.accept(revision)){
-                    emit("motorSample",obj("key",detailKey,"hex",value));
+                    if(detailKey.equals(batchKey))samples.put(obj("hex",value,"age",age));
                 }
                 return;
             }}
             if(data[1]==12){synchronized(transportLock){
                 java.nio.ByteBuffer b=java.nio.ByteBuffer.wrap(data).order(java.nio.ByteOrder.LITTLE_ENDIAN);
-                if(selected==this&&!detailKey.isEmpty()&&telemetry.accept(b.getInt(16)))emit("motorRates",obj("key",detailKey,"received",b.getInt(4),"sampled",b.getInt(8),"elapsed",b.getInt(12)));
+                if(selected==this&&!detailKey.isEmpty()&&telemetry.accept(b.getInt(16)))emit("motorRates",obj("key",detailKey,"received",b.getInt(4),"sampled",b.getInt(8),"elapsed",b.getInt(12),"age",age));
                 return;
             }}
             if(data[1]==13||data[1]==14){
                 // Device-wide load is independent of the lossy raw-frame queue.
                 // Only a confirmed full-telemetry channel may display this window.
-                if(selected==this&&detailKey.isEmpty()&&busLoadActive)emit(data[1]==13?"busLoad":"busRates",obj("hex",value));
+                if(selected==this&&detailKey.isEmpty()&&busLoadActive)emit(data[1]==13?"busLoad":"busRates",obj("hex",value,"age",age));
                 return;
             }
             if(data[1]==7&&data[2]!=2&&(data[3]&255)>0&&(data[3]&255)<=16){
                 String reportedName=new String(data,4,data[3]&255,java.nio.charset.StandardCharsets.UTF_8);
                 if(!reportedName.equals(deviceName)){deviceName=reportedName;getPreferences(MODE_PRIVATE).edit().putString("name_"+slot,deviceName).apply();}
                 if(history.renamed(address,reportedName))saveReconnectHistory();
-                emit("deviceInfo",obj("name",deviceName+" · "+address));updateHome();
+                emit("deviceInfo",obj("name",deviceName+" · "+(lan!=null?networkIp:address)));updateHome();
             }
             // Old queued raw packets cannot enter a motor detail page.
             if(selected!=null&&!selected.detailKey.isEmpty()&&data[1]>=1&&data[1]<=4)return;
-            if (packets.size() >= 512) { packets.removeFirst(); uiDropped++; }
-            packets.addLast(value);
-        });
+            raw.put(obj("hex",value,"age",age));
     }
     private void writePacket(String hex,FeedbackQueries.Request queryRequest) {
         long now=SystemClock.elapsedRealtime();
-        if(!ready||gatt==null||writer==null||writing){if(queryRequest!=null)queryFailure(queries.rejected(queryRequest,now));else error(writing?"上一项设置正在保存，请稍后重试":"请先连接 ESP32");return;}
+        if(deviceWifiMode){if(queryRequest!=null)queryFailure(queries.rejected(queryRequest,now));else error("设备当前为 Wi-Fi 模式；请切换 App 通信方式，或把设备切回蓝牙");return;}
+        if(!ready||(lan==null&&(gatt==null||writer==null))||writing||networkBusy()){if(queryRequest!=null)queryFailure(queries.rejected(queryRequest,now));else error(writing?"上一项设置正在保存，请稍后重试":"请先连接 ESP32");return;}
         if(hex==null||!hex.matches("[0-9a-fA-F]{40}")){if(queryRequest!=null)queryFailure(queries.rejected(queryRequest,now));else error("指令格式错误");return;}
         byte[] data=new byte[20];for(int i=0;i<20;i++)data[i]=(byte)Integer.parseInt(hex.substring(i*2,i*2+2),16);
         if(!MonitorCommands.allowed(data)){if(queryRequest!=null)queryFailure(queries.rejected(queryRequest,now));else error("监控版仅支持设备设置和达妙反馈查询");return;}
@@ -901,7 +1043,8 @@ public class MainActivity extends Activity {
         writeSequence++;
         boolean ok;
         try{
-            if(Build.VERSION.SDK_INT>=33)ok=gatt.writeCharacteristic(writer,data,BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)==BluetoothStatusCodes.SUCCESS;
+            if(lan!=null)ok=lan.send(data);
+            else if(Build.VERSION.SDK_INT>=33)ok=gatt.writeCharacteristic(writer,data,BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)==BluetoothStatusCodes.SUCCESS;
             else{writer.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);writer.setValue(data);ok=gatt.writeCharacteristic(writer);}
         }catch(Exception e){if(queryRequest!=null)queryFailure(queries.rejected(queryRequest,now));else error("蓝牙写入失败："+e.getMessage());return;}
         if(!ok){if(queryRequest!=null)queryFailure(queries.rejected(queryRequest,now));else{if(data[1]==0x16||data[1]==0x17){telemetry.failed();telemetryRetryAt=now+200;}else error("蓝牙繁忙，请重试");}return;}
@@ -916,7 +1059,7 @@ public class MainActivity extends Activity {
         web.removeJavascriptInterface("CanAndroid"); web.destroy();
     }
     private void saveReconnectHistory(){getPreferences(MODE_PRIVATE).edit().putString("last_success_address_"+slot,history.address()).putString("last_success_name_"+slot,history.name()).apply();}
-    private void clearReconnectHistory(){history.clear();getPreferences(MODE_PRIVATE).edit().remove("last_success_address_"+slot).remove("last_success_name_"+slot).apply();}
+    private void clearReconnectHistory(){clearNetworkIdentity();history.clear();getPreferences(MODE_PRIVATE).edit().remove("last_success_address_"+slot).remove("last_success_name_"+slot).apply();}
 
     }
 }

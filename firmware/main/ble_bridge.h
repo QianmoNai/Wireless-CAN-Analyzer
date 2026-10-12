@@ -7,6 +7,8 @@
 // Wire protocol: fixed 20-byte little-endian packets, see PROTOCOL.md.
 typedef struct { uint8_t bytes[20]; } bridge_packet_t;
 void ble_bridge_init(QueueHandle_t commands, QueueHandle_t query_commands);
+int ble_bridge_command(const uint8_t bytes[20]);
+void ble_bridge_reset_session(void);
 void ble_bridge_publish(const bridge_packet_t *packet);
 uint32_t ble_bridge_dropped(void);
 bool ble_bridge_connected(void);

@@ -1,0 +1,28 @@
+package dev.qianmo.canview;
+import java.util.*;
+public class TelemetryInboxTest{
+ static void check(boolean b){if(!b)throw new AssertionError();}
+ static byte[] packet(int type,int value){byte[] p=new byte[20];p[0]=1;p[1]=(byte)type;p[8]=(byte)value;return p;}
+ public static void main(String[] args)throws Exception{
+  TelemetryInbox q=new TelemetryInbox(3,2);
+  for(int i=0;i<10;i++)check(q.offer(packet(11,i),7,100+i));
+  check(q.dropped()==7);check(q.offer(packet(10,50),7,90));check(q.offer(packet(9,51),7,91));
+  check(!q.offer(packet(7,52),7,92));
+  List<TelemetryInbox.Frame> m=q.drain(10,false);check(m.size()==2&&m.get(0).data[1]==10&&m.get(1).data[1]==9);
+  check(q.pending(true)&&!q.pending(false));
+  List<TelemetryInbox.Frame> d=q.drain(2,true);check(d.size()==2&&d.get(0).data[8]==7&&d.get(0).arrived==107&&d.get(0).session==7);
+  check(d.get(1).data[8]==8&&q.drain(10,true).get(0).data[8]==9);
+  byte[] p=packet(1,42);q.offer(p,8,200);p[8]=99;check(q.drain(1,true).get(0).data[8]==42);
+  q.offer(packet(11,1),8,201);q.offer(packet(10,2),8,202);q.discardData();check(q.drain(10,true).size()==1);
+  byte[] tx=packet(2,3);check(TelemetryInbox.ordinary(tx));tx[16]=1;check(!TelemetryInbox.ordinary(tx));
+  q.clear();check(q.dropped()==0&&!q.pending(true));
+  for(int type:new int[]{4,5,12,13,14,16})check(!TelemetryInbox.ordinary(packet(type,0)));
+  check(q.offer(packet(13,20),8,300));for(int i=0;i<100;i++)check(q.offer(packet(1,i),8,301+i));
+  check(q.drain(1,false).get(0).data[1]==13);q.clear();
+  TelemetryInbox concurrent=new TelemetryInbox(512,64);
+  Thread writer=new Thread(()->{for(int i=0;i<20000;i++)check(concurrent.offer(packet(1,i),9,i));});writer.start();
+  int received=0;while(writer.isAlive()||concurrent.pending(true))received+=concurrent.drain(128,true).size();writer.join();
+  check(received+concurrent.dropped()==20000);
+  System.out.println("PASS: bounded ingress, newest telemetry, management isolation/overflow, immutable receipt time/session, UI backpressure, reset and concurrent accounting.");
+ }
+}

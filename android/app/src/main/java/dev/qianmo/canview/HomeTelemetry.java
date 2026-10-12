@@ -24,4 +24,15 @@ final class HomeTelemetry {
  void failed(){reset();}
  int revision(){return revision;}
  boolean quiet(){return sentMode==1;}
+ /** Decode only the current quiet-mode registry; null values mean no fresh feedback. */
+ Integer[] temperatures(byte[] p){
+  if(p==null||p.length!=20||p[0]!=1||p[1]!=16||sentMode!=1||!accept(java.nio.ByteBuffer.wrap(p).order(java.nio.ByteOrder.LITTLE_ENDIAN).getInt(16)))return null;
+  int start=p[2]&255,count=p[3]&255;
+  if(count!=sent.length||count==0||count>32||start>=count||start%10!=0)return null;
+  int length=Math.min(10,count-start),fresh=(p[4]&255)|((p[5]&255)<<8);
+  if((fresh>>length)!=0)return null;
+  Integer[] result=new Integer[length];
+  for(int i=0;i<length;i++)if((fresh&(1<<i))!=0&&sent[start+i][0]!=2)result[i]=p[6+i]&255;
+  return result;
+ }
 }

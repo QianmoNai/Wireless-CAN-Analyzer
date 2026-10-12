@@ -1,9 +1,11 @@
 #include "sdkconfig.h"
 #include "board_ui.h"
+#include "network_link.h"
+#include "dual_link.h"
 #if CONFIG_CAN_LOCAL_PANEL
-#include <string.h>
-#include <stdatomic.h>
 #include "board_ui_render.h"
+#include "board_ui_animation.h"
+#include "board_buzzer.h"
 #include "driver/gpio.h"
 #include "driver/ledc.h"
 #include "driver/spi_master.h"
@@ -15,22 +17,23 @@
 #include "esp_timer.h"
 #include "freertos/task.h"
 #include "nvs.h"
+#ifdef CAN_PANEL_BENCHMARK
+#include <stdio.h>
+#include <inttypes.h>
+#endif
 
 enum { PIN_BT1=1, PIN_BT2=2, PIN_BT3=7, PIN_BACKLIGHT=6, PIN_RESET=8,
-       PIN_DC=9, PIN_CS=10, PIN_MOSI=11, PIN_CLOCK=12, PIN_BUZZER=13 };
+       PIN_DC=9, PIN_CS=10, PIN_MOSI=11, PIN_CLOCK=12 };
 static const char *TAG="board_ui";
 static portMUX_TYPE snapshot_lock=portMUX_INITIALIZER_UNLOCKED;
 static ui_snapshot_t shared={.bitrate=1000000};
-static atomic_bool capture_frames;
 static TaskHandle_t display_task;
 
 void board_ui_observe(const bridge_packet_t *p)
 {
     unsigned type=p->bytes[1];
-    bool frame=type>=1 && type<=3;
-    if (frame && (!atomic_load_explicit(&capture_frames,memory_order_relaxed) ||
-        (type==3 && (p->bytes[2]&0xfc)==0x80))) return;
-    if (!frame && type!=4 && type!=5 && type!=13 && type!=14) return;
+    // The local panel only observes aggregate statistics, never frame payloads.
+    if (type!=4 && type!=5 && type!=13 && type!=14) return;
     portENTER_CRITICAL(&snapshot_lock);
     ui_snapshot_packet(&shared,p->bytes);
     portEXIT_CRITICAL(&snapshot_lock);
@@ -57,6 +60,9 @@ static bool color_done(esp_lcd_panel_io_handle_t io, esp_lcd_panel_io_event_data
 {
     BaseType_t wake=pdFALSE;
     vTaskNotifyGiveFromISR(display_task,&wake);
+    // IDF 6.0.2's SPI panel post-callback discards this function's bool.
+    // Yield here so a completed DMA does not wait for the 100Hz OS tick.
+    if(wake==pdTRUE)portYIELD_FROM_ISR();
     return wake==pdTRUE;
 }
 static esp_err_t backlight(unsigned percent)
@@ -67,9 +73,10 @@ static esp_err_t backlight(unsigned percent)
 static esp_err_t setup_io(void)
 {
     // Establish safe low outputs before installing PWM or panel drivers.
-    gpio_set_level(PIN_BUZZER,0); gpio_set_level(PIN_BACKLIGHT,0);
-    gpio_config_t outputs={.pin_bit_mask=(1ULL<<PIN_BUZZER)|(1ULL<<PIN_BACKLIGHT),.mode=GPIO_MODE_OUTPUT};
+    gpio_set_level(PIN_BACKLIGHT,0);
+    gpio_config_t outputs={.pin_bit_mask=1ULL<<PIN_BACKLIGHT,.mode=GPIO_MODE_OUTPUT};
     esp_err_t err=gpio_config(&outputs); if (err!=ESP_OK) return err;
+    err=board_buzzer_init(); if(err!=ESP_OK)return err;
     gpio_config_t buttons={.pin_bit_mask=(1ULL<<PIN_BT1)|(1ULL<<PIN_BT2)|(1ULL<<PIN_BT3),
         .mode=GPIO_MODE_INPUT,.pull_up_en=GPIO_PULLUP_ENABLE};
     err=gpio_config(&buttons); if (err!=ESP_OK) return err;
@@ -83,7 +90,7 @@ static esp_err_t setup_io(void)
 static esp_err_t setup_panel(esp_lcd_panel_handle_t *panel, esp_lcd_panel_io_handle_t *io)
 {
     spi_bus_config_t bus={.sclk_io_num=PIN_CLOCK,.mosi_io_num=PIN_MOSI,.miso_io_num=-1,
-        .quadwp_io_num=-1,.quadhd_io_num=-1,.max_transfer_sz=UI_WIDTH*UI_BAND_HEIGHT*2};
+        .quadwp_io_num=-1,.quadhd_io_num=-1,.max_transfer_sz=UI_DMA_PIXELS*2};
     esp_err_t err=spi_bus_initialize(SPI2_HOST,&bus,SPI_DMA_CH_AUTO);
     if (err!=ESP_OK) return err;
     esp_lcd_panel_io_spi_config_t config={.cs_gpio_num=PIN_CS,.dc_gpio_num=PIN_DC,
@@ -111,94 +118,176 @@ fail:
     spi_bus_free(SPI2_HOST);
     return err;
 }
+typedef struct {
+    ui_model_t model;
+    ui_snapshot_t snapshot;
+    ui_render_pose_t pose;
+    bool save_failed;
+} ui_frame_t;
+
 static void ui_task(void *arg)
 {
     display_task=xTaskGetCurrentTaskHandle();
     ui_model_t ui; ui_model_init(&ui,load_settings());
+    ui_animation_t animation;ui_animation_init(&animation,&ui);
+    network_set_mode(ui_mode(&ui));
     uint32_t persisted=ui_model_settings(&ui), changed_at=0, retry_at=0;
     bool save_failed=false, panel_ready=false;
     ui_button_t keys[3]={0}; const int pins[]={PIN_BT1,PIN_BT2,PIN_BT3};
     esp_lcd_panel_handle_t panel=NULL; esp_lcd_panel_io_handle_t io=NULL;
-    uint16_t *pixels=NULL;
+    uint16_t *pixels[2]={NULL,NULL};
     esp_err_t err=setup_io();
-    if (err==ESP_OK) pixels=heap_caps_malloc(UI_WIDTH*UI_BAND_HEIGHT*2,MALLOC_CAP_DMA|MALLOC_CAP_INTERNAL);
-    if (err==ESP_OK && !pixels) err=ESP_ERR_NO_MEM;
+    for(unsigned i=0;i<2 && err==ESP_OK;i++){
+        pixels[i]=heap_caps_malloc(UI_DMA_PIXELS*2,MALLOC_CAP_DMA|MALLOC_CAP_INTERNAL);
+        if(!pixels[i])err=ESP_ERR_NO_MEM;
+    }
     if (err==ESP_OK) err=setup_panel(&panel,&io);
     if (err!=ESP_OK) {
         ESP_LOGE(TAG,"Local panel init failed: %s; CAN/BLE continue",esp_err_to_name(err));
-        gpio_set_level(PIN_BUZZER,0); heap_caps_free(pixels); vTaskDelete(NULL); return;
+        board_buzzer_stop();heap_caps_free(pixels[0]);heap_caps_free(pixels[1]);vTaskDelete(NULL);return;
     }
-    ESP_LOGI(TAG,"172x320 ST7789, SPI 20MHz, keys 1/2/7, backlight 6, buzzer 13");
-    ui_snapshot_t snapshot={0}; ui_model_t drawn=ui;
-    uint32_t next_frame=0, last_failed=0, last_alarm=0, beep_until=0;
-    bool alarm_started=false, last_bus_off=false, applied_rotation=!ui.rotated;
-    uint8_t applied_brightness=0;
-    int band=0;
+    ESP_LOGI(TAG,"172x320 ST7789, SPI 20MHz, animated UI, keys 1/2/7");
+    ui_frame_t frame={0}, previous={0};
+    uint32_t next_frame=0, last_failed=0, last_alarm=0, beep_until=0, bands=0;
+    bool alarm_started=false, last_bus_off=false, beep_active=false;
+    bool requested=true, rendering=false, transfer_pending=false, previous_valid=false;
+    uint8_t applied_brightness=0, applied_rotation=UINT8_MAX;
+    unsigned buffer=0;
+#ifdef CAN_PANEL_BENCHMARK
+    uint32_t benchmark_next=2000;
+    unsigned benchmark_action=0, benchmark_bands=0;
+    int64_t benchmark_start=0;
+#endif
     for (;;) {
         uint32_t now=(uint32_t)(esp_timer_get_time()/1000);
         uint32_t before=ui_model_settings(&ui);
+#ifdef CAN_PANEL_BENCHMARK
+        // Local, non-persistent navigation only: no network or CAN commands.
+        if(!rendering && benchmark_action<4 && (int32_t)(now-benchmark_next)>=0){
+            ui_model_key(&ui,1,(benchmark_action&1)?KEY_LONG:KEY_SHORT);
+            requested=true;benchmark_action++;benchmark_next=now+1200;
+            printf("PANEL_ACTION %u at=%"PRIu32" page=%u\n",benchmark_action,now,ui.page);
+        }
+#endif
         for (unsigned i=0;i<3;i++) {
             ui_key_event_t event=ui_button_sample(&keys[i],gpio_get_level(pins[i])==0,now);
             if (event==KEY_NONE) continue;
-            ui_model_key(&ui,i,event);
-            if (ui.sound && (event==KEY_SHORT || i==2)) beep_until=now+25;
+            uint8_t previous_volume=ui.volume;
+            if(ui.link_menu) {
+                ui_key_role_t key=ui_key_role(ui.rotation,i);
+                if(event==KEY_LONG&&key==UI_KEY_ACTION){dual_link_button(DUAL_BUTTON_CANCEL);ui.link_menu=false;}
+                else if(event==KEY_SHORT)dual_link_button(key==UI_KEY_ACTION?DUAL_BUTTON_MIDDLE:key==UI_KEY_PREVIOUS?DUAL_BUTTON_PREVIOUS:DUAL_BUTTON_NEXT);
+            } else ui_model_key(&ui,i,event);
+            requested=true;
+            if (ui.sound && (event==KEY_SHORT || ui_key_role(ui.rotation,i)==UI_KEY_ACTION)) {
+                beep_until=now+(previous_volume!=ui.volume?80:25);beep_active=true;
+            }
         }
+        ui_animation_target(&animation,&ui,now);
+        ui_render_pose_t pose;
+        bool animating=ui_animation_sample(&animation,now,&pose);
+        network_set_mode(ui_mode(&ui));
+        if(!ui.sound || (beep_active && (int32_t)(beep_until-now)<=0))beep_active=false;
+        err=board_buzzer_set(beep_active,ui.volume);
+        if(err!=ESP_OK)break;
         uint32_t current=ui_model_settings(&ui);
         if (current!=before) { changed_at=now; retry_at=now+1500; }
-        if (current!=persisted && (uint32_t)(now-changed_at)>=1500 && (int32_t)(now-retry_at)>=0) {
-            err=save_settings(current); save_failed=err!=ESP_OK;
+        // Flash commits cannot pause an animation or extend a short beep.
+        if (!rendering && !animating && !beep_active && current!=persisted &&
+            (uint32_t)(now-changed_at)>=1500 && (int32_t)(now-retry_at)>=0) {
+            err=save_settings(current);
+            bool failed=err!=ESP_OK;
+            if(failed!=save_failed)requested=true;
+            save_failed=failed;
             if (!save_failed) persisted=current;
             else { ESP_LOGW(TAG,"Settings not saved: %s",esp_err_to_name(err)); retry_at=now+10000; }
         }
-        atomic_store_explicit(&capture_frames,ui.page==UI_TRAFFIC&&!ui.paused,memory_order_relaxed);
         if (panel_ready && ui.brightness!=applied_brightness) {
             err=backlight(ui.brightness);
             if (err!=ESP_OK) break;
             applied_brightness=ui.brightness;
         }
-        if (band==0 && (int32_t)(now-next_frame)>=0) {
-            ui_snapshot_t latest;
-            portENTER_CRITICAL(&snapshot_lock); latest=shared; portEXIT_CRITICAL(&snapshot_lock);
-            // Keep the visible frame list exactly frozen while paused.
-            if (ui.page==UI_TRAFFIC && ui.paused) {
-                memcpy(latest.frames,snapshot.frames,sizeof(latest.frames)); latest.frame_count=snapshot.frame_count;
-            }
-            snapshot=latest; snapshot.connected=ble_bridge_connected(); drawn=ui;
-            bool new_fault=snapshot.failed!=last_failed || (snapshot.state==3&&!last_bus_off);
-            last_failed=snapshot.failed; last_bus_off=snapshot.state==3;
+        if (!rendering && (requested || (int32_t)(now-next_frame)>=0)) {
+            frame.model=ui;frame.pose=pose;frame.save_failed=save_failed;
+            portENTER_CRITICAL(&snapshot_lock);frame.snapshot=shared;portEXIT_CRITICAL(&snapshot_lock);
+            frame.snapshot.connected=ble_bridge_connected();
+            uint32_t code;network_display(&frame.snapshot.wifi_state,frame.snapshot.ip,&code);
+            frame.snapshot.pairing=code!=UINT32_MAX&&!ui.dual_role;frame.snapshot.pairing_code=code;
+            dual_link_view(&frame.snapshot.dual);
+            if(ui.dual_role){frame.snapshot.connected=dual_link_connected();if(frame.snapshot.wifi_state==4)frame.snapshot.dual.state=DUAL_UI_ERROR;}
+            bool new_fault=frame.snapshot.failed!=last_failed || (frame.snapshot.state==3&&!last_bus_off);
+            last_failed=frame.snapshot.failed;last_bus_off=frame.snapshot.state==3;
             if (new_fault && (!alarm_started || (uint32_t)(now-last_alarm)>=3000)) {
-                if (ui.sound) beep_until=now+100;
+                if (ui.sound) {beep_until=now+100;beep_active=true;}
                 last_alarm=now; alarm_started=true;
             }
-            if (applied_rotation!=ui.rotated) {
-                err=esp_lcd_panel_mirror(panel,ui.rotated,ui.rotated);
+            if (applied_rotation!=ui.rotation) {
+                // Only completed frames reach here; no DMA is using either buffer.
+                if (panel_ready) {
+                    err=esp_lcd_panel_disp_on_off(panel,false);
+                    if (err!=ESP_OK) break;
+                    panel_ready=false;
+                }
+                ui_panel_geometry_t geometry=ui_panel_geometry(ui.rotation,CONFIG_CAN_LCD_X_GAP,CONFIG_CAN_LCD_Y_GAP);
+                err=esp_lcd_panel_swap_xy(panel,geometry.swap_xy);
                 if (err!=ESP_OK) break;
-                applied_rotation=ui.rotated;
+                err=esp_lcd_panel_mirror(panel,geometry.mirror_x,geometry.mirror_y);
+                if (err!=ESP_OK) break;
+                err=esp_lcd_panel_set_gap(panel,geometry.x_gap,geometry.y_gap);
+                if (err!=ESP_OK) break;
+                applied_rotation=ui.rotation;previous_valid=false;
             }
-            next_frame=now+250;
-        } else if (band==0) goto idle;
-        ui_render_band(pixels,band,&drawn,&snapshot,save_failed);
-        err=esp_lcd_panel_draw_bitmap(panel,0,band,UI_WIDTH,band+UI_BAND_HEIGHT,pixels);
-        if (err!=ESP_OK) break;
-        // Buffer must remain untouched until DMA is complete. Only this task waits.
-        if (!ulTaskNotifyTake(pdTRUE,pdMS_TO_TICKS(100))) {
-            err=ESP_ERR_TIMEOUT; break;
+            bands=previous_valid?ui_render_dirty(&previous.model,&previous.snapshot,previous.save_failed,&previous.pose,
+                &frame.model,&frame.snapshot,frame.save_failed,&frame.pose):ui_render_all_bands(&ui);
+            next_frame=now+(animating?UI_ANIMATION_FRAME_MS:UI_IDLE_FRAME_MS);
+            requested=false;
+            if(bands){
+                rendering=true;
+#ifdef CAN_PANEL_BENCHMARK
+                benchmark_start=esp_timer_get_time();benchmark_bands=__builtin_popcount(bands);
+#endif
+            }
+            else previous=frame;
         }
-        band+=UI_BAND_HEIGHT;
-        if (band==UI_HEIGHT) {
-            band=0;
-            if (!panel_ready) {
+        if(rendering){
+            if(bands){
+                unsigned band=__builtin_ctz(bands);
+                int top=band*(UI_DMA_PIXELS/ui_render_width(&frame.model));
+                // Draw into the other buffer while the previous band is on SPI.
+                // The pose and snapshot stay frozen until the whole frame ends.
+                ui_render_animated_band(pixels[buffer],top,&frame.model,&frame.snapshot,frame.save_failed,&frame.pose);
+                if(transfer_pending){
+                    if(!ulTaskNotifyTake(pdTRUE,pdMS_TO_TICKS(100))){err=ESP_ERR_TIMEOUT;break;}
+                    transfer_pending=false;
+                }
+                int rows=ui_render_rows(&frame.model,top);
+                err=esp_lcd_panel_draw_bitmap(panel,0,top,ui_render_width(&frame.model),top+rows,pixels[buffer]);
+                if(err!=ESP_OK)break;
+                transfer_pending=true;buffer^=1;bands&=~(1u<<band);
+                // DMA supplies the wait; a delay per band would stretch one
+                // animation frame by over 200ms. Keys are sampled again now.
+                continue;
+            }
+            if(transfer_pending){
+                if(!ulTaskNotifyTake(pdTRUE,pdMS_TO_TICKS(100))){err=ESP_ERR_TIMEOUT;break;}
+                transfer_pending=false;
+            }
+            previous=frame;previous_valid=true;rendering=false;
+#ifdef CAN_PANEL_BENCHMARK
+            if(benchmark_action)printf("PANEL_FRAME page=%u pose=%d us=%"PRId64" bands=%u\n",
+                frame.model.page,frame.pose.page,esp_timer_get_time()-benchmark_start,benchmark_bands);
+#endif
+            if(!panel_ready){
                 err=esp_lcd_panel_disp_on_off(panel,true);
-                if (err!=ESP_OK) break;
+                if(err!=ESP_OK)break;
                 panel_ready=true;
             }
+            continue;
         }
-idle:
-        gpio_set_level(PIN_BUZZER,ui.sound && (int32_t)(beep_until-now)>0);
-        vTaskDelay(pdMS_TO_TICKS(10)>0?pdMS_TO_TICKS(10):1);
+        vTaskDelay(1);
     }
-    // Retain DMA buffer/handles on transfer timeout: DMA may still own memory.
-    atomic_store(&capture_frames,false); backlight(0); gpio_set_level(PIN_BUZZER,0);
+    // Retain both DMA buffers/handles on failure: SPI may still own one.
+    backlight(0); board_buzzer_stop();
     ESP_LOGE(TAG,"Local panel stopped: %s; CAN/BLE continue",esp_err_to_name(err));
     vTaskSuspend(NULL);
 }

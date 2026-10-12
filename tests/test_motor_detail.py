@@ -29,10 +29,10 @@ with sync_playwright() as p:
  assert page.evaluate("ConfigIO.exportChannel(1,'','').detailRates['c620:1:513']")==1000
  assert page.evaluate('detailRateFor(watchedMotors[1])')==100
  keys=page.evaluate('watchedMotors.map(m=>JSON.stringify(m.config))')
- def send(key,data,t):page.evaluate("d=>onNative('motorSample',d)",{'key':key,'hex':sample(data,t)})
+ def send(key,data,t):page.evaluate("async d=>{onNative('motorSample',d);await new Promise(requestAnimationFrame)}",{'key':key,'hex':sample(data,t)})
  dji=bytes([0x10,0,0,100,0,50,40,0]);send(keys[1],dji,500);assert page.evaluate('detailSamples.length')==0
- # One JS task: the first new frame must update the DOM without waiting for a timer.
- page.evaluate("d=>{let before=document.querySelector('.trace').getAttribute('d');motorDetailSample(d);if(document.querySelector('.detail-number').textContent!=='180.0°'||document.querySelector('.trace').getAttribute('d')===before)throw Error('not per-frame')}",{'key':keys[0],'hex':sample(dji,950)})
+ # Record immediately; paint the newest state at the next screen refresh.
+ page.evaluate("async d=>{let before=document.querySelector('.trace').getAttribute('d');motorDetailSample(d);if(detailSamples.length!==1)throw Error('sample not recorded');await new Promise(requestAnimationFrame);if(document.querySelector('.detail-number').textContent!=='180.0°'||document.querySelector('.trace').getAttribute('d')===before)throw Error('frame not painted')}",{'key':keys[0],'hex':sample(dji,950)})
  page.evaluate('clearDetail();clearDetailStream()')
  for t in range(1000,2000,50):send(keys[0],dji,t)
  page.evaluate('drawDetail()');assert page.evaluate('detailSamples.length')==20

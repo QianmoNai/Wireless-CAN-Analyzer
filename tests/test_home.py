@@ -14,7 +14,7 @@ with sync_playwright() as p:
  errors=[];pages=[]
  for i in range(2):
   page=ctx.new_page();page.on('pageerror',lambda e:errors.append(str(e)));page.goto('https://'+('app' if i==0 else 'channel-2')+'.local/index.html')
-  page.evaluate("i=>{onNative('state',{value:'ready',name:'ESP32-'+i});commitWatch({profile:'c620',id:1,name:i?'右轮':'左轮'});commitWatch({profile:'c620',id:2,name:i?'后轮':'前轮'});watchedMotors.forEach((m,j)=>{m.feedback={angle:'90°',speed:(i*100+j*20)+' rpm',effort:'50 raw',temperature:'35 °C',state:'收到反馈'};m.time=Date.now()});publishDashboard()}",i)
+  page.evaluate("i=>{onNative('state',{value:'ready',name:'ESP32-'+i});commitWatch({profile:'c620',id:1,name:i?'右轮':'左轮'});commitWatch({profile:'c620',id:2,name:i?'后轮':'前轮'});watchedMotors.forEach((m,j)=>{m.feedback={values:{temperature:35},angle:'90°',speed:(i*100+j*20)+' rpm',effort:'50 raw',temperature:'35 °C',state:'收到反馈'};m.time=Date.now()});publishDashboard()}",i)
   pages.append(page)
  home=ctx.new_page();home.on('pageerror',lambda e:errors.append(str(e)));home.goto('https://home.local/home.html')
  channels=[{'slot':i+1,'name':['底盘-CAN','关节-CAN'][i],'connected':True,'label':'已连接','age':0,'motors':pg.evaluate('snapshots[snapshots.length-1]')} for i,pg in enumerate(pages)]
@@ -31,6 +31,7 @@ with sync_playwright() as p:
  assert home.locator('.motor').count()==4
  assert home.locator('.source').first.inner_text()=='通道 1 · 底盘-CAN'
  assert home.locator('.status.live').count()==4
+ assert home.locator('.motor-temperature strong').all_text_contents()==['35 °C']*4
  assert home.locator('.values,.query-toggle,.query-hz,.state').count()==0
  assert home.locator('.motor-id').all_text_contents()==['ID 0x001','ID 0x002','ID 0x001','ID 0x002']
  assert home.locator('.feedback-id').all_text_contents()==['RX 0x201','RX 0x202','RX 0x201','RX 0x202']

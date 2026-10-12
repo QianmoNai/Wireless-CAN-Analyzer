@@ -5,6 +5,12 @@ let detailSeries=[],detailFrozenSamples=[];
 let detailSampleHead=0,detailMaxHz=0,detailAppliedHz=20,detailRatePrevious=null,detailRateAt=0,detailCanHz=null,detailSampleCountHz=null;
 let detailAppCount=0,detailAppWindow=0,detailAppHz=null;
 let detailChartKey=null,detailChartFocus=null,detailChartScroll=0;
+let detailPaint=0;
+function requestDetailPaint(){
+ if(detailPaint||!detailMotor||document.hidden)return;
+ detailPaint=requestAnimationFrame(()=>{detailPaint=0;if(!detailMotor||document.hidden)return;refreshDetail();if(!$('detailChartsPanel').hidden)drawDetail();if(!$('detailStreamPanel').hidden&&detailStreamDirty)renderDetailStream()});
+}
+function cancelDetailPaint(){if(detailPaint)cancelAnimationFrame(detailPaint);detailPaint=0}
 function detailChartSeries(){return detailChartKey===null?null:detailSeries.find(s=>s.key===detailChartKey)||null}
 function detailSeriesValue(s){if(s.imu){const f=detailMotor&&detailMotor.feedback,v=f&&f.values[s.key],at=f&&f.times&&f.times[s.key];return Number.isFinite(v)&&at&&Date.now()-at<2000?Number(v.toFixed(4))+(s.unit?' '+s.unit:''):'—'}const f=detailMotor&&detailMotor.feedback;return f?(s.extra?f.values.temperature+' / '+f.values.mosTemperature+' °C':f[s.display]):'—'}
 function refreshDetailChart(){
@@ -52,24 +58,25 @@ window.addEventListener('keydown',event=>{
  }
 });
 window.addEventListener('pagehide',()=>closeDetailChartFullscreen());
-document.addEventListener('visibilitychange',()=>{if(document.hidden)closeDetailChartFullscreen()});
+document.addEventListener('visibilitychange',()=>{if(document.hidden){cancelDetailPaint();closeDetailChartFullscreen()}else if(detailMotor)requestDetailPaint()});
 window.addEventListener('resize',()=>{if(detailChartKey!==null)drawDetail()});
 function detailRateKey(m){const c=m.config;return c.profile+':'+c.id+':'+c.feedbackId}
-window.detailRateFor=function(m){try{const rates=ConfigIO.readField('detailRates')||{},hz=rates[detailRateKey(m)];return Number.isInteger(hz)&&hz>=1&&hz<=1000?hz:100}catch(e){return 100}};
+let detailRateCache;try{detailRateCache=ConfigIO.readField('detailRates')||{}}catch(e){detailRateCache={}}
+window.detailRateFor=function(m){const hz=detailRateCache[detailRateKey(m)];return Number.isInteger(hz)&&hz>=1&&hz<=1000?hz:100};
 function resetDetailRates(){detailRatePrevious=null;detailRateAt=0;detailCanHz=null;detailSampleCountHz=null;detailAppCount=0;detailAppWindow=performance.now();detailAppHz=null;}
 function saveDetailSampleRate(){
  if(!detailMotor)return;const raw=$('detailSampleHz').value.trim(),hz=Number(raw);
  if(!raw||!Number.isInteger(hz)||hz<1||hz>1000){$('detailSampleResult').textContent='频率须为 1–1000 Hz 的整数';return;}
  if(!connected||!detailMaxHz){$('detailSampleResult').textContent='请连接并更新 ESP32 固件后设置';return;}
  if(hz>detailMaxHz){$('detailSampleResult').textContent='当前固件最高支持 '+detailMaxHz+' Hz';return;}
- try{const previous=ConfigIO.readField('detailRates')||{},rates={};for(const m of watchedMotors){const key=detailRateKey(m);if(Number.isInteger(previous[key]))rates[key]=previous[key];}rates[detailRateKey(detailMotor)]=hz;ConfigIO.writeField('detailRates',rates);}catch(e){$('detailSampleResult').textContent='保存失败，请重试';return;}
+ try{const previous=detailRateCache,rates={};for(const m of watchedMotors){const key=detailRateKey(m);if(Number.isInteger(previous[key]))rates[key]=previous[key];}rates[detailRateKey(detailMotor)]=hz;ConfigIO.writeField('detailRates',rates);detailRateCache=rates;}catch(e){$('detailSampleResult').textContent='保存失败，请重试';return;}
  if(detailReady&&hz===detailAppliedHz){$('detailSampleResult').textContent='已应用上报上限 '+hz+' Hz';publishDashboard();return;}
  detailReady=false;clearDetail();resetDetailStream();resetDetailRates();$('detailSampleResult').textContent='正在应用 '+hz+' Hz…';publishDashboard();
 }
 window.motorDetailRates=function(d){
  if(!detailMotor||!connected||!detailReady||d.key!==JSON.stringify(detailMotor.config))return;
  if(detailRatePrevious){const ms=(d.elapsed-detailRatePrevious.elapsed)>>>0;if(ms>0&&ms<=5000){detailCanHz=((d.received-detailRatePrevious.received)>>>0)*1000/ms;detailSampleCountHz=((d.sampled-detailRatePrevious.sampled)>>>0)*1000/ms;}}
- detailRatePrevious=d;detailRateAt=Date.now();
+ detailRatePrevious=d;detailRateAt=Date.now()-Math.max(0,Number(d.age)||0);
 };
 function clearDetail(){detailSampleHead=0;detailFrozenSamples=[];detailSamples=[];detailClock=0;detailLastStamp=null;detailLastArrival=0;detailFrozen=null;$('detailPause').textContent='暂停曲线';drawDetail()}
 function openMotorDetail(m){
@@ -85,7 +92,7 @@ function openMotorDetail(m){
  clearDetail();resetDetailStream();showDetailTab('charts');publishDashboard();if(window.CanAndroid&&typeof CanAndroid.showDetail==='function')CanAndroid.showDetail(JSON.stringify(c));
  window.scrollTo(0,0);refreshDetail();
 }
-function closeMotorDetail(notify=true){closeDetailChartFullscreen();if(!detailMotor)return;detailMotor=null;detailReady=false;clearDetail();resetDetailStream();document.body.classList.remove('motor-detail');renderChannelTab('motor');if(notify&&window.CanAndroid&&typeof CanAndroid.leaveDetail==='function')CanAndroid.leaveDetail()}
+function closeMotorDetail(notify=true){closeDetailChartFullscreen();if(!detailMotor)return;cancelDetailPaint();detailMotor=null;detailReady=false;clearDetail();resetDetailStream();document.body.classList.remove('motor-detail');renderChannelTab('motor');if(notify&&window.CanAndroid&&typeof CanAndroid.leaveDetail==='function')CanAndroid.leaveDetail()}
 function detailHome(){closeMotorDetail(false);if(window.CanAndroid&&typeof CanAndroid.home==='function')CanAndroid.home();else showTab('motor')}
 function detailRetarget(m){if(m!==detailMotor)return;closeDetailChartFullscreen();detailReady=false;clearDetail();resetDetailStream();if(window.CanAndroid&&typeof CanAndroid.showDetail==='function')CanAndroid.showDetail(JSON.stringify(m.config))}
 window.motorDetailSupport=d=>{detailSupported=!!d.supported;detailMaxHz=d.maxHz||0;detailChannel=d.channel||'';if(detailMotor)$('detailSource').textContent=detailChannel;refreshDetail()};
@@ -96,14 +103,13 @@ window.motorDetailSample=function(d){
  const c=m.config,p=Motors.profiles[c.profile],data=Array.from(a.slice(8,8+a[3]));let f;
  try{f=p.family==='imu'?Motors.imuFeedback(c.feedbackId,c.feedbackId,data):p.family==='dji'?Motors.djiFeedback(c.profile,c.id,c.feedbackId,data,c.feedbackId):Motors.dmFeedback(c.id,c.feedbackId,c.feedbackId,data,c.limits)}catch(e){return}
  if(!f||!f.values)return;
- const stamp=u32(a,16),now=Date.now();if(detailLastStamp!==null){const delta=(stamp-detailLastStamp)>>>0;if(delta>0x7fffffff){clearDetail();resetDetailStream();}else detailClock+=delta;}
+ const stamp=u32(a,16),now=Date.now()-Math.max(0,Number(d.age)||0);if(detailLastStamp!==null){const delta=(stamp-detailLastStamp)>>>0;if(delta>0x7fffffff){clearDetail();resetDetailStream();}else detailClock+=delta;}
  detailLastStamp=stamp;detailLastArrival=now;detailAppCount++;recordDetailFrame(c.feedbackId,data,stamp);if(p.family==='imu'){const old=m.feedback;const times={...(old&&old.times)};for(const k of Object.keys(f.values))times[k]=now;m.feedback={...f,values:{...(old&&old.values),...f.values},times};}else m.feedback=f;m.time=now;watchedDirty=true;
  detailSamples.push({t:detailClock,values:f.values});
  while(detailSamples.length-detailSampleHead>60000||(detailSamples.length-detailSampleHead>1&&detailClock-detailSamples[detailSampleHead].t>60000))detailSampleHead++;
  if(detailSampleHead>=2048){detailSamples=detailSamples.slice(detailSampleHead);detailSampleHead=0;}
- // Every accepted frame updates the visible view immediately; no batch/timer gate.
- refreshDetail();if(!$('detailChartsPanel').hidden)drawDetail();
- if(!$('detailStreamPanel').hidden&&detailStreamFrozen===null)renderDetailStream();
+ // Record every sample; paint the latest state once per screen refresh.
+ requestDetailPaint();
 };
 function detailTogglePause(){detailFrozenSamples=detailFrozen===null?detailSamples.slice(detailSampleHead):[];detailFrozen=detailFrozen===null?detailEnd():null;$('detailPause').textContent=detailFrozen===null?'暂停曲线':'继续曲线';drawDetail()}
 function detailEnd(){return detailClock+(detailLastArrival?Date.now()-detailLastArrival:0)}
@@ -115,7 +121,7 @@ function refreshDetail(){
  $('detailAppRate').textContent=rateText(connected?detailAppHz:null);
  $('detailSampleSave').disabled=!connected||!detailMaxHz||watchBusy();
  $('detailSampleHz').disabled=watchBusy();
- $('detailRateNote').textContent=!detailMaxHz?'当前固件固定 20 Hz，更新 ESP32 后支持可调频率。':!detailReady?'等待订阅确认…':'上报上限 '+detailAppliedHz+' Hz · '+(detailSampleCountHz===null?'等待设备统计':'设备采样 '+detailSampleCountHz.toFixed(1)+' Hz')+' · 每帧更新界面';
+ $('detailRateNote').textContent=!detailMaxHz?'当前固件固定 20 Hz，更新 ESP32 后支持可调频率。':!detailReady?'等待订阅确认…':'上报上限 '+detailAppliedHz+' Hz · '+(detailSampleCountHz===null?'等待设备统计':'设备采样 '+detailSampleCountHz.toFixed(1)+' Hz')+' · 逐帧记录，按屏幕刷新绘图';
  const m=detailMotor,fresh=connected&&m.time&&Date.now()-m.time<2000;
  $('detailState').textContent=!connected?'通道未连接':!m.time?'等待设备反馈':fresh?'反馈在线 · '+m.feedback.state:'反馈超时 · 保留最后一次读数';$('detailState').className='detail-status'+(fresh?' fresh':m.time&&connected?' stale':'');
  $('detailNotice').textContent=!connected?'返回首页连接该通道后查看反馈。':detailSupported===false?'请更新该通道的 ESP32 固件以启用单电机订阅。':!detailReady?'正在订阅设备…':Motors.profiles[m.config.profile].family==='imu'?'仅接收主动上报；各类数据独立更新，超过 2 秒未更新显示 —。上报上限按四类数据分配；CAN 数据流显示采样后的帧。':Motors.profiles[m.config.profile].rawAngle?'GM3510 仅上报角度与转矩原始值，无速度和温度字段。':detailMotor.config.profile==='c610'?'C610 不提供温度反馈。':Motors.profiles[m.config.profile].family==='dm'?'温度曲线：绿色为电机，蓝色为 MOS。':'角度为转子单圈角度；电流显示协议原始值 raw。';
@@ -146,10 +152,12 @@ function drawDetailSeries(s,root,points,span,start,width,height){
 }
 function detailQueryToggle(enabled){if(detailMotor)setMotorPolling(JSON.stringify(detailMotor.config),enabled)}
 function detailQueryRate(hz){if(detailMotor)setMotorQueryHz(JSON.stringify(detailMotor.config),hz);refreshDetail()}
-setInterval(()=>{if(!detailMotor)return;if(!connected){closeDetailChartFullscreen();if(detailSamples.length||detailReady){detailReady=false;clearDetail();resetDetailStream();resetDetailRates();}}refreshDetail();if(!$('detailChartsPanel').hidden)drawDetail();if(!$('detailStreamPanel').hidden&&detailStreamDirty)renderDetailStream()},100);
+setInterval(()=>{if(!detailMotor)return;if(!connected){closeDetailChartFullscreen();if(detailSamples.length||detailReady){detailReady=false;clearDetail();resetDetailStream();resetDetailRates();}}requestDetailPaint()},100);
 
 // Reuse event11 payloads: no second subscription or additional BLE traffic.
-let detailRxFrames=[],detailStreamFrozen=null,detailStreamPage=0,detailStreamDirty=true;
+const detailFrameHistory=new RingBuffer(rxSaveLimit);
+Object.defineProperty(window,'detailRxFrames',{get:()=>detailFrameHistory.snapshot()});
+let detailStreamFrozen=null,detailStreamPage=0,detailStreamDirty=true;
 const detailStreamPageSize=40;
 function showDetailTab(tab){
  closeDetailChartFullscreen();
@@ -158,20 +166,19 @@ function showDetailTab(tab){
  if(stream)renderDetailStream();else drawDetail();
 }
 function resetDetailStream(){
- detailRxFrames=[];detailStreamFrozen=null;detailStreamPage=0;detailStreamDirty=true;
+ detailFrameHistory.resize(rxSaveLimit);detailFrameHistory.clear();detailStreamFrozen=null;detailStreamPage=0;detailStreamDirty=true;
  $('detailStreamPause').textContent='暂停列表';$('detailStreamLimit').value=rxSaveLimit;
  $('detailStreamLimitNote').textContent='沿用本通道 RX 上限，0 表示不保留；暂停仅冻结列表显示。';renderDetailStream();
 }
 function recordDetailFrame(id,data,stamp){
- if(rxSaveLimit>0)detailRxFrames.unshift({id,data,stamp});
- if(detailRxFrames.length>rxSaveLimit)detailRxFrames.length=rxSaveLimit;
+ detailFrameHistory.resize(rxSaveLimit);detailFrameHistory.push({id,data,stamp});
  if(detailStreamFrozen===null)detailStreamDirty=true;
 }
 function toggleDetailStream(){
  detailStreamFrozen=detailStreamFrozen===null?detailRxFrames.slice():null;detailStreamPage=0;
  $('detailStreamPause').textContent=detailStreamFrozen===null?'暂停列表':'继续列表';renderDetailStream();
 }
-function clearDetailStream(){detailRxFrames=[];if(detailStreamFrozen!==null)detailStreamFrozen=[];detailStreamPage=0;renderDetailStream()}
+function clearDetailStream(){detailFrameHistory.clear();if(detailStreamFrozen!==null)detailStreamFrozen=[];detailStreamPage=0;renderDetailStream()}
 function pageDetailStream(delta){
  if(detailStreamFrozen===null){detailStreamFrozen=detailRxFrames.slice();$('detailStreamPause').textContent='继续列表';}
  detailStreamPage+=delta;renderDetailStream();
@@ -181,7 +188,7 @@ function saveDetailStreamLimit(){
  if(!raw||!Number.isInteger(n)||n<0||n>10000){$('detailStreamLimitNote').textContent='上限必须是 0–10000 的整数';return;}
  try{ConfigIO.writeField('historyLimits',{rx:n,tx:txSaveLimit});}catch(e){$('detailStreamLimitNote').textContent='保存失败，请重试';return;}
  rxSaveLimit=n;$('rxLimit').value=n;trimHistory();renderFrames();updateHistoryNote();
- if(detailRxFrames.length>n)detailRxFrames.length=n;
+ detailFrameHistory.resize(n);
  if(detailStreamFrozen!==null&&detailStreamFrozen.length>n)detailStreamFrozen.length=n;
  $('detailStreamLimitNote').textContent='已保存：本通道 RX 上限 '+n+'；TX 上限不变。';renderDetailStream();
 }

@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>把 CAN 总线状态，带到你的手机上。</strong><br>
-  ESP32-S3 固件 × Android App · 蓝牙无线监控 · 电机与 IMU · 本机屏幕
+  ESP32-S3 固件 × Android App · 蓝牙 / 局域网无线监控 · 电机与 IMU · 本机屏幕
 </p>
 
 <p align="center">
@@ -31,6 +31,8 @@
 
 <sub>Bluetooth LE CAN analyzer with ESP32-S3 firmware and an Android app. Multi-device monitoring, motor and IMU decoding, live charts, and an onboard display.</sub>
 
+当前源码固件 **1.21.0** / App **1.20.0** 支持蓝牙安全配网、局域网通信选择，以及实体按键切换蓝牙蓝色 / Wi-Fi 紫色界面。固件提供蜂鸣器低 / 中 / 高三档试验音量、页面滑动、菜单选中框移动和蓝紫主题渐变；1.20.3 修正整屏切换时的 DMA 调度等待，并柔化页面滑动起步；1.20.4 将四个方向的亮度加减对调，统一为上方或左侧按键增加、下方或右侧按键减少，详见 [本机面板操作](docs/LOCAL_PANEL.md)。原有蓝牙保留，使用步骤见 [Wi-Fi 配网与通信说明](docs/WIFI.md)。上方徽章仍指向已发布版本。
+
 <a id="preview"></a>
 
 ## 从设备总览，到每一帧反馈
@@ -51,10 +53,10 @@
 ### 离开手机，也能查看总线
 
 <p align="center">
-  <img src="docs/local-panel-preview.png" alt="ST7789 总览、CAN 报文、设置三个页面，模拟数据" width="850">
+  <img src="docs/local-panel-preview.png" alt="ST7789 中文总览与设置两页，横竖屏模拟数据" width="728">
 </p>
 
-<sub>本机页面由固件实际绘制代码生成，使用模拟数据。支持背光亮度、声音开关与 180° 翻转，设置断电保存。</sub>
+<sub>本机页面由固件实际绘制代码生成，使用模拟数据。中文总览与设置两页，支持背光亮度、声音开关、三档音量、通信模式与 0°/90°/180°/270° 四方向，设置断电保存；本机不显示报文数据流。</sub>
 
 ## 为机器人调试准备
 
@@ -66,7 +68,7 @@
 | **达妙持续查询** | 每台电机独立开关与频率，默认 100Hz，可调 1～1000Hz |
 | **CAN 报文监控** | CAN ID 与 RX/TX 筛选、记录保存上限、发送失败原因、设备端帧率和估算负载 |
 | **配置备份** | 导入/导出通道、电机及重连记录，设备蓝牙名称断电保存 |
-| **本机屏幕** | 总览、最近报文和设置三个页面，三个按键、PWM 背光及蜂鸣器提示 |
+| **本机屏幕** | 中文总览与设置两页，四方向布局，三个按键、PWM 背光及蜂鸣器提示 |
 
 ### 支持的设备
 
@@ -135,6 +137,10 @@ CAN 终端电阻按总线两端布置。完整供电、插座引脚顺序及面�
 
 ### ESP32-S3 固件
 
+当前固件源码版本 **1.21.0** 提供中文界面、切换动画和四方向设置，菜单选择随屏幕方向映射；亮度编辑统一为上方或左侧按键增加、下方或右侧按键减少；方向编辑固定 BT1 顺时针、BT3 逆时针；声音、音量和通信模式选中后中键直接切换。本机报文页已移除，上方下载表仍指向已发布版本。
+
+新增屏幕按键配对的“双机A端”（绿色）和“双机B端”（黄色），两端各接独立 CAN 总线，通过 ESP-NOW 双向转发，无需 App。配对步骤、1 Mbit/s 默认 CAN 配置和测试范围见 [双机 CAN 转发](docs/DUAL_CAN.md)。
+
 已验证工具链：**ESP-IDF v6.0.2**。先安装 ESP-IDF 并激活环境，再执行：
 
 ```bash
@@ -144,7 +150,11 @@ bash firmware/idf.sh -p /dev/ttyACM0 -b 115200 flash
 bash firmware/idf.sh -p /dev/ttyACM0 monitor
 ```
 
-默认构建目录为 `firmware/build/esp32s3`，不需要 PSRAM。屏幕偏移、色序和本机面板开关可通过 `bash firmware/idf.sh menuconfig` 调整。升级无需全片擦除，保留 NVS 中的蓝牙名称及面板设置。
+默认构建目录位于 `${XDG_CACHE_HOME:-$HOME/.cache}/can-scope-firmware/<项目路径哈希>/esp32s3`；缓存实际路径含非 ASCII 字符时自动改用 `/tmp/can-scope-$UID`，避免工具链路径解析错误。可用 `CAN_IDF_BUILD_DIR` 指定目录。首次迁移会保留旧 `firmware/build/esp32s3.sdkconfig`；同一构建目录拒绝并发运行。不需要 PSRAM。屏幕偏移、色序和本机面板开关可通过 `bash firmware/idf.sh menuconfig` 调整。升级无需全片擦除，保留 NVS 中的蓝牙名称及面板设置。
+
+**VS Code ESP-IDF 扩展**：直接打开 `firmware` 文件夹时，扩展默认使用 `firmware/build`，不会经过上述脚本。若项目的真实路径包含中文，请在工作区设置中将 `idf.buildPath` 指向纯英文绝对路径，例如 `/home/<用户名>/.cache/can-scope-vscode/esp32s3`，并将 `clangd.arguments` 中的 `--compile-commands-dir` 指向同一目录；确认该目录经符号链接解析后的真实路径也不含中文。继续使用现有 `firmware/sdkconfig`，重新构建即可。`cannot read spec file .../picolibc.specs` 且错误路径中出现换行或 `\x0a` 时，应先检查构建路径。
+
+固件默认关闭应用、NimBLE 和 Bootloader 日志，CAN 接收任务不格式化串口日志；App 和本机屏幕仍正常显示报文及统计。芯片 ROM 的启动信息仍可能输出。已有构建配置不会被 `sdkconfig.defaults` 覆盖，需在 `menuconfig` 中将应用、NimBLE 和 Bootloader 的日志级别设为 `None`，或使用新的构建目录。
 
 保留旧 ESP32 目标兼容路径：`CAN_IDF_TARGET=esp32 bash firmware/idf.sh build`；旧目标使用 GPIO21/22，默认不启用本机屏幕。本次发布主要验证 ESP32-S3。
 
@@ -158,6 +168,8 @@ bash android/build.sh
 ```
 
 产物：`android/dist/CAN-Scope-debug.apk`。脚本在本机生成开发签名，密钥不随源码分发。自行构建 APK 的签名与作者 APK 不同，可能无法直接覆盖安装；如需卸载旧版本，请先在 App 内导出配置。
+
+Android 默认缓存为 `${XDG_CACHE_HOME:-$HOME/.cache}/can-scope-android/<项目路径哈希>`，可用 `CAN_ANDROID_BUILD_DIR` 指定目录。同一目录拒绝并发构建；每次清理旧 class/dex，签名验证通过后原子替换 APK。当前源码 App 版本为 **1.18.2**，包含[采样、绘图和首页更新优化](docs/PERFORMANCE.md)。上方下载表仍指向已发布版本。
 
 <details>
 <summary><strong>目录结构</strong></summary>
@@ -202,6 +214,8 @@ BLE-CAN-Scope/
 ## 许可证
 
 [GNU GPL v3.0](LICENSE) · `GPL-3.0-only` · Copyright © 2026 QianmoNai。
+
+嵌入的中文点阵字形子集采用 [SIL OFL 1.1](firmware/fonts/OFL-SourceHanSans.txt)，来源及生成说明见 [字库说明](firmware/fonts/README.md)。
 
 外部依赖和协议资料遵守各自许可。本项目不隶属于大疆、达妙或乐鑫，品牌与型号用于说明兼容设备。
 

@@ -7,6 +7,18 @@
 #include "../firmware/main/ble_bridge.h"
 void board_ui_start(void) {}
 void board_ui_observe(const bridge_packet_t *packet) { (void)packet; }
+// Additional CAN-owner scenario consumes frames with no App connection.
+static bool simulated_dual;static unsigned dual_taken;
+void dual_link_set_owner(TaskHandle_t owner) {(void)owner;}
+void dual_link_can_rx(const uint8_t packet[20]) {(void)packet;}
+bool dual_link_can_take(uint8_t packet[20]) {
+ if(!simulated_dual||dual_taken>=3)return false;
+ memset(packet,0,20);packet[0]=1;packet[1]=0x10;packet[2]=dual_taken;packet[3]=8;
+ wire_put_u32(packet+4,0x321+dual_taken);memset(packet+8,dual_taken+1,8);dual_taken++;return true;
+}
+bool dual_link_connected(void) {return simulated_dual;}
+bool network_dual_mode(void) {return simulated_dual;}
+uint32_t dual_link_dropped(void) {return 0;}
 struct queue {size_t size;unsigned count,limit;uint8_t data[4096];};
 static struct queue *allocated[8];static unsigned allocated_count;
 QueueHandle_t xQueueCreate(unsigned n,size_t size){struct queue*q=calloc(1,sizeof(*q));q->size=size;q->limit=n;assert(n*size<=sizeof(q->data));allocated[allocated_count++]=q;return q;}
@@ -83,7 +95,7 @@ int twai_node_recover(twai_node_handle_t n){if(scenario!=17)driver_state=0;retur
 int twai_node_receive_from_isr(twai_node_handle_t n,twai_frame_t*f){if(!receive_ready)return 2;receive_ready=false;f->header=receive_header;return 0;}
 int twai_node_transmit(twai_node_handle_t n,const twai_frame_t*f,int wait){assert(!inflight);assert(f->buffer_len<=8);snapshot_id=f->header.id;snapshot_len=f->buffer_len;memcpy(snapshot,f->buffer,f->buffer_len);memset(last_data,0,8);memcpy(last_data,f->buffer,f->buffer_len);tx_num++;last_tx_ms=now_ms;if(scenario==19)return ESP_ERR_INVALID_STATE;inflight=f;return 0;}
 void ble_bridge_init(QueueHandle_t q,QueueHandle_t queries){
- if(scenario==0||scenario==13||scenario==14||scenario==17)return;
+ if(scenario==0||scenario==13||scenario==14||scenario==17||scenario==20)return;
  if(scenario>=7){bridge_packet_t c={.bytes={1,0x14}};wire_put_u32(c.bytes+4,scenario==19?0x456:0x123);wire_put_u32(c.bytes+8,1000);if(scenario==16)wire_put_u32(c.bytes+16,0x111);if(scenario==19)wire_put_u32(c.bytes+16,0x411);if(scenario==18){wire_put_u32(c.bytes+16,0x311);stop_flag=true;}xQueueSend(queries,&c,0);return;}
  bridge_packet_t p={.bytes={1,0x20,0x40,8}};wire_put_u32(p.bytes+4,0x200);p.bytes[9]=100;wire_put_u32(p.bytes+16,42);
  if(scenario==2){p.bytes[2]=0x80;wire_put_u32(p.bytes+4,0x201);p.bytes[3]=4;}
@@ -227,6 +239,15 @@ int main(void){
   if(scenario==14)assert(rate_changes==1);
   for(unsigned i=0;i<allocated_count;i++)free(allocated[i]);allocated_count=0;
  }
+ // Receive peer frames while BLE is disconnected; keep the same CAN owner and TX buffer lifetime.
+ scenario=20;simulated_dual=true;dual_taken=0;link_up=false;timer_active=false;busy=false;stop_flag=false;inflight=NULL;receive_ready=false;
+ now_ms=tx_num=rate_changes=driver_state=0;completed_tx_bits=emitted_load_count=raw_tx_events=query_ack_count=0;
+ tx_count=tx_failed=tx_arbitration=raw_tx_success_events=raw_tx_failure_events=raw_tx_arbitration_events=raw_query_events=tx_uart_logs=0;
+ if(setjmp(done)==0)app_main();
+ assert(dual_taken==3&&tx_num==3&&tx_count==3&&tx_failed==0&&tx_uart_logs==0&&!timer_active);
+ assert(snapshot_id==0x323&&snapshot_len==8);
+ simulated_dual=false;for(unsigned i=0;i<allocated_count;i++)free(allocated[i]);allocated_count=0;
+ puts("PASS: dual CAN forwarding uses the real owner loop with App disconnected, preserving frame lifetime and completion accounting.");
  assert(rate_events>0);
  puts("PASS: actual firmware owner loop: boot silence, bounded pulse, disconnect stop, explicit stop, TX failure abort, bitrate timing, queued pulse cancellation, TX buffer lifetime, 1000 Hz polling payload/pacing, polling disconnect and TX failure; device-timed rate publication.");
  puts("PASS: CAN load owner integration: all successful TX origins, no duplicate/failed TX, queue-full RX, periodic wire events, rate-change window and real query TX telemetry without UART flood.");

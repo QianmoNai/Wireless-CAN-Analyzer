@@ -1,4 +1,7 @@
 #include "ble_bridge.h"
+#include "network_link.h"
+#include "esp_random.h"
+void ble_store_config_init(void);
 #include "home_status.h"
 #include "ack_delivery.h"
 #include "notify_resource.h"
@@ -12,6 +15,8 @@
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
+#include "host/ble_sm.h"
+#include "host/ble_store.h"
 #include "host/util/util.h"
 #include "os/os_mbuf.h"
 #include "services/gap/ble_svc_gap.h"
@@ -21,6 +26,7 @@
 static const ble_uuid128_t service_uuid = BLE_UUID128_INIT(UUID_BYTES(1));
 static const ble_uuid128_t write_uuid = BLE_UUID128_INIT(UUID_BYTES(2));
 static const ble_uuid128_t notify_uuid = BLE_UUID128_INIT(UUID_BYTES(3));
+static const ble_uuid128_t network_uuid = BLE_UUID128_INIT(UUID_BYTES(4));
 static const char *TAG = "can_ble";
 static QueueHandle_t command_queue, query_command_queue, ack_notify_queue, notify_queue, control_notify_queue;
 static uint16_t notify_handle;
@@ -29,6 +35,7 @@ static portMUX_TYPE home_lock=portMUX_INITIALIZER_UNLOCKED;
 // Called with home_lock held. Explicit command acknowledgments always pass.
 static bool home_redundant(const bridge_packet_t *p){
  uint8_t mode=home_status.mode,type=p->bytes[1];
+ if(type==16)return mode!=1||wire_u32(p->bytes+16)!=home_status.revision;
  if(type==13||type==14||type==15)return mode!=0;
  if(type==12)return mode!=2||!home_status.sample_hz||wire_u32(p->bytes+16)!=home_status.revision;
  if(type==11)return mode!=2||wire_u32(p->bytes+4)!=home_status.revision;
@@ -78,13 +85,10 @@ static void rename_device(const uint8_t *bytes, uint8_t len) {
     ble_bridge_publish(&reply);
 }
 
-static int access_cb(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *ctx, void *arg)
+int ble_bridge_command(const uint8_t bytes[20])
 {
-    if (ctx->op != BLE_GATT_ACCESS_OP_WRITE_CHR) return BLE_ATT_ERR_READ_NOT_PERMITTED;
-    bridge_packet_t packet;
-    if (OS_MBUF_PKTLEN(ctx->om) != sizeof(packet.bytes) ||
-        ble_hs_mbuf_to_flat(ctx->om, packet.bytes, sizeof(packet.bytes), NULL) != 0)
-        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    if(network_dual_mode())return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
+    bridge_packet_t packet;memcpy(packet.bytes,bytes,20);
     uint8_t *p = packet.bytes;
     if (p[0] != 1) return BLE_ATT_ERR_VALUE_NOT_ALLOWED;
     if(p[1]==0x16||p[1]==0x17){
@@ -131,12 +135,36 @@ static int access_cb(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *
     return 0;
 }
 
+void ble_bridge_reset_session(void){
+    reset_home();atomic_store(&stop_requested,true);
+    if(notify_queue)xQueueReset(notify_queue);
+    if(control_notify_queue)xQueueReset(control_notify_queue);
+    if(ack_notify_queue)xQueueReset(ack_notify_queue);
+    if(command_queue)xQueueReset(command_queue);
+    if(query_command_queue)xQueueReset(query_command_queue);
+}
+static int access_cb(uint16_t conn,uint16_t attr,struct ble_gatt_access_ctxt *ctx,void *arg){
+    if(ctx->op!=BLE_GATT_ACCESS_OP_WRITE_CHR)return BLE_ATT_ERR_READ_NOT_PERMITTED;
+    uint8_t packet[20];if(OS_MBUF_PKTLEN(ctx->om)!=20||ble_hs_mbuf_to_flat(ctx->om,packet,20,NULL))return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    if(network_wifi_mode()||network_dual_mode())return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
+    return ble_bridge_command(packet);
+}
+static int network_access(uint16_t conn,uint16_t attr,struct ble_gatt_access_ctxt *ctx,void *arg){
+    struct ble_gap_conn_desc desc;
+    if(ble_gap_conn_find(conn,&desc)||!desc.sec_state.encrypted||!desc.sec_state.authenticated)return BLE_ATT_ERR_INSUFFICIENT_AUTHEN;
+    if(ctx->op==BLE_GATT_ACCESS_OP_READ_CHR){char json[512];size_t n=network_config_read(json,sizeof(json));return n&&os_mbuf_append(ctx->om,json,n)==0?0:BLE_ATT_ERR_INSUFFICIENT_RES;}
+    if(ctx->op!=BLE_GATT_ACCESS_OP_WRITE_CHR)return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
+    uint8_t packet[20];if(OS_MBUF_PKTLEN(ctx->om)!=20||ble_hs_mbuf_to_flat(ctx->om,packet,20,NULL))return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    return network_config_write(packet);
+}
+
 static const struct ble_gatt_svc_def services[] = {
     {.type = BLE_GATT_SVC_TYPE_PRIMARY, .uuid = &service_uuid.u,
      .characteristics = (struct ble_gatt_chr_def[]) {
          {.uuid = &write_uuid.u, .access_cb = access_cb, .flags = BLE_GATT_CHR_F_WRITE},
          {.uuid = &notify_uuid.u, .access_cb = access_cb,
           .flags = BLE_GATT_CHR_F_NOTIFY, .val_handle = &notify_handle},
+         {.uuid=&network_uuid.u,.access_cb=network_access,.flags=BLE_GATT_CHR_F_READ|BLE_GATT_CHR_F_WRITE|BLE_GATT_CHR_F_READ_AUTHEN|BLE_GATT_CHR_F_WRITE_AUTHEN},
          {0}
      }},
     {0}
@@ -147,19 +175,16 @@ static int gap_event(struct ble_gap_event *event, void *arg)
     switch (event->type) {
     case BLE_GAP_EVENT_CONNECT:
         if (event->connect.status == 0) {
-            reset_home();
+            if(!network_wifi_mode())reset_home();
             atomic_store(&connection, event->connect.conn_handle);
             ESP_LOGI(TAG, "Phone connected");
         } else advertise();
         break;
     case BLE_GAP_EVENT_DISCONNECT:
         atomic_store(&subscribed, false);
-        reset_home();
+        if(!network_wifi_mode())ble_bridge_reset_session();
+        network_config_disconnect();
         atomic_store(&connection, BLE_HS_CONN_HANDLE_NONE);
-        xQueueReset(notify_queue);
-        xQueueReset(control_notify_queue);
-        xQueueReset(ack_notify_queue);
-        atomic_store(&stop_requested, true);
         ESP_LOGI(TAG, "Phone disconnected; advertising again");
         advertise();
         break;
@@ -170,6 +195,17 @@ static int gap_event(struct ble_gap_event *event, void *arg)
             ESP_LOGI(TAG, "CAN notifications %s", event->subscribe.cur_notify ? "enabled" : "disabled");
         }
         break;
+    case BLE_GAP_EVENT_PASSKEY_ACTION: {
+        if(event->passkey.params.action!=BLE_SM_IOACT_DISP){ble_gap_terminate(event->passkey.conn_handle,BLE_ERR_AUTH_FAIL);break;}
+        struct ble_sm_io io={.action=BLE_SM_IOACT_DISP,.passkey=esp_random()%1000000};
+        network_pairing_code(io.passkey);if(ble_sm_inject_io(event->passkey.conn_handle,&io))network_pairing_end();break;
+    }
+    case BLE_GAP_EVENT_ENC_CHANGE: network_pairing_end();break;
+    case BLE_GAP_EVENT_REPEAT_PAIRING: {
+        struct ble_gap_conn_desc desc;
+        if(!ble_gap_conn_find(event->repeat_pairing.conn_handle,&desc))ble_store_util_delete_peer(&desc.peer_id_addr);
+        return BLE_GAP_REPEAT_PAIRING_RETRY;
+    }
     case BLE_GAP_EVENT_ADV_COMPLETE:
         advertise();
         break;
@@ -180,6 +216,7 @@ static int gap_event(struct ble_gap_event *event, void *arg)
 
 static void advertise(void)
 {
+    if(network_dual_mode())return;
     struct ble_hs_adv_fields fields = {
         .flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP,
         .uuids128 = (ble_uuid128_t *)&service_uuid,
@@ -210,11 +247,10 @@ static void on_sync(void)
 }
 static void on_reset(int reason)
 {
-    reset_home();
+    if(!network_wifi_mode())ble_bridge_reset_session();
+    network_config_disconnect();
     atomic_store(&subscribed, false);
     atomic_store(&connection, BLE_HS_CONN_HANDLE_NONE);
-    xQueueReset(ack_notify_queue);
-    atomic_store(&stop_requested, true);
     ESP_LOGW(TAG, "BLE reset: %d", reason);
 }
 static void host_task(void *arg)
@@ -224,7 +260,7 @@ static void host_task(void *arg)
 }
 static bool notify_connected(void *context)
 {
-    return atomic_load(&subscribed) && atomic_load(&connection) != BLE_HS_CONN_HANDLE_NONE;
+    return ble_bridge_connected();
 }
 static void *notify_allocate(void *context, const bridge_packet_t *packet)
 {
@@ -252,6 +288,7 @@ static bool notify_submit(void *context, void *buffer)
 }
 static bool notify_send(void *context, const bridge_packet_t *packet)
 {
+    if(network_wifi_mode())return network_send(packet);
     static const bridge_notify_resource_ops_t ops = {
         .allocate = notify_allocate, .pool_free = notify_pool_free,
         .release = notify_release, .submit = notify_submit,
@@ -265,18 +302,39 @@ static void notify_delay(void *context, unsigned milliseconds)
 static void notify_task(void *arg)
 {
     bridge_packet_t packet;
-    TickType_t last_name = 0,last_home=0;
+    TickType_t last_name = 0,last_home=0,last_network=0;
+    bool dual_paused=false;
     for (;;) {
         TickType_t now = xTaskGetTickCount();
-        if (atomic_load(&subscribed) && now - last_name >= pdMS_TO_TICKS(1000)) {
+        if(network_dual_mode()){
+            if(!dual_paused&&ble_hs_synced()){
+                ble_gap_adv_stop();dual_paused=true;
+            }
+            int conn=atomic_load(&connection);
+            if(conn!=BLE_HS_CONN_HANDLE_NONE)ble_gap_terminate(conn,BLE_ERR_REM_USER_CONN_TERM);
+            vTaskDelay(pdMS_TO_TICKS(20));continue;
+        }
+        if(dual_paused&&ble_hs_synced()){dual_paused=false;advertise();}
+        if(atomic_load(&subscribed)&&now-last_network>=pdMS_TO_TICKS(1000)){
+            bridge_packet_t mode={.bytes={1,17,network_wifi_mode(),0}};
+            struct os_mbuf *om=ble_hs_mbuf_from_flat(mode.bytes,20);
+            if(om)ble_gatts_notify_custom(atomic_load(&connection),notify_handle,om);
+            last_network=now;
+        }
+        if (ble_bridge_connected() && now - last_name >= pdMS_TO_TICKS(1000)) {
             bridge_packet_t status = name_status(0);
             ble_bridge_publish(&status);
             last_name = now;
         }
-        if(atomic_load(&subscribed)&&now-last_home>=pdMS_TO_TICKS(1000)){
+        if(ble_bridge_connected()&&now-last_home>=pdMS_TO_TICKS(1000)){
             bridge_packet_t summary;bool quiet;
             portENTER_CRITICAL(&home_lock);quiet=home_status.mode==1;home_snapshot(&home_status,&summary,esp_timer_get_time()/1000);portEXIT_CRITICAL(&home_lock);
             if(quiet)ble_bridge_publish(&summary);
+            for(unsigned start=0;start<HOME_MOTORS;start+=HOME_TEMPERATURES_PER_PACKET){
+                bridge_packet_t temperatures;portENTER_CRITICAL(&home_lock);bool have_temperatures=home_temperature_snapshot(&home_status,&temperatures,start,esp_timer_get_time()/1000);portEXIT_CRITICAL(&home_lock);
+                if(!have_temperatures)break;
+                ble_bridge_publish(&temperatures);
+            }
             bridge_packet_t rates;portENTER_CRITICAL(&home_lock);bool report=home_detail_stats(&home_status,&rates,esp_timer_get_time()/1000);portEXIT_CRITICAL(&home_lock);
             if(report)ble_bridge_publish(&rates);
             last_home=now;
@@ -286,7 +344,7 @@ static void notify_task(void *arg)
         bool ack = xQueueReceive(ack_notify_queue, &packet, 0) == pdTRUE;
         bool control = !ack && xQueueReceive(control_notify_queue, &packet, 0) == pdTRUE;
         if (!ack && !control && xQueueReceive(notify_queue, &packet, pdMS_TO_TICKS(10)) != pdTRUE) continue;
-        if (!atomic_load(&subscribed)) continue;
+        if (!ble_bridge_connected()) continue;
         if(suppress_packet(&packet))continue;
         if(ack) {
             if(!bridge_deliver_ack(&packet,notify_connected,notify_send,notify_delay,NULL))
@@ -295,7 +353,7 @@ static void notify_task(void *arg)
         }
         bool delivered = false;
         for (unsigned attempt = 0; attempt < (control ? 3 : 1); attempt++) {
-            if (!atomic_load(&subscribed)) break;
+            if (!ble_bridge_connected()) break;
             if (notify_send(NULL, &packet)) {
                 delivered = true;
                 break;
@@ -323,11 +381,11 @@ void ble_bridge_publish(const bridge_packet_t *packet)
     if(suppress)return; // intentional suppression, not a dropped frame
     QueueHandle_t queue = bridge_packet_is_ack(packet) ? ack_notify_queue :
         (bridge_packet_is_raw(packet) ? notify_queue : control_notify_queue);
-    if (atomic_load(&subscribed) && xQueueSend(queue, packet, 0) != pdTRUE)
+    if (ble_bridge_connected() && xQueueSend(queue, packet, 0) != pdTRUE)
         atomic_fetch_add(&dropped, 1);
 }
 uint32_t ble_bridge_dropped(void) { return atomic_load(&dropped); }
-bool ble_bridge_connected(void) { return atomic_load(&subscribed); }
+bool ble_bridge_connected(void) { if(network_dual_mode())return false;return network_wifi_mode()?network_connected():atomic_load(&subscribed); }
 bool ble_bridge_take_stop(void) { return atomic_exchange(&stop_requested, false); }
 void ble_bridge_set_motor_busy(bool busy) { atomic_store(&motor_busy, busy); }
 
@@ -347,6 +405,12 @@ void ble_bridge_init(QueueHandle_t commands, QueueHandle_t queries)
     ESP_ERROR_CHECK(err);
     bridge_name_load(saved_name);
     ESP_ERROR_CHECK(nimble_port_init());
+    ble_hs_cfg.sm_io_cap=BLE_HS_IO_DISPLAY_ONLY;
+    ble_hs_cfg.sm_bonding=1;ble_hs_cfg.sm_mitm=1;ble_hs_cfg.sm_sc=1;
+    ble_hs_cfg.sm_our_key_dist=BLE_SM_PAIR_KEY_DIST_ENC|BLE_SM_PAIR_KEY_DIST_ID;
+    ble_hs_cfg.sm_their_key_dist=BLE_SM_PAIR_KEY_DIST_ENC|BLE_SM_PAIR_KEY_DIST_ID;
+    ble_hs_cfg.store_status_cb=ble_store_util_status_rr;ble_store_config_init();
+    network_init();
     ble_hs_cfg.sync_cb = on_sync;
     ble_hs_cfg.reset_cb = on_reset;
     ble_svc_gap_init();

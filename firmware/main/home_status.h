@@ -1,7 +1,8 @@
 #pragma once
 #include "ble_bridge.h"
 #define HOME_MOTORS 32
-typedef struct { uint32_t id, feedback; uint8_t family; bool seen; int64_t last; } home_motor_t;
+#define HOME_TEMPERATURES_PER_PACKET 10
+typedef struct { uint32_t id, feedback; uint8_t family, temperature; bool seen; int64_t last; } home_motor_t;
 typedef struct {
  home_motor_t motors[HOME_MOTORS], staged[HOME_MOTORS];
  uint32_t revision, staged_revision, staged_mask; uint8_t count, mode, target; bool quiet, dirty; bridge_packet_t latest; int64_t next_sample;
@@ -13,5 +14,6 @@ bool home_command(home_status_t *s,const bridge_packet_t *p,bridge_packet_t *ack
 void home_observe(home_status_t *s,const bridge_packet_t *p,int64_t now_ms);
 bool home_detail(home_status_t *s,bridge_packet_t *p,int64_t now_ms);
 void home_snapshot(const home_status_t *s,bridge_packet_t *p,int64_t now_ms);
+bool home_temperature_snapshot(const home_status_t *s,bridge_packet_t *p,unsigned start,int64_t now_ms);
 
 bool home_detail_stats(home_status_t *s,bridge_packet_t *p,int64_t now_ms);

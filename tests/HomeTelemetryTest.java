@@ -17,5 +17,19 @@ public class HomeTelemetryTest {
  p=h.poll(9000,true);check(p[1]==0x16&&p[3]==2&&MonitorCommands.allowed(p));
  byte[] invalid=p.clone();invalid[3]=3;check(!MonitorCommands.allowed(invalid));invalid=p.clone();FeedbackQueries.Request.put(invalid,4,0);check(!MonitorCommands.allowed(invalid));invalid=p.clone();FeedbackQueries.Request.put(invalid,4,0x7ff);check(!MonitorCommands.allowed(invalid));invalid=p.clone();FeedbackQueries.Request.put(invalid,8,0x800);check(!MonitorCommands.allowed(invalid));
  p=h.poll(9020,true);check(p[1]==0x17&&p[2]==2&&p[3]==1&&MonitorCommands.allowed(p));
+ // Additive home temperatures retain unsigned values, nullable stale slots,
+ // registry/revision checks and the existing quiet-mode transaction ordering.
+ int[][] motors=new int[32][3];for(int i=0;i<motors.length;i++)motors[i]=new int[]{i==2?2:1,i+1,i+1};
+ h.configure(true,motors);h.poll(9100,true);byte[] temps=new byte[20];temps[0]=1;temps[1]=16;temps[3]=32;
+ FeedbackQueries.Request.put(temps,16,h.revision());check(h.temperatures(temps)==null);
+ for(int i=0;i<32;i++)h.poll(9120+i*20,true);
+ FeedbackQueries.Request.put(temps,16,h.revision());temps[4]=7;temps[6]=0;temps[7]=(byte)255;temps[8]=35;
+ Integer[] values=h.temperatures(temps);check(values.length==10&&values[0]==0&&values[1]==255&&values[2]==null&&values[3]==null);
+ temps[2]=30;temps[4]=3;temps[6]=42;temps[7]=43;values=h.temperatures(temps);check(values.length==2&&values[0]==42&&values[1]==43);
+ temps[4]=0;values=h.temperatures(temps);check(values[0]==null&&values[1]==null);
+ temps[4]=4;check(h.temperatures(temps)==null);temps[4]=3;temps[3]=31;check(h.temperatures(temps)==null);temps[3]=32;temps[2]=31;check(h.temperatures(temps)==null);
+ temps[2]=30;FeedbackQueries.Request.put(temps,16,h.revision()+1);check(h.temperatures(temps)==null);FeedbackQueries.Request.put(temps,16,h.revision());
+ h.configure(false,motors);check(h.temperatures(temps)==null);for(int i=0;i<=32;i++)h.poll(10000+i*20,true);FeedbackQueries.Request.put(temps,16,h.revision());check(h.temperatures(temps)==null);
+ check(h.temperatures(null)==null&&h.temperatures(new byte[19])==null);
  System.out.println("PASS: home/detail subscriptions, ordered writes, capability gating, stale ACK, timeout retry, zero motors and strict allowlist.");}
 }

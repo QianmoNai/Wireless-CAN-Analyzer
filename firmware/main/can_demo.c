@@ -1,5 +1,4 @@
 #include <inttypes.h>
-#include <stdio.h>
 #include <stdatomic.h>
 #include <string.h>
 #include "esp_log.h"
@@ -14,6 +13,8 @@
 #include "can_load.h"
 #include "can_rates.h"
 #include "board_ui.h"
+#include "dual_link.h"
+#include "network_link.h"
 static void publish_local_and_ble(const bridge_packet_t *packet)
 {
     board_ui_observe(packet);
@@ -89,7 +90,6 @@ static bool on_tx(twai_node_handle_t node, const twai_tx_done_event_data_t *even
 static void rx_task(void *arg)
 {
     rx_message_t message;
-    int64_t last_log = -100000;
     for (;;) {
         if (xQueueReceive(rx_queue, &message, portMAX_DELAY) != pdTRUE) continue;
         bridge_packet_t packet = {.bytes = {1, 1}};
@@ -100,16 +100,8 @@ static void rx_task(void *arg)
         if (len > 8) len = 8;
         memcpy(packet.bytes + 8, message.data, len);
         wire_put_u32(packet.bytes + 16, message.timestamp);
+        if(network_dual_mode())dual_link_can_rx(packet.bytes);
         publish_local_and_ble(&packet);
-        // Motor feedback can arrive at 1 kHz; do not let UART logging stall reception.
-        int64_t now = esp_timer_get_time();
-        if (now - last_log < 100000) continue;
-        last_log = now;
-        char hex[25] = {0};
-        for (unsigned i = 0; i < len; i++) snprintf(hex + i * 3, sizeof(hex) - i * 3, "%02X ", message.data[i]);
-        ESP_LOGI(TAG, "RX %s %s ID=0x%" PRIX32 " DLC=%u DATA=[%s]",
-                 message.header.ide ? "EXT" : "STD", message.header.rtr ? "RTR" : "DATA",
-                 message.header.id, (unsigned)message.header.dlc, hex);
     }
 }
 static void report_tx(bridge_packet_t *packet, bool success, uint8_t errors, bool log_frame)
@@ -165,6 +157,7 @@ static esp_err_t set_bitrate(twai_node_handle_t node, uint32_t rate)
 void app_main(void)
 {
     owner_task=xTaskGetCurrentTaskHandle();
+    dual_link_set_owner(owner_task);
     esp_timer_handle_t poll_timer;
     esp_timer_create_args_t timer_args={.callback=poll_wake,.name="dm_poll",.skip_unhandled_events=true};
     ESP_ERROR_CHECK(esp_timer_create(&timer_args,&poll_timer));
@@ -196,7 +189,7 @@ void app_main(void)
     static bridge_packet_t active, pulse_command;
     static twai_frame_t frame;
     uint32_t counter = 0, bitrate = CAN_BITRATE, pulse_sent = 0, pulse_failed = 0;
-    bool pending = false, recovering = false, demo = false;
+    bool pending = false, recovering = false, demo = false, active_dual = false;
     bool pulse = false, final_frame = false;
     uint8_t ending = 0;
     can_rates_t rates;
@@ -208,7 +201,7 @@ void app_main(void)
         if (pending && xQueueReceive(tx_done_queue, &result, 0) == pdTRUE) {
             bool success=result.success;
             pending = false;
-            report_tx(&active, success,result.errors,active_query==0);
+            report_tx(&active, success,result.errors,active_query==0&&!active_dual);
             if(active_query){poll_result(&polls,active_query,success,result.errors,esp_timer_get_time());active_query=0;}
             if (pulse) {
                 if (success) pulse_sent++; else pulse_failed++;
@@ -258,7 +251,7 @@ void app_main(void)
         }
         if (!pending) {
             bridge_packet_t command;
-            bool have_frame = false;
+            bool have_frame = false;active_dual=false;
             if (pulse && (ending || now >= next_pulse)) {
                 active = pulse_command;
                 active.bytes[1] = 0x10;
@@ -272,6 +265,8 @@ void app_main(void)
                 }
                 next_pulse = now + 10;
                 have_frame = true;
+            } else if (!pulse && !recovering && network_dual_mode() && dual_link_can_take(active.bytes)) {
+                active_dual=true;have_frame=true;
             } else if (!pulse && xQueueReceive(command_queue, &command, 0) == pdTRUE) {
                 if (command.bytes[1] == 0x11) {
                     demo = command.bytes[2] != 0;
@@ -318,6 +313,7 @@ void app_main(void)
                     have_frame=true;
                 }
             }
+            if(active_dual&&!dual_link_connected())have_frame=false;
             if (have_frame) {
                 frame = (twai_frame_t){
                     .header = {.id = wire_u32(active.bytes + 4), .dlc = active.bytes[3],
@@ -333,7 +329,7 @@ void app_main(void)
                 else {
                     atomic_store(&tx_inflight,false);
                     atomic_store(&inflight_frame_bits,0);
-                    report_tx(&active, false,POLL_ERR_DRIVER,active_query==0);
+                    report_tx(&active, false,POLL_ERR_DRIVER,active_query==0&&!active_dual);
                     if(active_query){poll_result(&polls,active_query,false,POLL_ERR_DRIVER,esp_timer_get_time());active_query=0;}
                     if (pulse) {
                         pulse_failed++;
@@ -351,7 +347,7 @@ void app_main(void)
             wire_put_u32(packet.bytes + 4, atomic_load(&rx_count));
             wire_put_u32(packet.bytes + 8, tx_count);
             wire_put_u32(packet.bytes + 12, tx_failed);
-            wire_put_u32(packet.bytes + 16, ble_bridge_dropped() + atomic_load(&rx_dropped));
+            wire_put_u32(packet.bytes + 16, ble_bridge_dropped() + atomic_load(&rx_dropped) + dual_link_dropped());
             publish_local_and_ble(&packet);
             publish_config(bitrate, 0, 0);
             next_status = now + 1000;

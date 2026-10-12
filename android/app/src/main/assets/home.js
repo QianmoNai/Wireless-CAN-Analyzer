@@ -1,7 +1,9 @@
 'use strict';
 const $=id=>document.getElementById(id);
 let channels=[],receivedAt=0,channelSignature='',reconnectBusy=false,homeConfigBusy=false;
-const cards=new Map();
+const cards=new Map();let cardOrderSignature='';
+function setText(node,value){if(node.textContent!==value)node.textContent=value}
+function setAttribute(node,key,value){if(node.getAttribute(key)!==value)node.setAttribute(key,value)}
 function callNative(method,...args){if(window.HomeAndroid&&typeof HomeAndroid[method]==='function')HomeAndroid[method](...args)}
 $('addChannel').onclick=()=>callNative('addChannel');$('filter').onchange=()=>{endGesture(false);renderHome()};
 function updateConnectButton(){const button=$('connectAll');button.disabled=reconnectBusy||homeConfigBusy;button.textContent=reconnectBusy?'连接中…':'连接';button.setAttribute('aria-busy',String(reconnectBusy))}
@@ -43,7 +45,7 @@ function finishDrag(commit){
  if(!drag)return;const d=drag;if(commit&&d.ghost)placeDrag();drag=null;cancelAnimationFrame(d.raf);
  if(!commit)$('sortNotice').hidden=true;
  if(commit){const visible=[...$('cards').children].map(c=>c.dataset.orderKey);const keys=new Set(visible);let i=0;sortOrder=sortOrder.map(k=>keys.has(k)?visible[i++]:k);saveOrder()}
- renderHome();
+ cardOrderSignature='';renderHome();
  if(d.ghost){const rect=d.card.getBoundingClientRect();const start=d.ghost.style.transform;
   const cleanup=()=>{d.ghost.remove();if(drag?.card!==d.card)d.card.classList.remove('dragging')};
   if(reduceMotion()||document.hidden)cleanup();else{const motion=d.ghost.animate([{transform:start,opacity:1},{transform:`translate3d(${rect.left}px,${rect.top}px,0) scale(1)`,opacity:1}],{duration:210,easing:'cubic-bezier(.2,.8,.2,1)',fill:'forwards'});motion.onfinish=cleanup;motion.oncancel=cleanup;}
@@ -110,25 +112,31 @@ function renderHome(){
   for(const c of channels){$('filter').add(new Option('通道 '+c.slot,String(c.slot)));const b=document.createElement('button');b.className='channel'+(c.connected?' online':'');b.textContent='通道 '+c.slot+' · '+c.name;b.title=c.connectionMessage||c.label||'';const state=document.createElement('span');state.textContent=c.label;b.append(state);b.onclick=()=>callNative('openChannel',c.slot);$('channels').append(b)}
   $('filter').value=Array.from($('filter').options).some(o=>o.value===selection)?selection:'all';
  }
- const all=channels.reduce((n,c)=>n+(c.motors||[]).length,0);$('summary').textContent=channels.filter(c=>c.connected).length+' / '+channels.length+' 设备已连接 · '+all+' 台监控设备';$('addChannel').disabled=channels.length>=4;
+ const all=channels.reduce((n,c)=>n+(c.motors||[]).length,0);setText($('summary'),channels.filter(c=>c.connected).length+' / '+channels.length+' 设备已连接 · '+all+' 台监控设备');$('addChannel').disabled=channels.length>=4;
  const wanted=new Set(),ordered=[];let count=0;
  for(const c of channels){if($('filter').value!=='all'&&Number($('filter').value)!==c.slot)continue;
   for(const m of c.motors||[]){const id=c.slot+'|'+m.key;wanted.add(id);count++;let card=cards.get(id);
-   if(!card){card=document.createElement('article');card.className='motor';card.tabIndex=0;card.setAttribute('role','button');card.innerHTML='<div class="motor-heading"><span class="source"></span><span class="motor-addresses"><span class="motor-id"></span><span class="feedback-id"></span></span></div><h2></h2><p class="model"></p><span class="status"></span>';card.dataset.orderKey=motorOrderKey(c.slot,m);bindMotorCard(card,c.slot,m.key);cards.set(id,card);$('cards').append(card)}
-   ordered.push(card);
-   card.querySelector('.source').textContent='通道 '+c.slot+' · '+c.name;card.querySelector('h2').textContent=m.name;card.querySelector('.model').textContent=m.model;const badge=card.querySelector('.motor-id');badge.textContent='ID '+m.id;badge.setAttribute('aria-label','电机编号 '+m.id);badge.title='电机 ID';const feedback=card.querySelector('.feedback-id');feedback.textContent='RX '+(m.feedbackId??'—');feedback.title='反馈 CAN ID';feedback.setAttribute('aria-label','反馈 CAN ID '+(m.feedbackId??'未配置'));card.querySelector('.source').title='通道 '+c.slot+' · '+c.name;
+   if(!card){card=document.createElement('article');card.className='motor';card.tabIndex=0;card.setAttribute('role','button');card.innerHTML='<div class="motor-heading"><span class="source"></span><span class="motor-addresses"><span class="motor-id"></span><span class="feedback-id"></span></span></div><h2></h2><p class="model"></p><div class="motor-footer"><span class="status"></span><span class="motor-temperature"><small>温度</small><strong></strong></span></div>';card.dataset.orderKey=motorOrderKey(c.slot,m);bindMotorCard(card,c.slot,m.key);cards.set(id,card);$('cards').append(card)}
+   ordered.push(card);if(!card.parts)card.parts={source:card.querySelector('.source'),name:card.querySelector('h2'),model:card.querySelector('.model'),badge:card.querySelector('.motor-id'),feedback:card.querySelector('.feedback-id'),status:card.querySelector('.status'),temperature:card.querySelector('.motor-temperature'),temperatureValue:card.querySelector('.motor-temperature strong')};
+   const {source,name,model,badge,feedback,status,temperature,temperatureValue}=card.parts;
+   const metadata=JSON.stringify([c.slot,c.name,m.name,m.model,m.id,m.feedbackId,m.family]);
+   if(card.metadata!==metadata){card.metadata=metadata;setText(source,'通道 '+c.slot+' · '+c.name);source.title=source.textContent;setText(name,m.name);setText(model,m.model);setText(badge,'ID '+m.id);setAttribute(badge,'aria-label','电机编号 '+m.id);badge.title=m.family==='imu'?'IMU CAN_ID':'电机 ID';setText(feedback,'RX '+(m.feedbackId??'—'));feedback.title='反馈 CAN ID';setAttribute(feedback,'aria-label','反馈 CAN ID '+(m.feedbackId??'未配置'));temperature.hidden=m.family==='imu'}
    const snapshotAge=(c.age||0)+Date.now()-receivedAt,statusAge=(m.statusAge||0)+snapshotAge;
    const state=!c.connected?'disconnected':snapshotAge>=4000||statusAge>=3000?'stale':m.connectionStatus||'waiting';
-   const status=card.querySelector('.status');status.textContent={disconnected:'● 蓝牙未连接',stale:'● 状态更新超时',online:'● 电机在线',offline:'● 电机反馈超时',waiting:'● 等待电机反馈'}[state]||'● 等待电机反馈';status.className='status'+(state==='online'?' live':state==='offline'||state==='stale'?' stale':'');
-   if(m.family==='imu'){if(c.connected&&c.imuSupported===false){status.textContent='● 请更新 ESP32 固件至 1.17';status.className='status stale'}else status.textContent=status.textContent.replaceAll('电机','IMU');badge.title='IMU CAN_ID'}
-   card.setAttribute('aria-label','通道 '+c.slot+' '+m.name+'，电机 ID '+m.id+'，反馈 CAN ID '+(m.feedbackId??'未配置')+'，'+status.textContent+'，点击查看详情，左滑删除，右滑配置，长按拖动排序');
+   let statusText={disconnected:'● 蓝牙未连接',stale:'● 状态更新超时',online:'● 电机在线',offline:'● 电机反馈超时',waiting:'● 等待电机反馈'}[state]||'● 等待电机反馈';let statusClass='status'+(state==='online'?' live':state==='offline'||state==='stale'?' stale':'');
+   if(m.family==='imu'){if(c.connected&&c.imuSupported===false){statusText='● 请更新 ESP32 固件至 1.17';statusClass='status stale'}else statusText=statusText.replaceAll('电机','IMU')}
+   setText(status,statusText);if(status.className!==statusClass)status.className=statusClass;
+   const temperatureFresh=state==='online'&&m.temperatureSupported!==false&&Number.isFinite(m.temperature)&&Number.isFinite(m.temperatureAge)&&m.temperatureAge+snapshotAge<3000;
+   const temperatureText=temperatureFresh?m.temperature+' °C':'— °C';setText(temperatureValue,temperatureText);
+   setAttribute(temperature,'title',m.temperatureSupported===false?'此型号不提供温度反馈':temperatureFresh?'当前电机温度':'等待最新温度反馈');setAttribute(temperature,'aria-label','电机温度 '+(temperatureFresh?m.temperature+' 摄氏度':'暂无数据'));
+   setAttribute(card,'aria-label','通道 '+c.slot+' '+m.name+'，电机 ID '+m.id+'，反馈 CAN ID '+(m.feedbackId??'未配置')+'，'+status.textContent+(m.family==='imu'?'':'，电机温度 '+(temperatureFresh?m.temperature+' 摄氏度':'暂无数据'))+'，点击查看详情，左滑删除，右滑配置，长按拖动排序');
 
   }
  }
  for(const [id,card] of cards)if(!wanted.has(id)){card.cancelPress();card.remove();cards.delete(id)}
- ordered.sort((a,b)=>sortOrder.indexOf(a.dataset.orderKey)-sortOrder.indexOf(b.dataset.orderKey));
- let cursor=$('cards').firstChild;for(const card of ordered){if(card!==cursor)$('cards').insertBefore(card,cursor);cursor=card.nextSibling}
- $('motorCount').textContent=count;$('empty').hidden=count!==0;
+ const orderSignature=JSON.stringify([ordered.map(c=>c.dataset.orderKey),sortOrder]);
+ if(cardOrderSignature!==orderSignature){cardOrderSignature=orderSignature;const rank=new Map(sortOrder.map((key,i)=>[key,i]));ordered.sort((a,b)=>rank.get(a.dataset.orderKey)-rank.get(b.dataset.orderKey));let cursor=$('cards').firstChild;for(const card of ordered){if(card!==cursor)$('cards').insertBefore(card,cursor);cursor=card.nextSibling}}
+ setText($('motorCount'),String(count));$('empty').hidden=count!==0;
 }
 setInterval(renderHome,1000);
 
