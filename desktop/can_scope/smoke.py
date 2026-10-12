@@ -6,6 +6,7 @@ from .protocol import packet, can_command
 
 def run(app, window, output):
     checks = {}
+    finished = False
     def js(source, callback=lambda _:None):
         window.views[1].page().runJavaScript(source, callback)
     def capture(suffix):
@@ -15,7 +16,7 @@ def run(app, window, output):
         finish()
     def begin():
         if 1 not in window.ready:
-            failure('page did not load')
+            QTimer.singleShot(200, begin)
             return
         window.add_channel()
         frame=bytearray(can_command(0x201,bytes([0x10,0,0,0x60,0,0x20,42,0])))
@@ -66,9 +67,14 @@ def run(app, window, output):
         checks['isolated'] = count == 0
         finish()
     def finish():
+        nonlocal finished
+        if finished:
+            return
+        finished = True
         report=dict(ready=sorted(window.ready),js_errors=window.js_errors,checks=checks)
         output.with_suffix('.json').write_text(json.dumps(report,ensure_ascii=False,indent=2))
         ok=(not window.js_errors and checks.get('isolated') and checks.get('overview',{}).get('cards')==1 and checks.get('detail',{}).get('samples')==50 and checks.get('live',{}).get('visible'))
         window.close()
         app.exit(0 if ok else 1)
+    QTimer.singleShot(60000, lambda: failure('UI test timed out'))
     QTimer.singleShot(2500,begin)

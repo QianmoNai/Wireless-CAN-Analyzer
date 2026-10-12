@@ -9,6 +9,7 @@ permissions:
   contents: read
 jobs:
   build:
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -57,4 +58,6 @@ jobs:
         if: always()
         with:
           name: desktop-smoke-${{ runner.os }}
-          path: desktop/build/*.png
+          path: |
+            desktop/build/*.png
+            desktop/build/*.json

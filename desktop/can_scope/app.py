@@ -7,6 +7,7 @@ from pathlib import Path
 import sys
 import tempfile
 import threading
+from shiboken6 import delete, isValid
 
 from PySide6.QtCore import QObject, Signal, Slot, QTimer, QUrl, QFile, QIODevice, QStandardPaths
 from PySide6.QtGui import QColor
@@ -245,8 +246,6 @@ class Window(QMainWindow):
             self.runtime.stop()
         except Exception:
             pass
-        for view in self.views.values():
-            view.page().deleteLater()
         event.accept()
 
 
@@ -270,6 +269,14 @@ def main():
         from .smoke import run
         run(app, window, options.smoke)
     code = app.exec()
+    # Destroy pages before profiles so Chromium releases its storage handles.
+    for view in window.views.values():
+        page = view.page()
+        if isValid(page):
+            delete(page)
+    for profile in window.profiles:
+        if isValid(profile):
+            delete(profile)
     if temp:
         temp.cleanup()
     return code
