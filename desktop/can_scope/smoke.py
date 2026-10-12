@@ -72,7 +72,7 @@ def run(app, window, output):
             return
         finished = True
         report=dict(ready=sorted(window.ready),js_errors=window.js_errors,checks=checks)
-        output.with_suffix('.json').write_text(json.dumps(report,ensure_ascii=False,indent=2))
+        output.with_suffix('.json').write_text(json.dumps(report,ensure_ascii=False,indent=2), encoding='utf-8')
         ok=(not window.js_errors and checks.get('isolated') and checks.get('overview',{}).get('cards')==1 and checks.get('detail',{}).get('samples')==50 and checks.get('live',{}).get('visible'))
         print("Smoke checks completed", flush=True)
         # Leave the JavaScript result callback before tearing down its page.
