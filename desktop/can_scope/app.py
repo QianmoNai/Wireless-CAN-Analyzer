@@ -259,7 +259,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--smoke', type=Path, help='offline UI smoke test; writes PNG and report')
     options = parser.parse_args()
-    if options.smoke:
+    if options.smoke and sys.stderr is not None:
         import faulthandler
         faulthandler.enable()
         faulthandler.dump_traceback_later(30, repeat=True)
