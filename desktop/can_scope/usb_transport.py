@@ -1,6 +1,7 @@
 """Native USB Serial/JTAG, separate from the device's external UART pins."""
 import asyncio
 import secrets
+import os
 import time
 from .usb_protocol import Decoder, encode, HELLO, PING, BYE
 
@@ -31,7 +32,8 @@ class UsbTransport:
         self.ready = asyncio.get_running_loop().create_future()
         try:
             # DTR/RTS remain low: opening a port must not reset the ESP32.
-            self.port = serial.Serial(port=None, baudrate=115200, timeout=0, write_timeout=.5)
+            options = {"exclusive": True} if os.name == "posix" else {}
+            self.port = serial.Serial(port=None, baudrate=115200, timeout=0, write_timeout=.5, **options)
             self.port.dtr = False
             self.port.rts = False
             self.port.port = device
