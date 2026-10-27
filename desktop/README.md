@@ -1,8 +1,10 @@
-# CAN Scope Desktop 1.0.0
+# CAN Scope Desktop 1.1.0
 
 Linux / Windows 桌面上位机，连接本项目 ESP32-S3 固件。Qt 桌面窗口复用 Android 的电机解析、曲线、配置与监控资源，BLE 使用系统 BlueZ / WinRT，局域网使用证书指纹绑定的 TLS 1.2。设备双机 A/B 模式不接受上位机连接。
 
 ## 功能
+
+- 新增 UART 无线串口：通过蓝牙或 Wi-Fi 双向收发 HEX / UTF-8，设备屏幕选择 CAN 或 UART；支持波特率状态、丢弃统计、分段完成确认。需配套 ESP32-S3 1.23.0。
 
 - 最多四个独立通道，每通道可选蓝牙或 Wi-Fi，独立保存电机配置与帧记录上限。
 - DJI / 达妙电机、DM IMU 状态、温度、实时曲线、全屏曲线及采样频率配置。
@@ -83,3 +85,11 @@ python desktop/main.py --smoke desktop/build/smoke.png
 本次交付的验证范围以任务说明为准：自动测试和 Linux 界面启动不等于 Windows 蓝牙硬件或真实电机总线已经联调。
 
 参考：[Qt 桌面部署](https://doc.qt.io/qtforpython-6/deployment/index.html)、[Bleak 支持平台](https://bleak.readthedocs.io/en/stable/)。
+
+### 无线串口（固件 1.23.0）
+
+最新源码共用 App 的 UART 页面。设备屏幕切到 UART 后，通过原有蓝牙或 Wi-Fi 连接即可接收/发送 HEX 或 UTF-8 字节，屏幕切回 CAN 后恢复 CAN 页面。TX=GPIO43、RX=GPIO44，默认 115200 / 8N1，接线和吞吐边界见 [无线串口说明](../docs/UART.md)。既有 Desktop 1.0.0 Release 安装文件不包含此更新，需从本次源码运行或重新打包。
+
+## 1.1.0 更新包
+
+Windows：解压 `CAN-Scope-Desktop-1.1.0-Windows-x64.zip`，运行目录中的 `CAN-Scope.exe`。Linux：解压 `CAN-Scope-Desktop-1.1.0-Linux-x64.tar.gz`，运行 `CAN-Scope/CAN-Scope`。完整目录一起保留，内含运行库，无需安装 Python。先退出旧版再启动新版；用户配置仍从原位置读取。SHA-256 校验文件与压缩包一起提供。

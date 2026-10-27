@@ -4,6 +4,8 @@ import subprocess
 import sys
 import shutil
 import tarfile
+import hashlib
+from can_scope import __version__
 
 ROOT = Path(__file__).resolve().parent
 subprocess.run([
@@ -20,15 +22,17 @@ if sys.platform == 'linux':
     for helper in output.rglob('QtWebEngineProcess'):
         helper.chmod(0o755)
 shutil.copy(ROOT.parent/'LICENSE', output/'LICENSE')
-shutil.copy(ROOT/'README.md', output/'README.md')
+(output/'README.md').write_text((ROOT/'README.md').read_text('utf-8').replace('../docs/UART.md','UART.md'), encoding='utf-8')
+shutil.copy(ROOT.parent/'docs/UART.md', output/'UART.md')
 # Archive preserves execute bits even on filesystems that ignore chmod.
 if sys.platform == 'linux':
-    archive = ROOT/'dist/CAN-Scope-Desktop-1.0.0-Linux-x64.tar.gz'
+    archive = ROOT/f'dist/CAN-Scope-Desktop-{__version__}-Linux-x64.tar.gz'
     def permissions(info):
         info.mode = 0o755 if info.isdir() or Path(info.name).name in ('CAN-Scope', 'QtWebEngineProcess') else 0o644
         return info
     with tarfile.open(archive, 'w:gz') as tar:
         tar.add(output, arcname='CAN-Scope', filter=permissions)
 else:
-    archive = Path(shutil.make_archive(str(ROOT/'dist/CAN-Scope-Desktop-1.0.0-Windows-x64'), 'zip', ROOT/'dist', 'CAN-Scope'))
+    archive = Path(shutil.make_archive(str(ROOT/f'dist/CAN-Scope-Desktop-{__version__}-Windows-x64'), 'zip', ROOT/'dist', 'CAN-Scope'))
+archive.with_suffix(archive.suffix+'.sha256').write_text(hashlib.sha256(archive.read_bytes()).hexdigest()+'  '+archive.name+'\n', encoding='ascii')
 print(archive)

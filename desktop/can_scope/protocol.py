@@ -48,6 +48,8 @@ def setting_command(value):
     p = bytes.fromhex(value)
     if p[0] != 1:
         raise ValueError('不支持的协议版本')
+    if p[1] == 0x18 and 1 <= p[2] <= 12 and not p[3] and not any(p[4+p[2]:16]) and u32(p,16):
+        return p
     if p[1] == 0x12 and p[2:4] == b'\0\0' and p[8:16] == bytes(8) and u32(p, 4) in (125000, 250000, 500000, 1000000):
         return p
     if p[1] == 0x13 and 1 <= p[2] <= 16 and not p[3] and not any(p[4+p[2]:]):
