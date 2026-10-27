@@ -1,7 +1,7 @@
 'use strict';
 window.devicePollingSupported=false;window.bridgeBitrate=0;window.nameSaving=false;window.deviceSettingsBusy=false;
 let capabilities=0,currentBleName='',settingsRequest=null,nameEdited=false,settingsToken=1;
-function watchSettings(){window.deviceSettingsBusy=!!settingsRequest;window.nameSaving=!!settingsRequest&&settingsRequest.kind==='name';$('saveBleName').disabled=!connected||!(capabilities&4)||!!settingsRequest;$('saveBitrate').disabled=!connected||!(capabilities&1)||!!settingsRequest;$('busBitrate').disabled=!!settingsRequest}
+function watchSettings(){window.deviceSettingsBusy=!!settingsRequest;window.nameSaving=!!settingsRequest&&settingsRequest.kind==='name';$('saveBleName').disabled=!connected||!(capabilities&4)||!!settingsRequest;$('saveBitrate').disabled=!!window.uartMode||!connected||!(capabilities&1)||!!settingsRequest;$('busBitrate').disabled=!!window.uartMode||!!settingsRequest}
 function finishSettings(message){if(!settingsRequest)return;const kind=settingsRequest.kind;clearTimeout(settingsRequest.timer);settingsRequest=null;$(kind==='name'?'bleNameResult':'rateResult').textContent=message;watchSettings()}
 function deviceWriteFailed(message){finishSettings(message)}
 function nameInputChanged(){nameEdited=true;$('bleNameResult').textContent=new TextEncoder().encode($('bleNameInput').value.trim()).length+' / 16 字节'}
@@ -11,7 +11,7 @@ function saveBleName(){try{
  if(!bytes.length||bytes.length>16||/[\u0000-\u001f\u007f-\u009f]/.test(name))throw Error('名称须为 1–16 个 UTF-8 字节，不能包含控制字符');
  const a=new Uint8Array(20);a[0]=1;a[1]=0x13;a[2]=bytes.length;a.set(bytes,4);startSettings('name',{name},a);
  }catch(e){$('bleNameResult').textContent=e.message}}
-function saveBitrate(){try{if(!(capabilities&1))throw Error('固件不支持设置波特率');const rate=Number($('busBitrate').value);if(![125000,250000,500000,1000000].includes(rate))throw Error('无效波特率');
+function saveBitrate(){try{if(window.uartMode)throw Error('请先在设备屏幕切回 CAN 数据');if(!(capabilities&1))throw Error('固件不支持设置波特率');const rate=Number($('busBitrate').value);if(![125000,250000,500000,1000000].includes(rate))throw Error('无效波特率');
  const a=new Uint8Array(20);a[0]=1;a[1]=0x12;put32(a,4,rate);const seq=settingsToken++;put32(a,16,seq);startSettings('rate',{seq,rate},a);
  }catch(e){$('rateResult').textContent=e.message}}
 function devicePacket(a){

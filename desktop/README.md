@@ -1,13 +1,17 @@
-# CAN Scope Desktop 1.0.0
+# CAN Scope Desktop 1.2.0
 
 Linux / Windows 桌面上位机，连接本项目 ESP32-S3 固件。Qt 桌面窗口复用 Android 的电机解析、曲线、配置与监控资源，BLE 使用系统 BlueZ / WinRT，局域网使用证书指纹绑定的 TLS 1.2。设备双机 A/B 模式不接受上位机连接。
 
 ## 功能
 
-- 最多四个独立通道，每通道可选蓝牙或 Wi-Fi，独立保存电机配置与帧记录上限。
+- 新增 [USB直连](../docs/USB.md)：CAN / UART 共用原生 USB 接口，免配网，需 ESP32-S3 1.24.0；设备红色界面。
+
+- 新增 UART 无线串口：通过蓝牙或 Wi-Fi 双向收发 HEX / UTF-8，设备屏幕选择 CAN 或 UART；支持波特率状态、丢弃统计、分段完成确认。需配套 ESP32-S3 1.23.0。
+
+- 最多四个独立通道，每通道可选蓝牙、Wi-Fi 或 USB直连，独立保存电机配置与帧记录上限。
 - DJI / 达妙电机、DM IMU 状态、温度、实时曲线、全屏曲线及采样频率配置。
 - CAN 接收/成功发送/失败记录、ID 筛选、总线负载、实际帧率与失败统计。
-- 标准/扩展、数据/远程经典 CAN 帧单次发送，DLC 0–8。通过非零 token 匹配实际 CAN 完成事件；无线写入完成不表示 CAN 成功，超时/断开显示结果未知且不自动重发。
+- 标准/扩展、数据/远程经典 CAN 帧单次发送，DLC 0–8。通过非零 token 匹配实际 CAN 完成事件；提交完成不表示 CAN 成功，超时/断开显示结果未知且不自动重发。
 - 达妙设备端定时反馈查询，ACK 确认后显示启用；续租失败停止续租，固件租约最长 3 秒。查询开启状态不保存、不自动恢复。
 - 蓝牙安全配网、已绑定设备局域网发现、手动 IPv4 连接；修改 CAN 波特率、设备名称。
 - 与 Android 兼容的 JSON 通道配置导入/导出；多个通道的备份导入时选择其中一个到当前标签页。CSV 导出当前保留的帧记录。
@@ -50,6 +54,8 @@ Linux Qt WebEngine 需要桌面图形库、NSS、音频基础库和中文字体�
 
 ## 连接
 
+USB：设备屏幕通信模式选择 USB直连，连接原生 USB 口，电脑端选择 USB直连后扫描并选择串口。外接单片机继续接 TX/RX 引脚。
+
 1. ESP32 屏幕选择蓝牙模式；桌面程序选蓝牙，点击连接设备、扫描并连接。每台设备同一时间只连接一个上位机，请先断开手机 App。
 2. 首次 Wi-Fi 使用：在电脑通过蓝牙连接，进入设备设置读取网络状态或配置 Wi-Fi。系统配对弹窗输入 ESP32 屏幕上的六位码；Linux 需桌面蓝牙管理器的配对代理运行。
 3. 完成配网并保存设备凭据后，在 ESP32 屏幕切换 Wi-Fi 模式，桌面通道也切换 Wi-Fi；电脑与设备处于同一局域网。可搜索或填写设备屏幕 IP。UDP 32323 发现失败时仍可手动连接 TCP 32323。
@@ -83,3 +89,11 @@ python desktop/main.py --smoke desktop/build/smoke.png
 本次交付的验证范围以任务说明为准：自动测试和 Linux 界面启动不等于 Windows 蓝牙硬件或真实电机总线已经联调。
 
 参考：[Qt 桌面部署](https://doc.qt.io/qtforpython-6/deployment/index.html)、[Bleak 支持平台](https://bleak.readthedocs.io/en/stable/)。
+
+### 无线串口（固件 1.23.0）
+
+最新源码共用 App 的 UART 页面。设备屏幕切到 UART 后，通过原有蓝牙或 Wi-Fi 连接即可接收/发送 HEX 或 UTF-8 字节，屏幕切回 CAN 后恢复 CAN 页面。TX=GPIO43、RX=GPIO44，默认 115200 / 8N1，接线和吞吐边界见 [无线串口说明](../docs/UART.md)。既有 Desktop 1.0.0 Release 安装文件不包含此更新，需从本次源码运行或重新打包。
+
+## 1.1.0 更新包
+
+Windows：解压 `CAN-Scope-Desktop-1.1.0-Windows-x64.zip`，运行目录中的 `CAN-Scope.exe`。Linux：解压 `CAN-Scope-Desktop-1.1.0-Linux-x64.tar.gz`，运行 `CAN-Scope/CAN-Scope`。完整目录一起保留，内含运行库，无需安装 Python。先退出旧版再启动新版；用户配置仍从原位置读取。SHA-256 校验文件与压缩包一起提供。

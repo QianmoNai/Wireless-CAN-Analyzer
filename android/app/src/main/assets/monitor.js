@@ -10,10 +10,10 @@ const native=()=>window.CanAndroid;
 function toast(message){$('toast').textContent=message;$('toast').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('toast').hidden=true,4500)}
 function invoke(name,...args){if(native()&&typeof native()[name]==='function')native()[name](...args);else if(!native())toast('请在安卓 App 中连接设备；此处为界面预览。')}
 function connectAction(){if(connected){invoke('disconnect');return} $('deviceModal').hidden=false;scan()}
-function scan(){deviceMap.clear();$('deviceList').replaceChildren();$('scanHint').textContent=typeof transportMode!=='undefined'&&transportMode==='wifi'?'正在寻找局域网中的已配对设备…':'正在扫描附近的 ESP32…';invoke('scan')}
+function scan(){deviceMap.clear();$('deviceList').replaceChildren();$('scanHint').textContent=typeof transportMode!=='undefined'&&transportMode==='usb'?'正在扫描 USB 串口…':typeof transportMode!=='undefined'&&transportMode==='wifi'?'正在寻找局域网中的已配对设备…':'正在扫描附近的 ESP32…';invoke('scan')}
 function closeDevices(){$('deviceModal').hidden=true}
-function renderChannelTab(name){document.querySelectorAll('.tabs .tab').forEach(b=>b.classList.toggle('active',b.dataset.tab===name));document.querySelectorAll('.view').forEach(v=>v.hidden=v.id!=='view-'+name);if(native()&&typeof native().setMonitorVisible==='function')native().setMonitorVisible(name==='live')}
-function showTab(name){if(!['motor','live','settings'].includes(name))return;if(window.closeMotorDetail)closeMotorDetail(true);renderChannelTab(name)}
+function renderChannelTab(name){document.querySelectorAll('.tabs .tab').forEach(b=>b.classList.toggle('active',b.dataset.tab===name));document.querySelectorAll('.view').forEach(v=>v.hidden=v.id!=='view-'+name);if(native()&&typeof native().setMonitorVisible==='function')native().setMonitorVisible(name==='live'||name==='uart')}
+function showTab(name){if(window.uartMode&&(name==='motor'||name==='live'))name='uart';if(!['motor','live','settings','uart'].includes(name))return;if(window.closeMotorDetail)closeMotorDetail(true);renderChannelTab(name)}
 function setConnection(d){
  connected=d.value==='ready';$('connectionMessage').textContent=d.message||'';$('badgeText').textContent=connected?'已连接':d.value==='connecting'?'连接中':d.value==='scanning'?'扫描中':'未连接';$('connectionBadge').classList.toggle('online',connected);$('connectButton').textContent=connected?'断开连接':'连接设备';$('connectButton').disabled=d.value==='connecting';updateFrameViewState();$('deviceName').textContent=connected?d.name:'连接 CAN 设备';
  resetMonitorMetrics();gotStatus=false;lastStatus=Date.now();rxHistory.fill(0);txHistory.fill(0);bucketRx=bucketTx=0;
@@ -25,7 +25,7 @@ function put32(a,o,n){for(let i=0;i<4;i++)a[o+i]=(n>>>(8*i))&255}
 function hexOf(a){return Array.from(a,x=>x.toString(16).padStart(2,'0')).join('')}
 function parsePacket(hex){if(!/^[0-9a-f]{40}$/i.test(hex))return null;const a=Uint8Array.from(hex.match(/../g),x=>parseInt(x,16));if(a[0]!==1)return null;return a}
 function processPacket(hex,age=0){
- const a=parsePacket(hex);if(!a)return;const kind=a[1];if(window.devicePacket)devicePacket(a);if(window.watchedPacket)watchedPacket(a,age);
+ const a=parsePacket(hex);if(!a)return;const kind=a[1];if(window.uartPacket&&uartPacket(a))return;if(window.devicePacket)devicePacket(a);if(window.watchedPacket)watchedPacket(a,age);
  if(kind===4){gotStatus=true;lastStatus=Date.now()-Math.max(0,age);cleanFailureCount=u32(a,12);renderFailureCount();firmwareDrops=u32(a,16);$('busStatus').textContent=['正常 · Error active','错误警告 · Error warning','错误被动 · Error passive','总线离线 · 正在恢复'][a[2]]||'未知状态';$('dropStatus').textContent='设备 '+firmwareDrops+' · App '+appDrops;updateHistoryNote();return}
  if(kind===13){receiveDeviceLoad(a,age);return}
  if(kind===14){receiveDeviceRates(a,age);return}
@@ -35,7 +35,7 @@ function processPacket(hex,age=0){
 }
 window.onNative=function(type,d){
  const deliveryAge=Number.isFinite(d.sentAt)?Math.max(0,Date.now()-d.sentAt):0;if(Number.isFinite(d.age))d={...d,age:d.age+deliveryAge};
- if(window.networkEvent)networkEvent(type,d);
+ if(window.networkEvent)networkEvent(type,d);if(window.uartEvent)uartEvent(type,d);
  if(type==='busLoad'||type==='busRates'){processPacket(d.hex,d.age||0)}else if(type==='busLoadReset'){clearDeviceLoad();clearDeviceRates()}else if(type==='motorRates'){if(window.motorDetailRates)motorDetailRates(d)}else if(type==='motorSample'){if(window.motorDetailSample)motorDetailSample(d)}else if(type==='detailSupport'){if(window.motorDetailSupport)motorDetailSupport(d)}else if(type==='telemetryMode'){monitorMode=Number(d.mode);clearDeviceLoad();clearDeviceRates();if(window.motorDetailMode)motorDetailMode(d);if(window.motorTelemetryMode)motorTelemetryMode(d)}else if(type==='onlineSummary'){if(window.motorOnlineSummary)motorOnlineSummary(d)}else if(type==='motorTemperatures'){if(window.motorTemperatures)motorTemperatures(d)}else if(type==='queryState'){if(window.motorQueryState)motorQueryState(d)}else if(type==='state')setConnection(d);else if(type==='deviceInfo')$('deviceName').textContent=d.name;
  else if(type==='error'){toast(d.message);if(window.deviceWriteFailed)deviceWriteFailed(d.message)}
  else if(type==='scanStart'){deviceMap.clear();$('deviceList').replaceChildren()}
@@ -44,7 +44,7 @@ window.onNative=function(type,d){
  else if(type==='motorSamples'){appDrops=d.dropped||0;for(const item of d.packets||[])processPacket(item.hex,(item.age||0)+deliveryAge);for(const item of d.items||[])if(window.motorDetailSample)motorDetailSample({key:d.key,hex:item.hex,age:(item.age||0)+deliveryAge});}
  else if(type==='writeDone'&&!d.success&&window.deviceWriteFailed)deviceWriteFailed('设备未接受设置，请重试');
 };
-function renderDevices(){const root=$('deviceList');root.replaceChildren();for(const d of deviceMap.values()){const button=document.createElement('button');button.className='device';const text=document.createElement('div'),name=document.createElement('strong'),addr=document.createElement('small'),signal=document.createElement('span');name.textContent=d.name;addr.textContent=d.address;text.append(name,addr);signal.className='chip';signal.textContent=d.transport==='wifi'?'Wi-Fi':d.rssi+' dBm';button.append(text,signal);button.onclick=()=>{$('scanHint').textContent='正在连接 '+d.name+'…';invoke('connect',d.address)};root.append(button)}}
+function renderDevices(){const root=$('deviceList');root.replaceChildren();for(const d of deviceMap.values()){const button=document.createElement('button');button.className='device';const text=document.createElement('div'),name=document.createElement('strong'),addr=document.createElement('small'),signal=document.createElement('span');name.textContent=d.name;addr.textContent=d.address;text.append(name,addr);signal.className='chip';signal.textContent=d.transport==='usb'?'USB':d.transport==='wifi'?'Wi-Fi':d.rssi+' dBm';button.append(text,signal);button.onclick=()=>{$('scanHint').textContent='正在连接 '+d.name+'…';invoke('connect',d.address)};root.append(button)}}
 function selectFrameFilter(value){
  if(!['all','rx','tx','fail'].includes(value))return;
  frameFilter=value;renderFrames();
