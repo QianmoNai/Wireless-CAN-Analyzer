@@ -6,7 +6,7 @@ on:
   pull_request:
     paths: ['desktop/**', 'android/app/src/main/assets/**', '.github/workflows/desktop.yml']
 permissions:
-  contents: read
+  contents: write
 jobs:
   build:
     timeout-minutes: 25
@@ -50,16 +50,19 @@ jobs:
         run: |
           $p = Start-Process -FilePath desktop/dist/CAN-Scope/CAN-Scope.exe -ArgumentList '--smoke','desktop/build/packaged.png' -Wait -PassThru
           if ($p.ExitCode -ne 0) { exit $p.ExitCode }
-      - uses: actions/upload-artifact@v4
-        with:
-          name: CAN-Scope-Desktop-${{ runner.os }}-x64
-          path: |
-            desktop/dist/*.tar.gz
-            desktop/dist/*.zip
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: desktop-smoke-${{ runner.os }}
-          path: |
-            desktop/build/*.png
-            desktop/build/*.json
+      - name: Save validated packages to private draft
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload desktop-v1.1.0-uart-build desktop/dist/*.sha256 --clobber
+          for file in desktop/dist/*.tar.gz desktop/dist/*.zip; do
+            if [ -f "$file" ]; then gh release upload desktop-v1.1.0-uart-build "$file" --clobber; fi
+          done
+      - name: Save smoke reports
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python -c "import shutil; shutil.make_archive('desktop/build/desktop-smoke-${{ runner.os }}', 'zip', 'desktop/build', 'packaged.json')"
+          gh release upload desktop-v1.1.0-uart-build desktop/build/desktop-smoke-${{ runner.os }}.zip --clobber
