@@ -2,13 +2,40 @@ name: Desktop Linux and Windows
 on:
   workflow_dispatch:
   push:
+    branches: [main]
     paths: ['desktop/**', 'android/app/src/main/assets/**', '.github/workflows/desktop.yml']
   pull_request:
     paths: ['desktop/**', 'android/app/src/main/assets/**', '.github/workflows/desktop.yml']
 permissions:
   contents: read
 jobs:
+  prepare:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.draft.outputs.tag }}
+    steps:
+      - name: Prepare private build draft
+        id: draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BUILD_TAG: desktop-build-${{ github.run_id }}
+          BUILD_SHA: ${{ github.sha }}
+        run: |
+          if ! gh release view "$BUILD_TAG" >/dev/null 2>&1; then
+            gh release create "$BUILD_TAG" --draft --target "$BUILD_SHA" \
+              --title "Desktop build $GITHUB_RUN_NUMBER" \
+              --notes 'Validated desktop build packages. Build draft only; not a complete project release.'
+          fi
+          echo "tag=$BUILD_TAG" >> "$GITHUB_OUTPUT"
   build:
+    needs: prepare
+    if: ${{ !cancelled() && (needs.prepare.result == 'success' || github.event_name == 'pull_request') }}
+    permissions:
+      contents: write
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -50,16 +77,27 @@ jobs:
         run: |
           $p = Start-Process -FilePath desktop/dist/CAN-Scope/CAN-Scope.exe -ArgumentList '--smoke','desktop/build/packaged.png' -Wait -PassThru
           if ($p.ExitCode -ne 0) { exit $p.ExitCode }
-      - uses: actions/upload-artifact@v4
-        with:
-          name: CAN-Scope-Desktop-${{ runner.os }}-x64
-          path: |
-            desktop/dist/*.tar.gz
-            desktop/dist/*.zip
+      - name: Store packages in Release draft
+        if: github.event_name != 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BUILD_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          python -c "from pathlib import Path; import hashlib; files=[*Path('desktop/dist').glob('*.zip'),*Path('desktop/dist').glob('*.tar.gz')]; assert files, 'No build packages'; [p.with_suffix(p.suffix+'.sha256').write_text(hashlib.sha256(p.read_bytes()).hexdigest()+'  '+p.name+'\n', encoding='ascii') for p in files]"
+          for file in desktop/dist/*.tar.gz desktop/dist/*.zip desktop/dist/*.sha256; do
+            if [ -f "$file" ]; then gh release upload "$BUILD_TAG" "$file" --clobber; fi
+          done
+      # Reports are temporary diagnostics. A storage-quota delay must not
+      # turn successfully validated and delivered packages into a failed build.
       - uses: actions/upload-artifact@v4
         if: always()
+        continue-on-error: true
         with:
           name: desktop-smoke-${{ runner.os }}
+          retention-days: 3
+          if-no-files-found: ignore
           path: |
             desktop/build/*.png
             desktop/build/*.json
