@@ -67,7 +67,7 @@ Linux Qt WebEngine 需要桌面图形库、NSS、音频基础库和中文字体�
 
 在各自目标系统、desktop 目录安装 `requirements-build.txt` 后执行 `python build.py`。产物为 `desktop/dist/CAN-Scope/`；Windows 内有 `CAN-Scope.exe`，Linux 内有 `CAN-Scope`。构建同时生成 Linux `.tar.gz` 或 Windows `.zip`，推荐分发压缩包，解压后运行。整个目录一起分发，不要仅复制可执行文件。Linux 若项目所在文件系统不保留可执行权限，请把 tar.gz 解压到支持 Unix 权限的本地目录。
 
-PyInstaller 按当前系统构建；Linux 不能直接产出 Windows exe。仓库提供 `.github/workflows/desktop.yml`，在 Ubuntu 24.04 与 Windows Server 2022 各自测试、打包并上传工作流附件。它不创建 Release。Linux 构建会依赖构建机的 glibc 版本；分发到其他发行版建议使用 CI 的 Ubuntu 构建或从源码启动。本地 Arch 构建不能视为所有 Linux 发行版通用包。
+PyInstaller 按当前系统构建；Linux 不能直接产出 Windows exe。仓库提供 `.github/workflows/desktop.yml`，在 Ubuntu 24.04 与 Windows Server 2022 各自测试、打包。主分支推送或手动运行时，安装包及 SHA-256 上传到对应运行的 Release 草稿，不自动正式发布；PR 只构建和测试。Actions 仅保存 3 天的测试截图、报告，这些诊断附件上传失败不会影响已验证安装包的交付。Linux 构建会依赖构建机的 glibc 版本；分发到其他发行版建议使用 CI 的 Ubuntu 构建或从源码启动。本地 Arch 构建不能视为所有 Linux 发行版通用包。
 
 打包使用 Qt / PySide6、Bleak 等第三方组件，分发时保留其随包许可证和本项目 GPL-3.0 许可证。Windows 产物未代码签名。
 
