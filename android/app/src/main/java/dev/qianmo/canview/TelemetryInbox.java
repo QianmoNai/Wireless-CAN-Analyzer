@@ -10,7 +10,7 @@ final class TelemetryInbox {
  private final ArrayDeque<Frame> data=new ArrayDeque<>(),management=new ArrayDeque<>();
  private int dropped;
  TelemetryInbox(int capacity,int managementCapacity){this.capacity=capacity;this.managementCapacity=managementCapacity;}
- static boolean ordinary(byte[] p){int type=p[1]&255;return type==1||type==11||((type==2||type==3)&&read32(p,16)==0);}
+ static boolean ordinary(byte[] p){int type=p[1]&255;return type==19||type==1||type==11||((type==2||type==3)&&read32(p,16)==0);}
  private static int read32(byte[] p,int at){return (p[at]&255)|((p[at+1]&255)<<8)|((p[at+2]&255)<<16)|((p[at+3]&255)<<24);}
  synchronized boolean offer(byte[] p,int session,long arrived){
   if(ordinary(p)){if(data.size()>=capacity){data.removeFirst();dropped++;}data.addLast(new Frame(p,session,arrived));return true;}
@@ -24,6 +24,6 @@ final class TelemetryInbox {
  }
  synchronized boolean pending(boolean includeData){return !management.isEmpty()||(includeData&&!data.isEmpty());}
  synchronized int dropped(){return dropped;}
- synchronized void discardData(){data.clear();}
+ synchronized void discardData(){data.removeIf(frame->frame.data[1]!=19);}
  synchronized void clear(){data.clear();management.clear();dropped=0;}
 }

@@ -14,6 +14,8 @@ public class TelemetryInboxTest{
   check(d.get(1).data[8]==8&&q.drain(10,true).get(0).data[8]==9);
   byte[] p=packet(1,42);q.offer(p,8,200);p[8]=99;check(q.drain(1,true).get(0).data[8]==42);
   q.offer(packet(11,1),8,201);q.offer(packet(10,2),8,202);q.discardData();check(q.drain(10,true).size()==1);
+  q.offer(packet(19,99),8,203);q.offer(packet(11,1),8,204);q.discardData();
+  List<TelemetryInbox.Frame> serial=q.drain(10,true);check(serial.size()==1&&serial.get(0).data[1]==19);
   byte[] tx=packet(2,3);check(TelemetryInbox.ordinary(tx));tx[16]=1;check(!TelemetryInbox.ordinary(tx));
   q.clear();check(q.dropped()==0&&!q.pending(true));
   for(int type:new int[]{4,5,12,13,14,16})check(!TelemetryInbox.ordinary(packet(type,0)));

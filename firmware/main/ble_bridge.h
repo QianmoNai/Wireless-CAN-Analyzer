@@ -20,3 +20,6 @@ static inline uint32_t wire_u32(const uint8_t *p) {
 static inline void wire_put_u32(uint8_t *p, uint32_t value) {
     for (unsigned i = 0; i < 4; i++) p[i] = value >> (i * 8);
 }
+
+// UART RX uses the bounded raw queue and reports admission failure in bytes.
+bool ble_bridge_uart_publish(const bridge_packet_t *packet);

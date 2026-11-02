@@ -73,7 +73,7 @@ int main(void)
         ui_model_key(&ui,1,KEY_SHORT);assert(ui.page==UI_SETTINGS && !ui.editing);
         ui_model_key(&ui,next,KEY_SHORT);assert(ui.selected==1);
         ui_model_key(&ui,previous,KEY_SHORT);assert(ui.selected==0);
-        ui_model_key(&ui,previous,KEY_SHORT);assert(ui.selected==UI_SETTING_VOLUME); // Wrap upwards/leftwards.
+        ui_model_key(&ui,previous,KEY_SHORT);assert(ui.selected==UI_SETTING_DATA); // Wrap upwards/leftwards.
         ui_model_key(&ui,next,KEY_SHORT);assert(ui.selected==0);
         ui_model_key(&ui,1,KEY_SHORT);assert(ui.editing);
         ui_model_key(&ui,decrease_keys[angle],KEY_SHORT);assert(ui.brightness==50);
@@ -91,22 +91,16 @@ int main(void)
         ui_model_key(&ui,next,KEY_SHORT);assert(ui.selected==1 && ui_model_settings(&ui)==sound_settings);
         ui_model_key(&ui,next,KEY_SHORT);assert(ui.selected==2 && ui_model_settings(&ui)==sound_settings);
         ui_model_key(&ui,previous,KEY_SHORT);assert(ui.selected==1 && ui_model_settings(&ui)==sound_settings);
-        // Volume is a direct middle-key action in every orientation, even muted.
-        ui.selected=UI_SETTING_VOLUME;
-        for(int sound=0;sound<2;sound++) {
-            ui.sound=sound;
-            for(unsigned step=0;step<6;step++) {
-                unsigned old_volume=ui.volume;
-                ui_model_key(&ui,1,KEY_SHORT);
-                assert(ui.volume==(old_volume+1)%UI_VOLUME_COUNT && !ui.editing && ui.sound==sound);
-                ui_model_init(&restored,ui_model_settings(&ui));
-                assert(restored.volume==ui.volume && restored.sound==sound && restored.rotation==angle);
-                uint32_t saved=ui_model_settings(&ui);
-                ui_model_key(&ui,next,KEY_SHORT);assert(ui.selected==0 && ui_model_settings(&ui)==saved);
-                ui_model_key(&ui,previous,KEY_SHORT);assert(ui.selected==UI_SETTING_VOLUME && ui_model_settings(&ui)==saved);
+        // One sound item cycles off -> low -> medium -> high, in every rotation.
+        ui.selected=UI_SETTING_SOUND;ui.sound=false;
+        for(unsigned cycle=0;cycle<3;cycle++) {
+            for(unsigned level=0;level<UI_VOLUME_COUNT;level++) {
+                ui_model_key(&ui,1,KEY_SHORT);assert(ui.sound&&ui.volume==level&&!ui.editing);
+                ui_model_init(&restored,ui_model_settings(&ui));assert(restored.sound&&restored.volume==level);
             }
+            ui_model_key(&ui,1,KEY_SHORT);assert(!ui.sound&&!ui.editing);
         }
-        ui_model_key(&ui,1,KEY_LONG);assert(ui.page==UI_OVERVIEW && ui.sound && !ui.editing);
+        ui_model_key(&ui,1,KEY_LONG);assert(ui.page==UI_OVERVIEW&&!ui.editing);
     }
     ui.page=UI_SETTINGS;ui.selected=3;ui.editing=false;
     ui_model_key(&ui,1,KEY_SHORT);assert(ui.wifi && !ui.editing);
@@ -121,7 +115,7 @@ int main(void)
         assert(restored.rotation==(i==0?UI_ROTATION_180:UI_ROTATION_270));
         assert(restored.wifi==(i==2));
         uint32_t migrated=ui_model_settings(&restored);
-        assert((migrated>>16)==5);
+        assert((migrated>>24)==7);
         ui_model_init(&restored,migrated);assert(ui_model_settings(&restored)==migrated);
     }
     ui.page=UI_SETTINGS;ui.editing=true;ui.selected=2;
@@ -141,17 +135,41 @@ int main(void)
         assert(restored.brightness==60 && restored.sound && restored.rotation==0 && restored.volume==UI_VOLUME_HIGH);
     }
 
-    // Four explicit transports; paired modes expose one additional menu item.
+    // Five explicit transports; paired modes expose one additional menu item.
     ui_model_init(&ui,0);ui.page=UI_SETTINGS;ui.selected=3;
-    for(unsigned mode=1;mode<=4;mode++){
-        ui_model_key(&ui,1,KEY_SHORT);assert(ui_mode(&ui)==mode%4);
-        ui_model_init(&restored,ui_model_settings(&ui));assert(ui_mode(&restored)==mode%4);
-        assert(ui_setting_count(&ui)==(mode%4>=2?6:5));
+    const unsigned menu_modes[]={1,4,2,3,0};
+    for(unsigned step=0;step<5;step++){
+        unsigned mode=menu_modes[step];
+        ui_model_key(&ui,1,KEY_SHORT);assert(ui_mode(&ui)==mode);
+        ui_model_init(&restored,ui_model_settings(&ui));assert(ui_mode(&restored)==mode);
+        assert(ui_setting_count(&ui)==(mode>=2&&mode<=3?6:5));
     }
-    ui.dual_role=1;ui.selected=UI_SETTING_PAIR;ui_model_key(&ui,1,KEY_SHORT);assert(ui.link_menu&&!ui.editing);
+    ui.dual_role=1;ui.selected=5;ui_model_key(&ui,1,KEY_SHORT);assert(ui.link_menu&&!ui.editing);
     ui_model_init(&restored,ui_model_settings(&ui));assert(!restored.link_menu&&restored.dual_role==1);
     ui_model_init(&ui,0);
 
+    // Both data sources retain USB across restart, without adding pairing settings.
+    for(unsigned data=0;data<2;data++)for(unsigned angle=0;angle<4;angle++) {
+        ui_model_init(&ui,0);ui.usb=true;ui.uart=data;ui.rotation=angle;
+        ui_model_init(&restored,ui_model_settings(&ui));
+        assert(restored.usb&&restored.uart==data&&restored.rotation==angle);
+        assert(ui_mode(&restored)==4&&!restored.wifi&&!restored.dual_role);
+        assert(ui_setting_count(&restored)==5+data);
+    }
+    ui_model_init(&restored,0x06092132); // Prior UART settings remain UART at 115200.
+    assert(restored.uart&&!restored.usb&&restored.uart_baud==4&&restored.brightness==50);
+    // UART selection and baud are persisted independently of radio transport.
+    for(unsigned baud=0;baud<UI_UART_BAUD_COUNT;baud++)for(unsigned role=0;role<3;role++) {
+        ui_model_init(&ui,0);ui.uart=true;ui.uart_baud=baud;ui.dual_role=role;
+        ui_model_init(&restored,ui_model_settings(&ui));
+        assert(restored.uart&&restored.uart_baud==baud&&restored.dual_role==role);
+        assert(ui_uart_baud(&restored)>=9600&&ui_uart_baud(&restored)<=921600);
+        assert(ui_setting_count(&ui)==(role?7:6));
+        ui.page=UI_SETTINGS;ui.selected=UI_SETTING_BAUD;ui_model_key(&ui,1,KEY_SHORT);
+        assert(ui.uart_baud==(baud+1)%UI_UART_BAUD_COUNT&&!ui.editing);
+        ui.selected=UI_SETTING_DATA;ui_model_key(&ui,1,KEY_SHORT);assert(!ui.uart);
+    }
+    ui_model_init(&ui,0);
     const char *text="A总览/\xc2\xb0\xf0\x9f\x98\x80";
     const uint32_t codes[]={'A',0x603b,0x89c8,'/',0xb0,0x1f600,0};
     for (unsigned i=0;i<sizeof(codes)/sizeof(codes[0]);i++) assert(ui_utf8_next(&text)==codes[i]);

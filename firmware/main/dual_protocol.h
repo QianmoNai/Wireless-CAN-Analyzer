@@ -10,7 +10,9 @@ enum {
   DUAL_BATCH = 8,
   DUAL_CAN_SIZE = 14,
   DUAL_FRAME_TTL_MS = 100,
-  DUAL_PAIR_MS = 60000
+  DUAL_PAIR_MS = 60000,
+  DUAL_UART_CHUNK = 190,
+  DUAL_UART_TTL_MS = 1000
 };
 enum {
   DUAL_BEACON = 1,
@@ -20,7 +22,8 @@ enum {
   DUAL_CONFIRM,
   DUAL_HELLO,
   DUAL_DATA,
-  DUAL_ACK
+  DUAL_ACK,
+  DUAL_UART
 };
 static inline uint32_t dual_u32(const uint8_t *p) {
   return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 |

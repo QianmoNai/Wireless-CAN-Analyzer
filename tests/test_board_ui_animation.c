@@ -91,6 +91,7 @@ int main(void)
             random=random*1664525u+1013904223u;
             if(frame%3==0)ui_model_key(&ui,(random>>16)%3,frame%11==0?KEY_LONG:KEY_SHORT);
             if(frame%17==0){ui.wifi=!ui.wifi;s.connected=!s.connected;s.wifi_state=(s.wifi_state+1)%5;}
+            if(frame%31==0){ui.usb=!ui.usb;ui.uart=!ui.uart;}
             if(frame%19==0){ui.volume=(ui.volume+1)%UI_VOLUME_COUNT;ui.sound=!ui.sound;}
             if(frame%23==0){s.pairing=!s.pairing;s.pairing_code=123456+frame;}
             if(frame%29==0){failed=!failed;snprintf(s.ip,sizeof(s.ip),"192.168.1.%u",frame%255);}
@@ -118,7 +119,7 @@ int main(void)
         ui_snapshot_t s={.bitrate=1000000};ui_animation_t a;ui_animation_init(&a,&ui);have_screen=false;
         uint32_t now=0;step(&a,&ui,&s,false,now);
         s.dual.bound=true;step(&a,&ui,&s,false,now+=100);
-        ui.page=UI_SETTINGS;ui.selected=UI_SETTING_PAIR;
+        ui.page=UI_SETTINGS;ui.selected=5;
         for(unsigned i=0;i<20;i++)step(&a,&ui,&s,false,now+=20);
         step(&a,&ui,&s,true,now+=100);
         ui.link_menu=true;
@@ -128,6 +129,12 @@ int main(void)
             step(&a,&ui,&s,false,now+=100);s.dual.confirmed=!s.dual.confirmed;step(&a,&ui,&s,false,now+=100);
         }
         ui.link_menu=false;step(&a,&ui,&s,false,now+=100);
+        ui.uart=true;step(&a,&ui,&s,false,now+=100);
+        for(unsigned selected=0;selected<7;selected++){
+            ui.selected=selected;ui.uart_baud=selected;
+            for(unsigned frame=0;frame<12;frame++)step(&a,&ui,&s,false,now+=20);
+        }
+        ui.page=UI_OVERVIEW;for(unsigned frame=0;frame<20;frame++)step(&a,&ui,&s,false,now+=20);
     }
     assert(partial_frames>100);
     printf("board animation: eased retarget/reverse, timer wrap, four rotations, DMA bounds, %u partial frames and pixel-exact dirty redraws PASS\n",partial_frames);

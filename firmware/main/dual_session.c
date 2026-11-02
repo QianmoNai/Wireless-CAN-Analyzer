@@ -83,7 +83,7 @@ static void nonce(uint8_t out[13], unsigned role, unsigned type, uint32_t seq) {
 size_t dual_session_encode(const dual_session_t *s, unsigned type, uint32_t seq,
                            const uint8_t *data, size_t len,
                            uint8_t out[DUAL_MAX_PACKET]) {
-  if (!s->online || !seq || (type != DUAL_DATA && type != DUAL_ACK) ||
+  if (!s->online || !seq || (type != DUAL_DATA && type != DUAL_ACK && type != DUAL_UART) ||
       len > 190)
     return 0;
   size_t n = dual_header(out, type, s->role, 36 + len + 16);
@@ -99,7 +99,7 @@ size_t dual_session_encode(const dual_session_t *s, unsigned type, uint32_t seq,
 bool dual_session_decode(const dual_session_t *s, const uint8_t *p, size_t n,
                          uint32_t *seq, uint8_t *plain, size_t *len) {
   if (!s->online || !dual_packet_valid(p, n, s->role) || n < 60 ||
-      (p[4] != DUAL_DATA && p[4] != DUAL_ACK))
+      (p[4] != DUAL_DATA && p[4] != DUAL_ACK && p[4] != DUAL_UART))
     return false;
   const uint8_t *v = p + DUAL_HEADER;
   *seq = dual_u32(v + 32);

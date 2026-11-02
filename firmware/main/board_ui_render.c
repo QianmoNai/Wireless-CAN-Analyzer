@@ -27,8 +27,9 @@ typedef struct { uint16_t *pixels; int top, width, rows, offset; uint16_t bg,car
 ui_rect_t ui_setting_rect(const ui_model_t *ui, unsigned setting)
 {
     bool landscape=(ui->rotation&1)!=0;
-    return (ui_rect_t){.x=landscape?12+(setting%2)*152:12,
-        .y=landscape?37+(setting/2)*30:68+setting*(ui->dual_role?35:36),
+    int visible=(int)setting-(int)ui_setting_first(ui);
+    return (ui_rect_t){.x=landscape?12+(visible%2)*152:12,
+        .y=landscape?37+(visible/2)*30:68+visible*(ui_setting_count(ui)>5?35:36),
         .width=landscape?144:148,.height=landscape?26:34};
 }
 ui_render_pose_t ui_render_rest(const ui_model_t *ui)
@@ -61,7 +62,7 @@ uint32_t ui_render_dirty(const ui_model_t *old, const ui_snapshot_t *before,
                          const ui_model_t *ui, const ui_snapshot_t *s,
                          bool save_failed, const ui_render_pose_t *to)
 {
-    if(old->rotation!=ui->rotation || old->wifi!=ui->wifi || old->dual_role!=ui->dual_role || old->link_menu!=ui->link_menu ||
+    if(old->uart!=ui->uart || old->uart_baud!=ui->uart_baud || ui_setting_first(old)!=ui_setting_first(ui) || old->rotation!=ui->rotation || old->usb!=ui->usb || old->wifi!=ui->wifi || old->dual_role!=ui->dual_role || old->link_menu!=ui->link_menu ||
         (ui->link_menu && memcmp(&before->dual,&s->dual,sizeof(s->dual))) ||
         from->page!=to->page || from->theme!=to->theme || before->pairing!=s->pairing ||
         (to->page>0 && to->page<256))return ui_render_all_bands(ui);
@@ -94,8 +95,8 @@ uint32_t ui_render_dirty(const ui_model_t *old, const ui_snapshot_t *before,
         dirty|=dirty_rows(ui,ui_render_height(ui)-18,ui_render_height(ui));
     if(old->brightness!=ui->brightness)dirty|=dirty_setting(ui,0);
     if(old->sound!=ui->sound)dirty|=dirty_setting(ui,1);
-    if(old->volume!=ui->volume)dirty|=dirty_setting(ui,UI_SETTING_VOLUME);
-    if(old_save_failed!=save_failed){int y=landscape?130:ui->dual_role?282:252;dirty|=dirty_rows(ui,y,y+16);}
+    if(old->volume!=ui->volume)dirty|=dirty_setting(ui,UI_SETTING_SOUND);
+    if(old_save_failed!=save_failed){int y=landscape?130:ui_setting_count(ui)>5?282:252;dirty|=dirty_rows(ui,y,y+16);}
     return dirty;
 }
 
@@ -179,11 +180,11 @@ static void right_label(canvas_t *c, int right, int y, const char *text, int sca
 {
     label(c,right-text_width(text,scale),y,text,scale,color);
 }
-static void rate_card(canvas_t *c, int x, int y, int width, bool tx, const ui_snapshot_t *s)
+static void rate_card(canvas_t *c, int x, int y, int width, bool tx, bool uart, const ui_snapshot_t *s)
 {
     char value[16];
     rect(c,x,y,width,54,c->card);
-    label(c,x+10,y+6,tx?"发送 TX/秒":"接收 RX/秒",1,MUTED);
+    label(c,x+10,y+6,uart?(tx?"发送 字节/秒":"接收 字节/秒"):(tx?"发送 TX/秒":"接收 RX/秒"),1,MUTED);
     if (s->rates_valid) snprintf(value,sizeof(value),"%"PRIu32,tx?s->tx_hz:s->rx_hz);
     else strcpy(value,"--");
     label_limit(c,x+10,y+32,value,2,tx?TEXT:c->accent,x+width-8);
@@ -198,7 +199,7 @@ static void key_hints(canvas_t *c, const ui_model_t *ui)
     int y=ui_render_height(ui)-18;
     char hint[24];
     bool editing=ui->page==UI_SETTINGS && ui->editing;
-    const char *action=ui->selected==UI_SETTING_PAIR&&ui->page==UI_SETTINGS?"进入":ui->page==UI_OVERVIEW?"设置":(ui->selected==1 || ui->selected==3 || ui->selected==UI_SETTING_VOLUME)?"切换":ui->editing?"完成":"编辑";
+    const char *action=ui_setting_id(ui,ui->selected)==UI_SETTING_PAIR&&ui->page==UI_SETTINGS?"进入":ui->page==UI_OVERVIEW?"设置":(ui->selected==1 || ui->selected==3 || ui->selected>=UI_SETTING_DATA)?"切换":ui->editing?"完成":"编辑";
     snprintf(hint,sizeof(hint),"2%s",action);
     label(c,(c->width-text_width(hint,1))/2,y,hint,1,TEXT);
     unsigned previous=ui_key_role(ui->rotation,0)==UI_KEY_PREVIOUS?1:3;
@@ -214,22 +215,24 @@ static void key_hints(canvas_t *c, const ui_model_t *ui)
 static void overview(canvas_t *c, bool landscape, const ui_model_t *ui, const ui_snapshot_t *s)
 {
     char line[48];
-    const char *state=s->state==0?"正常":s->state==1?"警告":s->state==2?"被动":s->state==3?"离线":"未知";
-    const char *connection=ui->dual_role?(s->connected?"双机已连接":s->dual.bound?"对端离线":"双机未配对"):ui->wifi?(s->wifi_state==2?(s->connected?"局域网已连接":"等待局域网"):s->wifi_state==1?"网络连接中":s->wifi_state==4?"网络连接失败":"等待手机配网"):(s->connected?"蓝牙已连接":"蓝牙未连接");
+    const char *state=ui->uart?(s->state==0?"正常":"异常"):s->state==0?"正常":s->state==1?"警告":s->state==2?"被动":s->state==3?"离线":"未知";
+    const char *connection=ui->usb?(s->connected?"USB已连接":"USB未连接"):ui->dual_role?(s->connected?"双机已连接":s->dual.bound?"对端离线":"双机未配对"):ui->wifi?(s->wifi_state==2?(s->connected?"局域网已连接":"等待局域网"):s->wifi_state==1?"网络连接中":s->wifi_state==4?"网络连接失败":"等待手机配网"):(s->connected?"蓝牙已连接":"蓝牙未连接");
     label(c,12,landscape?40:72,connection,1,s->connected?c->accent:MUTED);
-    snprintf(line,sizeof(line),"%"PRIu32" KBIT/S",s->bitrate/1000);
+    if(ui->uart)snprintf(line,sizeof(line),"%"PRIu32" BAUD",s->bitrate);else snprintf(line,sizeof(line),"%"PRIu32" KBIT/S",s->bitrate/1000);
     label(c,landscape?132:12,landscape?40:94,line,1,TEXT);
     right_label(c,c->width-12,landscape?40:94,state,1,s->state?RED:c->accent);
     if (landscape) {
-        rate_card(c,12,64,144,false,s);rate_card(c,164,64,144,true,s);
-        label(c,12,126,"负载估算",1,MUTED);format_load(line,sizeof(line),s);label(c,88,126,line,1,TEXT);
-        rect(c,134,133,62,5,c->line);if (s->load_valid) rect(c,134,133,(62u*s->load)/10000,5,c->accent);
-        snprintf(line,sizeof(line),"失败 %"PRIu32,s->failed);label(c,208,126,line,1,s->failed?RED:MUTED);
+        rate_card(c,12,64,144,false,ui->uart,s);rate_card(c,164,64,144,true,ui->uart,s);
+        label(c,12,126,ui->uart?"8N1":"负载估算",1,MUTED);if(ui->uart)strcpy(line,"3.3V TTL");else format_load(line,sizeof(line),s);label(c,88,126,line,1,TEXT);
+        if(!ui->uart)rect(c,134,133,62,5,c->line);
+        if (!ui->uart && s->load_valid) rect(c,134,133,(62u*s->load)/10000,5,c->accent);
+        snprintf(line,sizeof(line),"%s %"PRIu32,ui->uart?"丢弃":"失败",s->failed);label(c,208,126,line,1,s->failed?RED:MUTED);
     } else {
-        rate_card(c,12,120,148,false,s);rate_card(c,12,182,148,true,s);
-        label(c,12,248,"负载估算",1,MUTED);format_load(line,sizeof(line),s);right_label(c,160,248,line,1,TEXT);
-        rect(c,12,270,148,5,c->line);if (s->load_valid) rect(c,12,270,(148u*s->load)/10000,5,c->accent);
-        snprintf(line,sizeof(line),"失败 %"PRIu32,s->failed);label(c,12,283,line,1,s->failed?RED:MUTED);
+        rate_card(c,12,120,148,false,ui->uart,s);rate_card(c,12,182,148,true,ui->uart,s);
+        label(c,12,248,ui->uart?"8N1":"负载估算",1,MUTED);if(ui->uart)strcpy(line,"3.3V TTL");else format_load(line,sizeof(line),s);right_label(c,160,248,line,1,TEXT);
+        if(!ui->uart)rect(c,12,270,148,5,c->line);
+        if (!ui->uart && s->load_valid) rect(c,12,270,(148u*s->load)/10000,5,c->accent);
+        snprintf(line,sizeof(line),"%s %"PRIu32,ui->uart?"丢弃":"失败",s->failed);label(c,12,283,line,1,s->failed?RED:MUTED);
     }
 }
 static uint16_t blend(uint16_t a, uint16_t b, unsigned weight)
@@ -242,31 +245,33 @@ static uint16_t blend(uint16_t a, uint16_t b, unsigned weight)
 static void settings(canvas_t *c, bool landscape, const ui_model_t *ui, bool save_failed,
                      const ui_render_pose_t *pose)
 {
-    const char *names[]={"亮度","声音","屏幕方向","通信模式","音量","双机配对"};char value[32];
+    const char *names[]={"亮度","声音","屏幕方向","通信模式","数据选择","串口速率","双机配对"};char value[32];
     const char *volumes[]={"低","中","高"};
-    _Static_assert(sizeof(names)/sizeof(names[0])==UI_SETTING_COUNT+1,"setting label count");
-    for(unsigned i=0;i<ui_setting_count(ui);i++){
+    _Static_assert(sizeof(names)/sizeof(names[0])==UI_SETTING_COUNT+2,"setting label count");
+    for(unsigned i=ui_setting_first(ui);i<ui_setting_count(ui)&&i<ui_setting_first(ui)+6;i++){
         ui_rect_t r=ui_setting_rect(ui,i);
         rect(c,r.x,r.y,r.width,r.height,c->card);
     }
     ui_rect_t selected=ui_setting_rect(ui,ui->selected);
     rect(c,pose->selection_x,pose->selection_y,selected.width,selected.height,blend(c->card,c->accent,24));
     rect(c,pose->selection_x,pose->selection_y,3,selected.height,ui->editing?TEXT:c->accent);
-    for(unsigned i=0;i<ui_setting_count(ui);i++){
+    for(unsigned i=ui_setting_first(ui);i<ui_setting_count(ui)&&i<ui_setting_first(ui)+6;i++){
         ui_rect_t r=ui_setting_rect(ui,i);
         int x=r.x,y=r.y,width=r.width;
-        label(c,x+10,y+(landscape?5:1),names[i],1,MUTED);
+        label(c,x+10,y+(landscape?5:1),names[ui_setting_id(ui,i)],1,MUTED);
         if(i==0)snprintf(value,sizeof(value),"%u%%",ui->brightness);
-        else if(i==1)strcpy(value,ui->sound?"开启":"关闭");
+        else if(i==1)strcpy(value,ui->sound?volumes[ui->volume<UI_VOLUME_COUNT?ui->volume:UI_VOLUME_HIGH]:"关闭");
         else if(i==2)snprintf(value,sizeof(value),"%u度",ui->rotation*90u);
-        else if(i==3)strcpy(value,ui->dual_role?(ui->dual_role==1?"双机A端":"双机B端"):ui->wifi?"WIFI":"蓝牙");
-        else if(i==UI_SETTING_PAIR)strcpy(value,"进入");
-        else strcpy(value,volumes[ui->volume<UI_VOLUME_COUNT?ui->volume:UI_VOLUME_HIGH]);
+        else if(i==3)strcpy(value,ui->usb?"USB直连":ui->dual_role?(ui->dual_role==1?"双机A端":"双机B端"):ui->wifi?"WIFI":"蓝牙");
+        else if(i==UI_SETTING_DATA)strcpy(value,ui->uart?"UART":"CAN");
+        else if(ui_setting_id(ui,i)==UI_SETTING_BAUD)snprintf(value,sizeof(value),"%"PRIu32,ui_uart_baud(ui));
+        else strcpy(value,"进入");
         if(landscape)right_label(c,x+width-8,y+5,value,1,ui->selected==i?c->accent:TEXT);
         else label(c,x+10,y+17,value,1,ui->selected==i?c->accent:TEXT);
     }
-    label(c,12,landscape?130:ui->dual_role?282:252,save_failed?"保存失败":"自动保存",1,save_failed?RED:MUTED);
-    if(landscape)right_label(c,308,130,"长按2返回",1,MUTED);else if(!ui->dual_role)label(c,12,282,"长按2返回",1,MUTED);
+    bool compact = !landscape && ui_setting_count(ui)>5;
+    label(c,12,landscape?130:compact?282:252,save_failed?"保存失败":compact?"长按2返回":"自动保存",1,save_failed?RED:MUTED);
+    if(landscape)right_label(c,308,130,"长按2返回",1,MUTED);else if(ui_setting_count(ui)<=5)label(c,12,282,"长按2返回",1,MUTED);
 }
 
 static void dual_scene(canvas_t *c,const ui_model_t *ui,const ui_snapshot_t *s)
@@ -315,8 +320,8 @@ static void scene(canvas_t *c, const ui_model_t *ui, const ui_snapshot_t *s, boo
         label(c,(c->width-text_width(code,2))/2,landscape?82:150,code,2,c->accent);
         label(c,12,landscape?124:210,"配对后设置网络",1,MUTED);return;
     }
-    const char *title=ui->page==UI_OVERVIEW?"CAN总览":"设置";
-    const char *subtitle=ui->dual_role?(ui->dual_role==1?"双机A端":"双机B端"):ui->wifi?(s->ip[0]?s->ip:"WIFI"):"蓝牙";
+    const char *title=ui->page==UI_OVERVIEW?(ui->uart?"UART总览":"CAN总览"):"设置";
+    const char *subtitle=ui->usb?"USB直连":ui->dual_role?(ui->dual_role==1?"双机A端":"双机B端"):ui->wifi?(s->ip[0]?s->ip:"WIFI"):"蓝牙";
     label(c,12,landscape?8:14,title,2,TEXT);
     if (landscape) right_label(c,c->width-12,8,subtitle,1,c->accent);
     else label(c,12,39,subtitle,1,c->accent);
@@ -332,7 +337,8 @@ void ui_render_animated_band(uint16_t *pixels, int top, const ui_model_t *ui,
         .bg=blend(0x0864,0x1064,pose->theme),.card=blend(0x10e8,0x20c8,pose->theme),
         .line=blend(0x2230,0x41cf,pose->theme),.accent=blend(0x55df,0xc39f,pose->theme)};
     if(!c.rows)return;
-    if(ui->dual_role==1){c.bg=0x0863;c.card=0x10e5;c.line=0x224b;c.accent=0x5f33;}
+    if(ui->usb){c.bg=0x1802;c.card=0x3004;c.line=0x7809;c.accent=0xfaaa;}
+    else if(ui->dual_role==1){c.bg=0x0863;c.card=0x10e5;c.line=0x224b;c.accent=0x5f33;}
     else if(ui->dual_role==2){c.bg=0x1081;c.card=0x2102;c.line=0x6306;c.accent=0xff47;}
     if(s->pairing||ui->link_menu){scene(&c,ui,s,save_failed,pose);return;}
     ui_model_t page=*ui;

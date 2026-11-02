@@ -4,6 +4,11 @@ final class MonitorCommands {
     static boolean allowed(byte[] data) {
         if(data==null||data.length!=20||data[0]!=1)return false;
         int command=data[1]&255;
+        if(command==0x18){
+            int n=data[2]&255;if(n<1||n>12||data[3]!=0)return false;
+            for(int i=4+n;i<16;i++)if(data[i]!=0)return false;
+            return data[16]!=0||data[17]!=0||data[18]!=0||data[19]!=0;
+        }
         if(command==0x16||command==0x17){
             java.nio.ByteBuffer b=java.nio.ByteBuffer.wrap(data).order(java.nio.ByteOrder.LITTLE_ENDIAN);
             if(b.getInt(12)!=0||b.getInt(16)==0)return false;

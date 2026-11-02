@@ -584,7 +584,7 @@ public class MainActivity extends Activity {
     private volatile long settingsHoldUntil;
     private volatile int settingType,settingToken;
     private boolean queryWrite;
-    private volatile boolean imuSupported,devicePolling,homeTelemetrySupported,detailSupported;
+    private volatile boolean deviceUart,imuSupported,devicePolling,homeTelemetrySupported,detailSupported;
     private boolean telemetryWrite;
     private volatile String detailKey="";
     private int detailMaxHz;
@@ -673,9 +673,9 @@ public class MainActivity extends Activity {
             if(writing&&now>=writeDeadline){fail("通信写入超时，请重新连接");}
             queryFailure(queries.expire(now));
             for(String key:queries.recovered(now))queryStatus(key,false,"查询已停止，可重新开启");
-            FeedbackQueries.Request request=queries.poll(now,ready&&!deviceWifiMode&&devicePolling&&!writing&&!networkBusy()&&now>=settingsHoldUntil);
+            FeedbackQueries.Request request=queries.poll(now,ready&&!deviceWifiMode&&!deviceUart&&devicePolling&&!writing&&!networkBusy()&&now>=settingsHoldUntil);
             if(request!=null)writePacket(packetHex(request.packet),request);
-            else if(ready&&!deviceWifiMode&&homeTelemetrySupported&&!writing&&!networkBusy()&&!queries.waiting()&&now>=settingsHoldUntil&&now>=telemetryRetryAt){byte[] packet=telemetry.poll(now,true);if(packet!=null)writePacket(packetHex(packet),null);}
+            else if(ready&&!deviceWifiMode&&!deviceUart&&homeTelemetrySupported&&!writing&&!networkBusy()&&!queries.waiting()&&now>=settingsHoldUntil&&now>=telemetryRetryAt){byte[] packet=telemetry.poll(now,true);if(packet!=null)writePacket(packetHex(packet),null);}
         }
         control.postDelayed(this,20);
     }};
@@ -706,7 +706,7 @@ public class MainActivity extends Activity {
         web.setWebViewClient(new WebViewClient() {
             @Override public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
                 String url = request.getUrl().toString();
-                if (url.equals(origin + "index.html") || url.equals(origin + "motors.js") || url.equals(origin + "history.js") || url.equals(origin + "monitor.js") || url.equals(origin + "motor_roster.js") || url.equals(origin + "motor_detail.js") || url.equals(origin + "device_settings.js") || url.equals(origin + "network_settings.js") || url.equals(origin + "config_io.js")) {
+                if (url.equals(origin + "uart.js") || url.equals(origin + "index.html") || url.equals(origin + "motors.js") || url.equals(origin + "history.js") || url.equals(origin + "monitor.js") || url.equals(origin + "motor_roster.js") || url.equals(origin + "motor_detail.js") || url.equals(origin + "device_settings.js") || url.equals(origin + "network_settings.js") || url.equals(origin + "config_io.js")) {
                     String asset = request.getUrl().getLastPathSegment();
                     try { return new WebResourceResponse(asset.endsWith(".js") ? "application/javascript" : "text/html", "UTF-8", getAssets().open(asset)); }
                     catch (Exception e) { return new WebResourceResponse("text/plain", "UTF-8", 500, "Error", null, null); }
@@ -801,6 +801,7 @@ public class MainActivity extends Activity {
         }});}
         @JavascriptInterface public void send(String hex) { int session=generation;control.post(() -> {synchronized(transportLock){
             if(closed||session!=generation)return;
+            if(hex!=null&&hex.matches("(?i)0118[0-9a-f]{36}")){writePacket(hex,null);return;}
             clearQueries("设备设置变化，已停止续租；正在确认设备停止，完成后可重新开启");settingsHoldUntil=SystemClock.elapsedRealtime()+7000;
             settingType=0;settingToken=0;
             if(hex!=null&&hex.matches("[0-9a-fA-F]{40}")){settingType=Integer.parseInt(hex.substring(2,4),16);for(int i=0;i<4;i++)settingToken|=Integer.parseInt(hex.substring(32+i*2,34+i*2),16)<<(8*i);}
@@ -899,6 +900,7 @@ public class MainActivity extends Activity {
         } catch (Exception e) { fail("连接失败：" + e.getMessage()); }
     }
     private void disconnectDevice() {
+        deviceUart=false;
         discoveryGeneration++;
         WifiProvisioner pending=provisioner;if(pending!=null)pending.cancel();provisioner=null;
         LanTransport oldLan=lan;lan=null;lanConnecting=false;if(oldLan!=null)oldLan.close();
@@ -980,6 +982,10 @@ public class MainActivity extends Activity {
     private void processReceived(TelemetryInbox.Frame frame,JSONArray raw,JSONArray samples,String batchKey){
         byte[] data=frame.data;long age=Math.max(0,SystemClock.elapsedRealtime()-frame.arrived);
         String value=packetHex(data);
+            if(data[1]==21){synchronized(transportLock){
+                boolean next=data[2]==1;
+                if(next!=deviceUart){deviceUart=next;clearQueries("数据类型改变，查询已停止");if(next){detailKey="";busLoadActive=false;}else configureTelemetry();}
+            }}
             synchronized(transportLock){
                 if(settingType==0x13&&data[1]==7&&data[2]!=0)settingsHoldUntil=0;
                 if(settingType==0x12&&data[1]==5){int token=(data[16]&255)|((data[17]&255)<<8)|((data[18]&255)<<16)|((data[19]&255)<<24);if(token==settingToken&&token!=0)settingsHoldUntil=0;}
@@ -1038,6 +1044,7 @@ public class MainActivity extends Activity {
         if(hex==null||!hex.matches("[0-9a-fA-F]{40}")){if(queryRequest!=null)queryFailure(queries.rejected(queryRequest,now));else error("指令格式错误");return;}
         byte[] data=new byte[20];for(int i=0;i<20;i++)data[i]=(byte)Integer.parseInt(hex.substring(i*2,i*2+2),16);
         if(!MonitorCommands.allowed(data)){if(queryRequest!=null)queryFailure(queries.rejected(queryRequest,now));else error("监控版仅支持设备设置和达妙反馈查询");return;}
+        if(deviceUart && (data[1]==0x10||data[1]==0x12||data[1]==0x20||(data[1]==0x14&&java.nio.ByteBuffer.wrap(data).order(java.nio.ByteOrder.LITTLE_ENDIAN).getInt(8)!=0))){error("当前为 UART 数据，请先在设备上切回 CAN");return;}
         // Reserve the callback identity before calling Android: callbacks may
         // arrive on another thread before writeCharacteristic returns.
         writeSequence++;

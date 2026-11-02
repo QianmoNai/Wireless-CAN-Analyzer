@@ -5,8 +5,16 @@
 #include <setjmp.h>
 #include "stubs/sim.h"
 #include "../firmware/main/ble_bridge.h"
+#include "../firmware/main/uart_bridge.h"
+void uart_bridge_init(void){}
+static bool simulated_uart;
+bool uart_bridge_selected(void){return simulated_uart;}
+void uart_bridge_stats(uart_bridge_stats_t *s){memset(s,0,sizeof(*s));}
 void board_ui_start(void) {}
 void board_ui_observe(const bridge_packet_t *packet) { (void)packet; }
+void board_status_led_init(void) {}
+void board_status_led_update(bool connected,uint32_t rx_count,uint32_t tx_count,uint32_t now_ms)
+{ (void)connected;(void)rx_count;(void)tx_count;(void)now_ms; }
 // Additional CAN-owner scenario consumes frames with no App connection.
 static bool simulated_dual;static unsigned dual_taken;
 void dual_link_set_owner(TaskHandle_t owner) {(void)owner;}
@@ -54,6 +62,14 @@ void vTaskDelay(unsigned ms){
  twai_tx_done_event_data_t e={.is_tx_success=!failed};inflight=NULL;driver_callbacks.on_tx_done((void*)1,&e,NULL);}}
  if(now_ms==100&&(scenario==2||scenario==8))link_up=false;
  if(now_ms==100&&scenario==3)stop_flag=true;
+ if(scenario==21){
+  if(now_ms>=100&&now_ms<300){
+   simulated_uart=true;
+   receive_header=(twai_frame_header_t){.id=0x201,.dlc=8};receive_ready=true;driver_callbacks.on_rx_done((void*)1,NULL,NULL);
+  }
+  if(now_ms==100)enqueue_query(0x14,0x123,1000,0x511);
+  if(now_ms>=300)simulated_uart=false;
+ }
  if((scenario==13||scenario==14)&&now_ms%10==0){receive_header=(twai_frame_header_t){.id=0x201,.dlc=8};receive_ready=true;driver_callbacks.on_rx_done((void*)1,NULL,NULL);}
  if(scenario==14&&now_ms==400){bridge_packet_t rate={.bytes={1,0x12}};wire_put_u32(rate.bytes+4,500000);xQueueSend(allocated[2],&rate,0);}
  if(scenario==16){
@@ -248,6 +264,16 @@ int main(void){
  assert(snapshot_id==0x323&&snapshot_len==8);
  simulated_dual=false;for(unsigned i=0;i<allocated_count;i++)free(allocated[i]);allocated_count=0;
  puts("PASS: dual CAN forwarding uses the real owner loop with App disconnected, preserving frame lifetime and completion accounting.");
+ // Switching an active CAN query to UART stops TX/RX and cancels queued requests.
+ scenario=21;simulated_uart=false;link_up=true;timer_active=false;busy=false;stop_flag=false;inflight=NULL;receive_ready=false;
+ now_ms=tx_num=rate_changes=driver_state=0;completed_tx_bits=emitted_load_count=raw_tx_events=query_ack_count=0;
+ tx_count=tx_failed=tx_arbitration=raw_tx_success_events=raw_tx_failure_events=raw_tx_arbitration_events=raw_query_events=tx_uart_logs=0;
+ atomic_store(&rx_count,0);atomic_store(&rx_dropped,0);
+ if(setjmp(done)==0)app_main();
+ assert(tx_num==100&&last_tx_ms<100&&!timer_active&&atomic_load(&rx_count)==0);
+ assert(query_ack_count==1&&wire_u32(query_acks[0].bytes+16)==0x511&&query_acks[0].bytes[2]==1);
+ for(unsigned i=0;i<allocated_count;i++)free(allocated[i]);allocated_count=0;
+ puts("PASS: UART selection stops active CAN queries, rejects queued enables, drains CAN ISR without forwarding and never resumes queries automatically.");
  assert(rate_events>0);
  puts("PASS: actual firmware owner loop: boot silence, bounded pulse, disconnect stop, explicit stop, TX failure abort, bitrate timing, queued pulse cancellation, TX buffer lifetime, 1000 Hz polling payload/pacing, polling disconnect and TX failure; device-timed rate publication.");
  puts("PASS: CAN load owner integration: all successful TX origins, no duplicate/failed TX, queue-full RX, periodic wire events, rate-change window and real query TX telemetry without UART flood.");

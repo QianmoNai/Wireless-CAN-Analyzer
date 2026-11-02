@@ -1,7 +1,7 @@
 'use strict';
 let transportMode='ble',wifiBusy=false;
 function refreshNetworkControls(){
- $('connectionMode').value=transportMode;$('transportBadge').textContent=transportMode==='wifi'?'Wi-Fi':'BLE';
+ $('connectionMode').value=transportMode;$('transportBadge').textContent=transportMode==='usb'?'USB直连':transportMode==='wifi'?'Wi-Fi':'BLE';
  $('lanManual').hidden=transportMode!=='wifi';
  for(const id of ['wifiRefresh','wifiScan','wifiSave','wifiClear'])$(id).disabled=wifiBusy||!connected||transportMode!=='ble';
  $('connectionMode').disabled=wifiBusy;$('wifiPassword').disabled=wifiBusy;$('wifiSsid').disabled=wifiBusy;$('wifiNetworks').disabled=wifiBusy;
@@ -18,7 +18,7 @@ function wifiSelect(){const value=$('wifiNetworks').value;if(value)$('wifiSsid')
 function connectManualLan(){invoke('connectLan',$('lanIp').value.trim());}
 function decodeSsid(hex){try{return new TextDecoder('utf-8',{fatal:true}).decode(Uint8Array.from(hex.match(/.{2}/g)||[],x=>parseInt(x,16)))}catch(e){return '';}}
 window.networkEvent=function(type,d){
- if(type==='networkMode'){if(typeof d.busy==='boolean')wifiBusy=d.busy;transportMode=d.mode==='wifi'?'wifi':'ble';if(d.ip)$('lanIp').value=d.ip;$('wifiKnown').textContent=d.paired?'已保存此设备的安全连接信息':'首次使用 Wi-Fi 请先通过蓝牙配网';refreshNetworkControls();}
+ if(type==='networkMode'){if(typeof d.busy==='boolean')wifiBusy=d.busy;transportMode=d.mode==='usb'&&$('connectionMode').querySelector('option[value=usb]')?'usb':d.mode==='wifi'?'wifi':'ble';if(d.ip)$('lanIp').value=d.ip;$('wifiKnown').textContent=d.paired?'已保存此设备的安全连接信息':'首次使用 Wi-Fi 请先通过蓝牙配网';refreshNetworkControls();}
  else if(type==='wifiResult'){wifiBusy=!!d.busy;$('wifiResult').textContent=d.message||'';refreshNetworkControls();}
  else if(type==='wifiStatus'){const statuses=['未配置 / 待机','连接中','Wi-Fi 已连接','已断开','连接失败'];$('wifiState').textContent=(statuses[d.state]||'未知状态')+' · 设备模式：'+(d.mode?'Wi-Fi':'蓝牙')+(d.ip?' · IP '+d.ip:'');const ssid=decodeSsid(d.ssid||'');if(ssid)$('wifiSsid').value=ssid;}
  else if(type==='wifiScan'){const select=$('wifiNetworks');select.replaceChildren(new Option('手动输入 / 隐藏网络',''));for(const row of d.rows||[]){const ssid=decodeSsid(row[0]);if(ssid)select.add(new Option(ssid+' · '+row[1]+' dBm'+(row[2]===0?' · 开放':''),ssid));}}

@@ -14,6 +14,15 @@ public final class MonitorCommandsTest {
         byte[] p=new byte[20];p[0]=1;p[1]=0x13;p[2]=16;if(!MonitorCommands.allowed(p))throw new AssertionError();
         p[2]=17;if(MonitorCommands.allowed(p))throw new AssertionError();
         p[2]=0;if(MonitorCommands.allowed(p))throw new AssertionError();
+        byte[] uart=new byte[20];uart[0]=1;uart[1]=0x18;uart[2]=12;uart[16]=1;
+        for(int i=4;i<16;i++)uart[i]=(byte)(i*19);
+        if(!MonitorCommands.allowed(uart))throw new AssertionError("Binary UART denied");
+        uart[2]=13;if(MonitorCommands.allowed(uart))throw new AssertionError("UART length");
+        uart[2]=1;if(MonitorCommands.allowed(uart))throw new AssertionError("UART padding");
+        java.util.Arrays.fill(uart,5,16,(byte)0);uart[16]=0;
+        if(MonitorCommands.allowed(uart))throw new AssertionError("UART token");
+        uart[16]=1;uart[3]=1;if(MonitorCommands.allowed(uart))throw new AssertionError("UART flags");
+        uart[3]=0;if(!MonitorCommands.allowed(uart))throw new AssertionError("UART byte denied");
         System.out.println("PASS: production native command filter rejects arbitrary CAN, pulse, stop, demo and unknown commands; settings remain available (exact query covered separately).");
     }
 }

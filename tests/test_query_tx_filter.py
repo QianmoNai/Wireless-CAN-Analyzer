@@ -29,6 +29,9 @@ PRELUDE = r'''
 #include <stdatomic.h>
 #include "home_status.h"
 #include "ack_delivery.h"
+#include "uart_protocol.h"
+static bool selected_uart;
+bool uart_bridge_selected(void){return selected_uart;}
 #define portENTER_CRITICAL(lock) ((void)(lock))
 #define portEXIT_CRITICAL(lock) ((void)(lock))
 struct queue { unsigned count,limit; bridge_packet_t last; };
@@ -53,6 +56,11 @@ static void reset(unsigned mode){
 
 TEST = r'''
 int main(void){
+    reset(1);selected_uart=true;
+    bridge_packet_t serial={.bytes={1,19,3,0,0,128,255}};
+    ble_bridge_publish(&serial);assert(raw.count==1);
+    bridge_packet_t can={.bytes={1,1,0,1}};ble_bridge_publish(&can);assert(raw.count==1);
+    selected_uart=false;ble_bridge_publish(&serial);assert(raw.count==1);
     // Full channel mode passes every received identifier, regardless of roster.
     reset(0);raw.limit=16;
     const unsigned ids[]={0x201,0x202,0x205,0x7ff};

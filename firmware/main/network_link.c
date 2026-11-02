@@ -1,4 +1,5 @@
 #include "network_link.h"
+#include "usb_link.h"
 #include "dual_link.h"
 #include "network_protocol.h"
 #include "network_identity.h"
@@ -45,11 +46,12 @@ void network_display(uint8_t *s,char ip[16],uint32_t *pin){
  if((int32_t)(atomic_load(&pairing_until)-millis())>0)*pin=atomic_load(&pairing);
 }
 bool network_wifi_mode(void){return atomic_load(&transport_mode)==1;}
-bool network_dual_mode(void){return atomic_load(&transport_mode)>=DUAL_A;}
+bool network_usb_mode(void){return atomic_load(&transport_mode)==4;}
+bool network_dual_mode(void){unsigned mode=atomic_load(&transport_mode);return mode>=DUAL_A&&mode<=DUAL_B;}
 bool network_connected(void){return network_wifi_mode()&&atomic_load(&linked)&&atomic_load(&online);}
 void network_set_mode(unsigned mode){
- if(mode>DUAL_B)return;
- if(atomic_exchange(&transport_mode,mode)!=mode){dual_link_request_mode(mode);atomic_fetch_add(&network_epoch,1);ble_bridge_reset_session();}
+ if(mode>4)return;
+ if(atomic_exchange(&transport_mode,mode)!=mode){usb_link_reset();dual_link_request_mode(mode);atomic_fetch_add(&network_epoch,1);ble_bridge_reset_session();}
 }
 bool network_send(const bridge_packet_t *p){return network_connected()&&xQueueSend(bridge_packet_is_raw(p)?raw_out:control_out,p,0)==pdTRUE;}
 static void wifi_event(void *arg,esp_event_base_t base,int32_t id,void *data){
@@ -69,7 +71,7 @@ static bool begin_station(const network_credentials_t *c){
  return esp_wifi_connect()==ESP_OK;
 }
 int network_config_write(const uint8_t p[20]){
- if(network_dual_mode())return 3;
+ if(network_dual_mode()||network_usb_mode())return 3;
  if(!atomic_load(&started)||!atomic_load(&identity_ready))return 14;
  request_t r={.op=p[0]};int result=0;
  xSemaphoreTake(lock,portMAX_DELAY);
@@ -144,7 +146,13 @@ static void manager_task(void *arg){
  for(;;){
   unsigned wanted=atomic_load(&transport_mode);
   if(dual_role&&dual_role!=wanted){dual_link_stop();esp_wifi_stop();atomic_store(&radio_on,false);esp_wifi_set_ps(WIFI_PS_MIN_MODEM);dual_role=0;}
-  if(wanted>=DUAL_A){
+  if(wanted==4){
+   if(atomic_load(&radio_on)){esp_wifi_disconnect();esp_wifi_stop();atomic_store(&radio_on,false);}
+   atomic_store(&online,false);atomic_store(&station_ip,0);xQueueReset(requests);
+   xSemaphoreTake(lock,portMAX_DELAY);busy=false;network_assembly_reset(&assembly);xSemaphoreGive(lock);
+   vTaskDelay(pdMS_TO_TICKS(50));continue;
+  }
+  if(wanted>=DUAL_A&&wanted<=DUAL_B){
    if(dual_role!=wanted&&(!dual_retry||(int32_t)(millis()-dual_retry)>=0)){
     esp_wifi_disconnect();if(atomic_load(&radio_on))esp_wifi_stop();
     atomic_store(&online,false);atomic_store(&station_ip,0);atomic_store(&radio_on,false);
@@ -158,7 +166,7 @@ static void manager_task(void *arg){
    vTaskDelay(pdMS_TO_TICKS(100));continue;
   }
   if(xQueueReceive(requests,&r,pdMS_TO_TICKS(100))==pdTRUE){
-   if(network_dual_mode()){dual_zero(&r,sizeof(r));continue;}
+   if(network_dual_mode()||network_usb_mode()){dual_zero(&r,sizeof(r));continue;}
    if(r.op!=NET_SCAN){atomic_fetch_add(&network_epoch,1);atomic_store(&linked,false);ble_bridge_reset_session();}
    if(r.op==NET_SCAN){
     if(!atomic_load(&radio_on)){if(esp_wifi_start()==ESP_OK)atomic_store(&radio_on,true);}
@@ -169,8 +177,8 @@ static void manager_task(void *arg){
     if(save_credentials(NULL)){xSemaphoreTake(lock,portMAX_DELAY);memset(&saved,0,sizeof(saved));xSemaphoreGive(lock);credentials_ok=false;esp_wifi_disconnect();atomic_store(&online,false);atomic_store(&station_ip,0);set_status(0,0);}else set_status(4,5);
    }else if(r.op==NET_APPLY){
     set_status(1,0);bool begun=begin_station(&r.credentials);uint32_t until=millis()+20000;
-    while(begun&&!network_dual_mode()&&!atomic_load(&online)&&(int32_t)(until-millis())>0){if(atomic_load(&disconnect_reason))break;vTaskDelay(pdMS_TO_TICKS(100));}
-    if(begun&&!network_dual_mode()&&atomic_load(&online)&&save_credentials(&r.credentials)){xSemaphoreTake(lock,portMAX_DELAY);saved=r.credentials;xSemaphoreGive(lock);credentials_ok=true;keep_until=millis()+60000;set_status(2,0);}
+    while(begun&&!network_dual_mode()&&!network_usb_mode()&&!atomic_load(&online)&&(int32_t)(until-millis())>0){if(atomic_load(&disconnect_reason))break;vTaskDelay(pdMS_TO_TICKS(100));}
+    if(begun&&!network_dual_mode()&&!network_usb_mode()&&atomic_load(&online)&&save_credentials(&r.credentials)){xSemaphoreTake(lock,portMAX_DELAY);saved=r.credentials;xSemaphoreGive(lock);credentials_ok=true;keep_until=millis()+60000;set_status(2,0);}
     else{uint32_t reason=atomic_load(&disconnect_reason);set_status(4,atomic_load(&online)?5:reason==WIFI_REASON_AUTH_FAIL||reason==WIFI_REASON_HANDSHAKE_TIMEOUT?2:reason==WIFI_REASON_NO_AP_FOUND?3:4);esp_wifi_disconnect();atomic_store(&online,false);atomic_store(&station_ip,0);retry=millis()+10000;}
    }
    memset(&r,0,sizeof(r));xSemaphoreTake(lock,portMAX_DELAY);busy=false;xSemaphoreGive(lock);

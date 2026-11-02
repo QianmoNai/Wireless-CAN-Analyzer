@@ -13,6 +13,8 @@
 #include "can_load.h"
 #include "can_rates.h"
 #include "board_ui.h"
+#include "board_status_led.h"
+#include "uart_bridge.h"
 #include "dual_link.h"
 #include "network_link.h"
 static void publish_local_and_ble(const bridge_packet_t *packet)
@@ -67,6 +69,7 @@ static bool on_rx(twai_node_handle_t node, const twai_rx_done_event_data_t *even
     twai_frame_t frame = {.buffer = message.data, .buffer_len = sizeof(message.data)};
     BaseType_t wake = pdFALSE;
     if (twai_node_receive_from_isr(node, &frame) == ESP_OK) {
+        if(uart_bridge_selected())return false;
         atomic_fetch_add(&rx_count, 1);
         can_load_rx(&bus_load, frame.header.ide, frame.header.rtr, frame.header.dlc);
         message.header = frame.header;message.timestamp=(uint32_t)(esp_timer_get_time()/1000);
@@ -92,6 +95,7 @@ static void rx_task(void *arg)
     rx_message_t message;
     for (;;) {
         if (xQueueReceive(rx_queue, &message, portMAX_DELAY) != pdTRUE) continue;
+        if(uart_bridge_selected())continue;
         bridge_packet_t packet = {.bytes = {1, 1}};
         packet.bytes[2] = (message.header.ide ? 1 : 0) | (message.header.rtr ? 2 : 0);
         packet.bytes[3] = message.header.dlc;
@@ -156,6 +160,7 @@ static esp_err_t set_bitrate(twai_node_handle_t node, uint32_t rate)
 }
 void app_main(void)
 {
+    board_status_led_init();
     owner_task=xTaskGetCurrentTaskHandle();
     dual_link_set_owner(owner_task);
     esp_timer_handle_t poll_timer;
@@ -169,6 +174,7 @@ void app_main(void)
     query_command_queue = xQueueCreate(16, sizeof(bridge_packet_t));
     ESP_ERROR_CHECK(rx_queue && tx_done_queue && command_queue && query_command_queue ? ESP_OK : ESP_ERR_NO_MEM);
     ble_bridge_init(command_queue, query_command_queue);
+    uart_bridge_init();
     twai_node_handle_t node;
     twai_onchip_node_config_t config = {
         .io_cfg = {.tx = CAN_TX_GPIO, .rx = CAN_RX_GPIO,
@@ -211,6 +217,21 @@ void app_main(void)
                     ble_bridge_set_motor_busy(false);
                 } else if (!success) ending = 4;
             }
+        }
+        if(uart_bridge_selected()) {
+            poll_clear(&polls,1);demo=false;
+            if(pulse){publish_pulse(3,&pulse_command,pulse_sent,pulse_failed);pulse=false;}
+            ble_bridge_set_motor_busy(false);
+            bridge_packet_t discarded;
+            while(xQueueReceive(query_command_queue,&discarded,0)==pdTRUE)poll_cancel_command(&discarded);
+            while(xQueueReceive(command_queue,&discarded,0)==pdTRUE){
+                if(discarded.bytes[1]==0x12)publish_config(bitrate,1,wire_u32(discarded.bytes+16));
+                else if(discarded.bytes[1]==0x10)report_tx(&discarded,false,POLL_ERR_DRIVER,true);
+            }
+            if(timer_running){ESP_ERROR_CHECK(esp_timer_stop(poll_timer));timer_running=false;}
+            uart_bridge_stats_t serial;uart_bridge_stats(&serial);
+            board_status_led_update(network_dual_mode()?dual_link_connected():ble_bridge_connected(),serial.rx,serial.tx,now);
+            ulTaskNotifyTake(pdTRUE,pdMS_TO_TICKS(10));continue;
         }
         if(!ble_bridge_connected())poll_clear(&polls,1);
         poll_expire(&polls,esp_timer_get_time());
@@ -358,6 +379,10 @@ void app_main(void)
         bridge_packet_t rate_packet;
         if(can_rates_snapshot(&rates,&rate_packet,atomic_load(&rx_count),tx_count,report_now))publish_local_and_ble(&rate_packet);
         if(report_now-last_poll_report>=1000000){poll_report(&polls,report_now-last_poll_report);last_poll_report=report_now;}
+        // Reuse hardware-success counters; no LED GPIO work or extra queues in ISR.
+        bool indicator_connected = network_dual_mode() ? dual_link_connected() : ble_bridge_connected();
+        board_status_led_update(indicator_connected, atomic_load(&rx_count), tx_count,
+                                (uint32_t)(report_now / 1000));
         bool need_timer=poll_active(&polls);
         if(need_timer&&!timer_running)ESP_ERROR_CHECK(esp_timer_start_periodic(poll_timer,250));
         if(!need_timer&&timer_running)ESP_ERROR_CHECK(esp_timer_stop(poll_timer));

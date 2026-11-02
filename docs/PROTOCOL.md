@@ -195,3 +195,22 @@ App1.14.1 submission retries have at most three attempts with100/200ms backoff. 
 Asynchronous event8 token0/result1 stopped summaries cannot terminate a locally reopened polling entry, and normal token0 progress cannot enable a new entry before its own configuration ACK. Token0/result4 or5 remains authoritative and stops renewals. Those asynchronous events do not carry a query generation: a delayed old fault can conservatively stop a newly opened query; the App never ignores a fault or automatically restarts. Delayed recovery UI messages also exclude keys currently active again.
 
 Firmware1.14.1 also protects the NimBLE ATT buffer pool for every notification class. A20-byte notification uses a payload mbuf and an additional ATT-header mbuf. After payload allocation, delivery requires at least7 free blocks in that allocation's own pool:1 for the header and6 reserved as management headroom. The total free count across different-size pools is not sufficient because this IDF allocator does not fall back from the selected exhausted pool. Low-watermark delivery releases its payload; notify_custom otherwise consumes it on either success or failure. Raw submission failures yield10ms before checking the priority queue again; healthy delivery has no added frequency cap. ACK/control retry budgets remain finite. This is buffer headroom protection, not a radio-completion count or a guarantee of lossless telemetry.
+
+## UART 数据族（固件 1.23.0）
+
+继续使用版本 1 的固定 20 字节包，BLE 通知和 LAN 帧格式不变。下表所有整数均为小端；事件类型采用十进制，命令写作十六进制。
+
+| 方向 / 类型 | byte 2 | byte 3 | byte 4–15 | byte 16–19 |
+|---|---|---|---|---|
+| App→设备 `0x18` | 长度 1–12 | 0 | 原始串口字节，尾部零填充 | 非零请求 token |
+| 设备→App 19，UART RX | 长度 1–12 | 0 | 原始字节，尾部零填充 | 递增包序号，允许回绕 |
+| 设备→App 20，UART TX 结果 | 0 完成 / 2 驱动错误 / 3 取消 | 原请求长度 | 原请求数据 | 原请求 token |
+| 设备→App 21，数据状态 | 0 CAN / 1 UART | 0 UART 就绪 / 1 未就绪 | u32 波特率、累计 RX 字节、累计 TX 字节 | u32 累计丢弃字节 |
+
+数据状态约每 500ms 上报，CAN 模式也上报，App 据此切换页面。CAN 模式下 UART 未就绪属于正常状态。计数为运行期累计 uint32，可能回绕，重启清零。
+
+UART 命令仅在已选择 UART 且驱动就绪时接受；长度、保留位、填充、token 均须有效。GATT/LAN 接受命令不是串口输出完成，必须等待类型 20 的同 token 成功结果。App 同时等待原生写完成，避免早到的串口确认与下一次原生写重叠。结果超时不自动重试。UART RX 走有界原始数据队列，TX 结果走优先控制队列；旧 CAN 解码器不解析 UART 数据。CAN/UART 互斥与吞吐限制见 [UART.md](UART.md)。
+
+## 原生 USB 传输
+
+固件 1.24.0 / Desktop 1.2.0 增加 USB直连，使用 32 字节 CRC32 / 会话号封装既有 20 字节报文。具体格式、握手和租约见 [USB.md](USB.md)。CAN 与 UART 均支持。

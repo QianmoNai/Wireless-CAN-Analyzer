@@ -1,5 +1,6 @@
 #include "sdkconfig.h"
 #include "board_ui.h"
+#include "uart_bridge.h"
 #include "network_link.h"
 #include "dual_link.h"
 #if CONFIG_CAN_LOCAL_PANEL
@@ -131,6 +132,7 @@ static void ui_task(void *arg)
     ui_model_t ui; ui_model_init(&ui,load_settings());
     ui_animation_t animation;ui_animation_init(&animation,&ui);
     network_set_mode(ui_mode(&ui));
+    uart_bridge_configure(ui.uart,ui_uart_baud(&ui));
     uint32_t persisted=ui_model_settings(&ui), changed_at=0, retry_at=0;
     bool save_failed=false, panel_ready=false;
     ui_button_t keys[3]={0}; const int pins[]={PIN_BT1,PIN_BT2,PIN_BT3};
@@ -152,6 +154,7 @@ static void ui_task(void *arg)
     bool alarm_started=false, last_bus_off=false, beep_active=false;
     bool requested=true, rendering=false, transfer_pending=false, previous_valid=false;
     uint8_t applied_brightness=0, applied_rotation=UINT8_MAX;
+    uint32_t uart_last_ms=0,uart_last_rx=0,uart_last_tx=0,uart_rx_hz=0,uart_tx_hz=0;
     unsigned buffer=0;
 #ifdef CAN_PANEL_BENCHMARK
     uint32_t benchmark_next=2000;
@@ -187,6 +190,7 @@ static void ui_task(void *arg)
         ui_render_pose_t pose;
         bool animating=ui_animation_sample(&animation,now,&pose);
         network_set_mode(ui_mode(&ui));
+        uart_bridge_configure(ui.uart,ui_uart_baud(&ui));
         if(!ui.sound || (beep_active && (int32_t)(beep_until-now)<=0))beep_active=false;
         err=board_buzzer_set(beep_active,ui.volume);
         if(err!=ESP_OK)break;
@@ -212,9 +216,17 @@ static void ui_task(void *arg)
             portENTER_CRITICAL(&snapshot_lock);frame.snapshot=shared;portEXIT_CRITICAL(&snapshot_lock);
             frame.snapshot.connected=ble_bridge_connected();
             uint32_t code;network_display(&frame.snapshot.wifi_state,frame.snapshot.ip,&code);
-            frame.snapshot.pairing=code!=UINT32_MAX&&!ui.dual_role;frame.snapshot.pairing_code=code;
+            frame.snapshot.pairing=code!=UINT32_MAX&&!ui.dual_role&&!ui.usb;frame.snapshot.pairing_code=code;
             dual_link_view(&frame.snapshot.dual);
             if(ui.dual_role){frame.snapshot.connected=dual_link_connected();if(frame.snapshot.wifi_state==4)frame.snapshot.dual.state=DUAL_UI_ERROR;}
+            if(ui.uart){
+                uart_bridge_stats_t serial;uart_bridge_stats(&serial);
+                uint32_t elapsed=now-uart_last_ms;
+                if(elapsed>=500){uart_rx_hz=(uint64_t)(serial.rx-uart_last_rx)*1000/elapsed;uart_tx_hz=(uint64_t)(serial.tx-uart_last_tx)*1000/elapsed;uart_last_ms=now;uart_last_rx=serial.rx;uart_last_tx=serial.tx;}
+                frame.snapshot.bitrate=serial.baud;frame.snapshot.rx_hz=uart_rx_hz;frame.snapshot.tx_hz=uart_tx_hz;
+                frame.snapshot.rates_valid=true;frame.snapshot.state=serial.ready?0:3;
+                frame.snapshot.failed=serial.dropped;frame.snapshot.load_valid=false;
+            }else{uart_last_ms=now;uart_bridge_stats_t serial;uart_bridge_stats(&serial);uart_last_rx=serial.rx;uart_last_tx=serial.tx;uart_rx_hz=uart_tx_hz=0;}
             bool new_fault=frame.snapshot.failed!=last_failed || (frame.snapshot.state==3&&!last_bus_off);
             last_failed=frame.snapshot.failed;last_bus_off=frame.snapshot.state==3;
             if (new_fault && (!alarm_started || (uint32_t)(now-last_alarm)>=3000)) {

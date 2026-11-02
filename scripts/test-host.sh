@@ -10,8 +10,20 @@ compile_run() {
 }
 compile_run test_board_ui firmware/main/board_ui_model.c firmware/main/board_ui_render.c firmware/main/board_ui_font.c firmware/main/board_ui_data.c
 compile_run test_board_ui_animation -Wall -Wextra -Werror firmware/main/board_ui_animation.c firmware/main/board_ui_model.c firmware/main/board_ui_render.c firmware/main/board_ui_font.c
+for led_config in "1 1" "1 0" "0 1"; do
+    read -r led_enabled led_s3 <<< "$led_config"
+    cc -std=c11 -Wall -Wextra -Werror -DCONFIG_CAN_STATUS_LED="$led_enabled" -DCONFIG_IDF_TARGET_ESP32S3="$led_s3" \
+        -Itests/status_led_stubs -Ifirmware/main tests/test_board_status_led.c firmware/main/board_status_led.c \
+        -o "$test_build_dir/test_board_status_led-$led_enabled-$led_s3"
+    "$test_build_dir/test_board_status_led-$led_enabled-$led_s3"
+done
 cc -std=c11 -Wall -Wextra -Werror -Itests/buzzer_stubs -Ifirmware/main tests/test_board_buzzer.c firmware/main/board_buzzer.c -o "$test_build_dir/test_board_buzzer"
 "$test_build_dir/test_board_buzzer"
+cc -std=c11 -Wall -Wextra -Werror -Itests/uart_stubs -Itests/dual_stubs -Ifirmware/main tests/test_uart_bridge.c -o "$test_build_dir/test_uart_bridge"
+"$test_build_dir/test_uart_bridge"
+cc -std=c11 -Wall -Wextra -Werror -Itests/usb_stubs -Ifirmware/main tests/test_usb_link.c -o "$test_build_dir/test_usb_link"
+"$test_build_dir/test_usb_link"
+compile_run test_usb_protocol -Wall -Wextra -Werror
 compile_run test_network_protocol firmware/main/network_protocol.c
 cc -std=c11 -Wall -Wextra -Werror -Ifirmware/main tests/test_dual_protocol.c tests/dual_crypto_host.c firmware/main/dual_protocol.c firmware/main/dual_session.c -lcrypto -o "$test_build_dir/test_dual_protocol"
 "$test_build_dir/test_dual_protocol"

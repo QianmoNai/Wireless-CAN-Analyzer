@@ -2,10 +2,11 @@
 #include "ble_bridge.h"
 #include <stddef.h>
 void network_init(void);
-// 0 BLE, 1 LAN Wi-Fi, 2 dual A, 3 dual B.
+// 0 BLE, 1 LAN Wi-Fi, 2 dual A, 3 dual B, 4 native USB.
 void network_set_mode(unsigned mode);
 bool network_dual_mode(void);
 bool network_wifi_mode(void);
+bool network_usb_mode(void);
 bool network_connected(void);
 bool network_send(const bridge_packet_t *packet);
 // Call only after BLE MITM authentication is checked; packet length is exactly 20.

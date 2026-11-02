@@ -1,0 +1,160 @@
+#include "uart_bridge.h"
+#include "dual_link.h"
+#include "network_link.h"
+#include <stdatomic.h>
+#include <string.h>
+#include "sdkconfig.h"
+#if CONFIG_IDF_TARGET_ESP32S3
+#include "driver/uart.h"
+#include "esp_timer.h"
+#include "freertos/task.h"
+// The board's TX/RX labels are U0TXD/U0RXD. UART1 is routed onto these pads;
+// the application console is disabled; these pads carry only bridged data.
+enum { PORT=UART_NUM_1, TX_PIN=43, RX_PIN=44 };
+typedef struct { bridge_packet_t packet; uint32_t generation,config; } uart_command_t;
+static QueueHandle_t commands,events;
+static atomic_uint config_request=115200u<<1, connection_generation;
+static atomic_uint rx_total,tx_total,drop_total,error_total;
+static atomic_bool ready;
+static TaskHandle_t worker;
+static bool installed;
+static uint32_t applied_config,applied_generation,peer_generation,rx_sequence;
+static uint8_t tx_data[DUAL_UART_CHUNK];
+static size_t tx_size,tx_offset;
+static bridge_packet_t tx_command;
+static bool tx_app;
+static void result(const bridge_packet_t *command,unsigned status) {
+    bridge_packet_t p=*command;p.bytes[1]=UART_TX_EVENT;p.bytes[3]=p.bytes[2];p.bytes[2]=status;
+    ble_bridge_publish(&p);
+}
+static void discard_pending(bool reply) {
+    if(tx_size){atomic_fetch_add(&drop_total,tx_size-tx_offset);if(tx_app&&reply)result(&tx_command,3);}
+    tx_size=tx_offset=0;tx_app=false;
+    uart_command_t command;
+    while(xQueueReceive(commands,&command,0)==pdTRUE){
+        atomic_fetch_add(&drop_total,command.packet.bytes[2]);
+        if(reply && command.generation==atomic_load(&connection_generation))result(&command.packet,3);
+    }
+}
+static void close_port(void) {
+    atomic_store(&ready,false);
+    if(installed){uart_driver_delete(PORT);installed=false;events=NULL;}
+}
+static bool open_port(uint32_t baud) {
+    uart_config_t c={.baud_rate=baud,.data_bits=UART_DATA_8_BITS,.parity=UART_PARITY_DISABLE,
+        .stop_bits=UART_STOP_BITS_1,.flow_ctrl=UART_HW_FLOWCTRL_DISABLE,.source_clk=UART_SCLK_DEFAULT};
+    if(uart_param_config(PORT,&c)!=ESP_OK || uart_set_pin(PORT,TX_PIN,RX_PIN,UART_PIN_NO_CHANGE,UART_PIN_NO_CHANGE)!=ESP_OK)return false;
+    if(uart_driver_install(PORT,4096,0,32,&events,0)!=ESP_OK)return false;
+    installed=true;uart_set_rx_timeout(PORT,2);atomic_store(&ready,true);return true;
+}
+static void publish_status(void) {
+    uart_bridge_stats_t s;uart_bridge_stats(&s);
+    bridge_packet_t p={.bytes={1,UART_STATUS_EVENT,uart_bridge_selected(),s.ready?0:1}};
+    wire_put_u32(p.bytes+4,s.baud);wire_put_u32(p.bytes+8,s.rx);wire_put_u32(p.bytes+12,s.tx);wire_put_u32(p.bytes+16,s.dropped);
+    ble_bridge_publish(&p);
+}
+static void step(void) {
+    uint32_t config=atomic_load(&config_request),epoch=atomic_load(&connection_generation);
+    uint32_t peer=dual_link_generation();
+    if(config!=applied_config || epoch!=applied_generation || peer!=peer_generation) {
+        bool reopen=config!=applied_config;
+        discard_pending(epoch==applied_generation);
+        if(installed){size_t buffered=0;uart_get_buffered_data_len(PORT,&buffered);atomic_fetch_add(&drop_total,buffered);uart_flush_input(PORT);}
+        if(reopen){close_port();if(config&1 && !open_port(config>>1))atomic_fetch_add(&error_total,1);}
+        applied_config=config;applied_generation=epoch;peer_generation=peer;
+    }
+    if(!(config&1) || !installed)return;
+    uart_event_t event;
+    for(unsigned i=0;i<32&&xQueueReceive(events,&event,0)==pdTRUE;i++){
+        if(event.type==UART_FIFO_OVF || event.type==UART_BUFFER_FULL || event.type==UART_FRAME_ERR || event.type==UART_PARITY_ERR){
+            atomic_fetch_add(&error_total,1);
+            size_t buffered=0;uart_get_buffered_data_len(PORT,&buffered);atomic_fetch_add(&drop_total,buffered);
+            uart_flush_input(PORT);
+        }
+    }
+    bool dual=network_dual_mode();
+    bool connected=dual?dual_link_connected():ble_bridge_connected();
+    uint8_t data[DUAL_UART_CHUNK];
+    for(unsigned i=0;i<64;i++){
+        int n=uart_read_bytes(PORT,data,dual?sizeof(data):UART_WIRE_BYTES,0);
+        if(n<=0)break;
+        atomic_fetch_add(&rx_total,n);
+        if(!connected){atomic_fetch_add(&drop_total,n);continue;}
+        if(dual){if(!dual_link_uart_rx(data,n))atomic_fetch_add(&drop_total,n);}
+        else {
+            bridge_packet_t p={.bytes={1,UART_RX_EVENT,n,0}};
+            memcpy(p.bytes+4,data,n);wire_put_u32(p.bytes+16,++rx_sequence);
+            if(!ble_bridge_uart_publish(&p))atomic_fetch_add(&drop_total,n);
+        }
+    }
+    if(!connected){discard_pending(false);return;}
+    if(!tx_size){
+        if(dual){dual_link_uart_take(tx_data,&tx_size);tx_app=false;}
+        else {
+            uart_command_t command;
+            if(xQueueReceive(commands,&command,0)==pdTRUE){
+                if(command.generation!=epoch || command.config!=config){atomic_fetch_add(&drop_total,command.packet.bytes[2]);return;}
+                tx_command=command.packet;tx_size=command.packet.bytes[2];memcpy(tx_data,command.packet.bytes+4,tx_size);tx_app=true;
+            }
+        }
+        tx_offset=0;
+    }
+    // Never block the worker on a slow UART. Check selection again before
+    // putting additional bytes into the hardware FIFO.
+    if(tx_size && config==atomic_load(&config_request) && epoch==atomic_load(&connection_generation)){
+        if(tx_offset<tx_size){
+            int n=uart_tx_chars(PORT,(const char*)tx_data+tx_offset,tx_size-tx_offset);
+            if(n<0){
+                atomic_fetch_add(&error_total,1);atomic_fetch_add(&drop_total,tx_size-tx_offset);
+                if(tx_app)result(&tx_command,2);
+                tx_size=tx_offset=0;tx_app=false;return;
+            }
+            if(n>0)tx_offset+=n;
+        }
+        if(tx_offset==tx_size && uart_wait_tx_done(PORT,0)==ESP_OK){
+            atomic_fetch_add(&tx_total,tx_size);
+            if(tx_app)result(&tx_command,0);
+            tx_size=tx_offset=0;tx_app=false;
+        }
+    }
+}
+static void task(void *arg) {
+    (void)arg;uint32_t last_status=0;
+    for(;;){
+        step();uint32_t now=esp_timer_get_time()/1000;
+        if((uint32_t)(now-last_status)>=500){publish_status();last_status=now;}
+        ulTaskNotifyTake(pdTRUE,1);
+    }
+}
+void uart_bridge_init(void) {
+    commands=xQueueCreate(32,sizeof(uart_command_t));
+    if(commands)xTaskCreate(task,"uart_bridge",4096,NULL,4,&worker);
+}
+void uart_bridge_configure(bool selected,uint32_t baud) {
+    if(baud!=9600&&baud!=19200&&baud!=38400&&baud!=57600&&baud!=115200&&baud!=230400&&baud!=460800&&baud!=921600)return;
+    uint32_t wanted=(baud<<1)|selected;
+    if(atomic_exchange(&config_request,wanted)!=wanted){
+        dual_link_set_uart(selected);dual_link_reset_data();
+        if(worker)xTaskNotifyGive(worker);
+    }
+}
+bool uart_bridge_selected(void){return atomic_load(&config_request)&1;}
+bool uart_bridge_send(const uint8_t p[20]) {
+    if(!worker || !atomic_load(&ready) || !uart_bridge_selected() || !uart_command_valid(p))return false;
+    uart_command_t c={.generation=atomic_load(&connection_generation),.config=atomic_load(&config_request)};
+    memcpy(c.packet.bytes,p,20);
+    bool ok=xQueueSend(commands,&c,0)==pdTRUE;if(ok)xTaskNotifyGive(worker);return ok;
+}
+void uart_bridge_disconnect(void){atomic_fetch_add(&connection_generation,1);if(worker)xTaskNotifyGive(worker);}
+void uart_bridge_stats(uart_bridge_stats_t *s){
+    *s=(uart_bridge_stats_t){.rx=atomic_load(&rx_total),.tx=atomic_load(&tx_total),.dropped=atomic_load(&drop_total)+dual_link_uart_dropped(),
+        .errors=atomic_load(&error_total),.baud=atomic_load(&config_request)>>1,.ready=atomic_load(&ready)};
+}
+#else
+void uart_bridge_init(void){}
+void uart_bridge_configure(bool selected,uint32_t baud){(void)selected;(void)baud;}
+bool uart_bridge_selected(void){return false;}
+bool uart_bridge_send(const uint8_t p[20]){(void)p;return false;}
+void uart_bridge_disconnect(void){}
+void uart_bridge_stats(uart_bridge_stats_t *s){memset(s,0,sizeof(*s));}
+#endif

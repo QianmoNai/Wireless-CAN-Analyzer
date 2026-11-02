@@ -5,6 +5,7 @@ import json
 import time
 from .protocol import packet, u32, setting_command, can_command, secret
 from .transports import BleTransport, LanTransport, scan_ble, discover
+from .usb_transport import UsbTransport, scan_usb
 
 
 class Channel:
@@ -23,6 +24,7 @@ class Channel:
         self.controls = deque(maxlen=64)
         self.dropped = 0
         self.polls = {}
+        self.uart = False
         self.waiters = {}
         self.pending_tx = {}
         self.token = 0x20000000
@@ -130,7 +132,7 @@ class Channel:
 
     async def handle(self, name, args):
         if name == 'connectionMode':
-            if args[0] not in ('ble', 'wifi'):
+            if args[0] not in ('ble', 'wifi', 'usb'):
                 raise ValueError('无效连接方式')
             await self.disconnect('已切换连接方式')
             self.mode = args[0]
@@ -143,7 +145,9 @@ class Channel:
                 return
             self.state('scanning', '正在搜索设备…')
             self.emit('scanStart', {})
-            if self.mode == 'wifi':
+            if self.mode == 'usb':
+                await scan_usb(lambda d: self.emit('device', d))
+            elif self.mode == 'wifi':
                 if not self.saved.get('id'):
                     raise ValueError('请先通过蓝牙读取网络状态，取得安全连接信息')
                 await discover(self.saved['id'], lambda d: self.emit('device', d))
@@ -152,10 +156,10 @@ class Channel:
             self.state('idle', '搜索完成；可选择设备连接')
         elif name in ('connect', 'connectLan', 'reconnect'):
             if name == 'reconnect':
-                target = 'wifi:'+self.saved.get('ip', '') if self.mode == 'wifi' else self.address
+                target = 'wifi:'+self.saved.get('ip', '') if self.mode == 'wifi' else 'usb:'+self.saved.get('usb_port', '') if self.mode == 'usb' else self.address
             else:
                 target = ('wifi:' if name == 'connectLan' else '') + args[0]
-            if not target or target == 'wifi:':
+            if not target or target in ('wifi:', 'usb:'):
                 raise ValueError('尚未保存连接地址，请先扫描')
             await self.disconnect('准备连接')
             generation = self.epoch
@@ -168,7 +172,12 @@ class Channel:
                     self.emit('error', dict(message=message))
             self.state('connecting', '正在连接设备…')
             try:
-                if target.startswith('wifi:'):
+                if target.startswith('usb:'):
+                    self.mode = 'usb'
+                    self.transport = UsbTransport(received, lost)
+                    await self.transport.connect(target[4:])
+                    self.saved['usb_port'] = target[4:]
+                elif target.startswith('wifi:'):
                     self.mode = 'wifi'
                     self.transport = LanTransport(received, lost)
                     await self.transport.connect(target[5:], self.saved.get('fp'), self.saved.get('token'))
@@ -190,9 +199,15 @@ class Channel:
                 raise
         elif name == 'send':
             self.polls.clear()
-            await self.write(setting_command(args[0]))
+            command = setting_command(args[0])
+            if command[1] == 0x18 and not self.uart:
+                raise ValueError('请先在设备屏幕选择 UART 数据')
+            if command[1] == 0x12 and self.uart:
+                raise ValueError('UART 模式不支持设置 CAN 波特率')
+            await self.write(command)
             self.emit('writeDone', dict(success=True))
         elif name == 'manual':
+            if self.uart:raise ValueError('当前为 UART 数据，请在设备屏幕切回 CAN')
             if len(self.pending_tx) >= 16:
                 raise ValueError('待确认发送过多，请等待结果')
             token = self.next_token()
@@ -206,6 +221,7 @@ class Channel:
                 self.emit('manualResult', dict(token=token, status='提交失败；结果未知'))
                 raise
         elif name == 'setPolling':
+            if self.uart:raise ValueError('UART 模式不支持 CAN 查询')
             key, identifier, enabled, hz = args
             if not self.capabilities & 8:
                 raise ValueError('当前固件不支持定时查询')
@@ -264,7 +280,7 @@ class Channel:
                 self.network_state()
 
     async def subscribe(self):
-        if not self.ready:
+        if not self.ready or self.uart:
             return
         supported = bool(self.capabilities & 128)
         self.emit('detailSupport', dict(supported=supported, maxHz=self.max_hz, channel=self.name))
@@ -305,6 +321,15 @@ class Channel:
         waiter = self.waiters.get((kind, u32(p, 16)))
         if waiter and not waiter.done():
             waiter.set_result(p)
+        if kind == 21:
+            previous_uart = self.uart
+            self.uart = p[2] == 1
+            if self.uart:
+                for key in list(self.polls):self.emit('queryState',dict(key=key,enabled=False,message='UART 模式，查询已停止'))
+                self.polls.clear()
+                self.detail = ''
+            elif previous_uart:
+                self.enqueue('subscribe', [])
         if kind == 5:
             old = self.capabilities
             self.capabilities = p[3]
@@ -320,7 +345,7 @@ class Channel:
             self.pending_tx.pop(u32(p, 16))
             self.emit('manualResult', dict(token=u32(p, 16), status='CAN 发送成功（已收到 ACK）' if kind == 2 else 'CAN 发送失败，错误标志 0x%02X'%p[2]))
         if kind == 18 and p[2]:
-            self.emit('error', dict(message='设备拒绝局域网命令，状态码 '+str(p[2])))
+            self.emit('error', dict(message='设备拒绝通信命令，状态码 '+str(p[2])))
         if kind == 11 and (not self.detail or u32(p, 4) != self.revision):
             return
         if kind == 12:
@@ -329,7 +354,7 @@ class Channel:
             return
         if kind in (8, 9, 10, 15, 16, 18):
             return
-        queue = self.packets if kind in (1, 2, 3, 11) else self.controls
+        queue = self.packets if kind in (1, 2, 3, 11, 19) else self.controls
         if len(queue) == queue.maxlen:
             self.dropped += 1
         queue.append((bytes(p), time.monotonic()))
@@ -360,6 +385,7 @@ class Channel:
                     self.emit('manualResult', dict(token=token, status='等待超时；发送结果未知，不自动重发'))
 
     async def disconnect(self, message='已断开连接'):
+        self.uart = False
         self.epoch += 1
         self.ready = False
         self.polls.clear()

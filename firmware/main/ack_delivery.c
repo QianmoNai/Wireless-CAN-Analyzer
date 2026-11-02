@@ -3,7 +3,7 @@
 bool bridge_packet_is_ack(const bridge_packet_t *packet)
 {
     uint8_t type = packet->bytes[1];
-    if (type == 5 || type == 8 || type == 10)
+    if (type == 5 || type == 8 || type == 10 || type == 20)
         return wire_u32(packet->bytes + 16) != 0;
     return type == 7 && packet->bytes[2] != 0;
 }
@@ -14,7 +14,7 @@ bool bridge_packet_is_raw(const bridge_packet_t *packet)
     // Query completions are ordinary telemetry. Explicit send tokens retain
     // their previous control priority; management ACKs use a separate queue.
     if(type==2||type==3)return wire_u32(packet->bytes+16)==0;
-    return type==1||type==11||type==13;
+    return type==1||type==11||type==13||type==19;
 }
 
 bool bridge_deliver_ack(const bridge_packet_t *packet,

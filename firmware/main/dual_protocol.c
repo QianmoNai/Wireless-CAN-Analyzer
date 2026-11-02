@@ -11,7 +11,7 @@ bool dual_packet_valid(const uint8_t *p, size_t n, unsigned role) {
   return n >= DUAL_HEADER && n <= DUAL_MAX_PACKET && !memcmp(p, "CDL1", 4) &&
          p[5] == (role == DUAL_A ? DUAL_B : DUAL_A) &&
          (size_t)(p[6] | p[7] << 8) == n - DUAL_HEADER && p[4] >= DUAL_BEACON &&
-         p[4] <= DUAL_ACK;
+         p[4] <= DUAL_UART;
 }
 bool dual_can_valid(const uint8_t p[DUAL_CAN_SIZE]) {
   return !(p[0] & ~3) && p[1] <= 8 &&

@@ -1,3 +1,14 @@
+menu "CAN analyzer status LED"
+config CAN_STATUS_LED
+    bool "GPIO3 communication indicator (active high)"
+    depends on IDF_TARGET_ESP32S3
+    default y
+    help
+        Use the separate GPIO3 LED even when the local panel is disabled.
+        Off without a wireless client/peer, steady on when connected, and
+        short off pulses on successful CAN RX/TX (at most five per second).
+endmenu
+
 menu "CAN analyzer local panel"
 config CAN_LOCAL_PANEL
     bool "ST7789 screen, buttons, backlight and buzzer"

@@ -10,6 +10,12 @@
 #define dual_link_can_rx dual_b_can_rx
 #define dual_link_can_take dual_b_can_take
 #define dual_link_dropped dual_b_dropped
+#define dual_link_set_uart dual_b_set_uart
+#define dual_link_reset_data dual_b_reset_data
+#define dual_link_generation dual_b_generation
+#define dual_link_uart_rx dual_b_uart_rx
+#define dual_link_uart_take dual_b_uart_take
+#define dual_link_uart_dropped dual_b_uart_dropped
 #include "../firmware/main/dual_link.c"
 void dual_b_tick(void) {
   if (running)

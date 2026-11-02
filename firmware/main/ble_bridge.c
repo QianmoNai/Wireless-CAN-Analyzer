@@ -1,5 +1,7 @@
 #include "ble_bridge.h"
 #include "network_link.h"
+#include "usb_link.h"
+#include "uart_bridge.h"
 #include "esp_random.h"
 void ble_store_config_init(void);
 #include "home_status.h"
@@ -35,6 +37,8 @@ static portMUX_TYPE home_lock=portMUX_INITIALIZER_UNLOCKED;
 // Called with home_lock held. Explicit command acknowledgments always pass.
 static bool home_redundant(const bridge_packet_t *p){
  uint8_t mode=home_status.mode,type=p->bytes[1];
+ if(type==UART_RX_EVENT)return !uart_bridge_selected();
+ if(uart_bridge_selected()&&(type==1||type==11||type==12||type==13||type==14||type==16))return true;
  if(type==16)return mode!=1||wire_u32(p->bytes+16)!=home_status.revision;
  if(type==13||type==14||type==15)return mode!=0;
  if(type==12)return mode!=2||!home_status.sample_hz||wire_u32(p->bytes+16)!=home_status.revision;
@@ -91,6 +95,12 @@ int ble_bridge_command(const uint8_t bytes[20])
     bridge_packet_t packet;memcpy(packet.bytes,bytes,20);
     uint8_t *p = packet.bytes;
     if (p[0] != 1) return BLE_ATT_ERR_VALUE_NOT_ALLOWED;
+    if(p[1]==UART_SEND_COMMAND){
+        if(!uart_command_valid(p) || !uart_bridge_selected())return BLE_ATT_ERR_VALUE_NOT_ALLOWED;
+        return uart_bridge_send(p)?0:BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
+    if(uart_bridge_selected() && (p[1]==0x10||p[1]==0x11||p[1]==0x12||p[1]==0x20||
+        (p[1]==0x14 && wire_u32(p+8))))return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
     if(p[1]==0x16||p[1]==0x17){
         bridge_packet_t ack={0};
         portENTER_CRITICAL(&home_lock);bool ok=home_command(&home_status,&packet,&ack);portEXIT_CRITICAL(&home_lock);
@@ -136,7 +146,7 @@ int ble_bridge_command(const uint8_t bytes[20])
 }
 
 void ble_bridge_reset_session(void){
-    reset_home();atomic_store(&stop_requested,true);
+    reset_home();uart_bridge_disconnect();atomic_store(&stop_requested,true);
     if(notify_queue)xQueueReset(notify_queue);
     if(control_notify_queue)xQueueReset(control_notify_queue);
     if(ack_notify_queue)xQueueReset(ack_notify_queue);
@@ -146,7 +156,7 @@ void ble_bridge_reset_session(void){
 static int access_cb(uint16_t conn,uint16_t attr,struct ble_gatt_access_ctxt *ctx,void *arg){
     if(ctx->op!=BLE_GATT_ACCESS_OP_WRITE_CHR)return BLE_ATT_ERR_READ_NOT_PERMITTED;
     uint8_t packet[20];if(OS_MBUF_PKTLEN(ctx->om)!=20||ble_hs_mbuf_to_flat(ctx->om,packet,20,NULL))return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
-    if(network_wifi_mode()||network_dual_mode())return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
+    if(network_wifi_mode()||network_dual_mode()||network_usb_mode())return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
     return ble_bridge_command(packet);
 }
 static int network_access(uint16_t conn,uint16_t attr,struct ble_gatt_access_ctxt *ctx,void *arg){
@@ -175,14 +185,14 @@ static int gap_event(struct ble_gap_event *event, void *arg)
     switch (event->type) {
     case BLE_GAP_EVENT_CONNECT:
         if (event->connect.status == 0) {
-            if(!network_wifi_mode())reset_home();
+            if(!network_wifi_mode()&&!network_usb_mode())reset_home();
             atomic_store(&connection, event->connect.conn_handle);
             ESP_LOGI(TAG, "Phone connected");
         } else advertise();
         break;
     case BLE_GAP_EVENT_DISCONNECT:
         atomic_store(&subscribed, false);
-        if(!network_wifi_mode())ble_bridge_reset_session();
+        if(!network_wifi_mode()&&!network_usb_mode())ble_bridge_reset_session();
         network_config_disconnect();
         atomic_store(&connection, BLE_HS_CONN_HANDLE_NONE);
         ESP_LOGI(TAG, "Phone disconnected; advertising again");
@@ -216,7 +226,7 @@ static int gap_event(struct ble_gap_event *event, void *arg)
 
 static void advertise(void)
 {
-    if(network_dual_mode())return;
+    if(network_dual_mode()||network_usb_mode())return;
     struct ble_hs_adv_fields fields = {
         .flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP,
         .uuids128 = (ble_uuid128_t *)&service_uuid,
@@ -247,7 +257,7 @@ static void on_sync(void)
 }
 static void on_reset(int reason)
 {
-    if(!network_wifi_mode())ble_bridge_reset_session();
+    if(!network_wifi_mode()&&!network_usb_mode())ble_bridge_reset_session();
     network_config_disconnect();
     atomic_store(&subscribed, false);
     atomic_store(&connection, BLE_HS_CONN_HANDLE_NONE);
@@ -288,6 +298,7 @@ static bool notify_submit(void *context, void *buffer)
 }
 static bool notify_send(void *context, const bridge_packet_t *packet)
 {
+    if(network_usb_mode())return usb_link_send(packet);
     if(network_wifi_mode())return network_send(packet);
     static const bridge_notify_resource_ops_t ops = {
         .allocate = notify_allocate, .pool_free = notify_pool_free,
@@ -306,15 +317,15 @@ static void notify_task(void *arg)
     bool dual_paused=false;
     for (;;) {
         TickType_t now = xTaskGetTickCount();
-        if(network_dual_mode()){
+        if(network_dual_mode()||network_usb_mode()){
             if(!dual_paused&&ble_hs_synced()){
                 ble_gap_adv_stop();dual_paused=true;
             }
             int conn=atomic_load(&connection);
             if(conn!=BLE_HS_CONN_HANDLE_NONE)ble_gap_terminate(conn,BLE_ERR_REM_USER_CONN_TERM);
-            vTaskDelay(pdMS_TO_TICKS(20));continue;
+            if(network_dual_mode()){vTaskDelay(pdMS_TO_TICKS(20));continue;}
         }
-        if(dual_paused&&ble_hs_synced()){dual_paused=false;advertise();}
+        if(!network_usb_mode()&&dual_paused&&ble_hs_synced()){dual_paused=false;advertise();}
         if(atomic_load(&subscribed)&&now-last_network>=pdMS_TO_TICKS(1000)){
             bridge_packet_t mode={.bytes={1,17,network_wifi_mode(),0}};
             struct os_mbuf *om=ble_hs_mbuf_from_flat(mode.bytes,20);
@@ -385,7 +396,7 @@ void ble_bridge_publish(const bridge_packet_t *packet)
         atomic_fetch_add(&dropped, 1);
 }
 uint32_t ble_bridge_dropped(void) { return atomic_load(&dropped); }
-bool ble_bridge_connected(void) { if(network_dual_mode())return false;return network_wifi_mode()?network_connected():atomic_load(&subscribed); }
+bool ble_bridge_connected(void) { if(network_dual_mode())return false;return network_usb_mode()?usb_link_connected():network_wifi_mode()?network_connected():atomic_load(&subscribed); }
 bool ble_bridge_take_stop(void) { return atomic_exchange(&stop_requested, false); }
 void ble_bridge_set_motor_busy(bool busy) { atomic_store(&motor_busy, busy); }
 
@@ -410,6 +421,7 @@ void ble_bridge_init(QueueHandle_t commands, QueueHandle_t queries)
     ble_hs_cfg.sm_our_key_dist=BLE_SM_PAIR_KEY_DIST_ENC|BLE_SM_PAIR_KEY_DIST_ID;
     ble_hs_cfg.sm_their_key_dist=BLE_SM_PAIR_KEY_DIST_ENC|BLE_SM_PAIR_KEY_DIST_ID;
     ble_hs_cfg.store_status_cb=ble_store_util_status_rr;ble_store_config_init();
+    usb_link_init();
     network_init();
     ble_hs_cfg.sync_cb = on_sync;
     ble_hs_cfg.reset_cb = on_reset;
@@ -420,4 +432,10 @@ void ble_bridge_init(QueueHandle_t commands, QueueHandle_t queries)
     ESP_ERROR_CHECK(ble_svc_gap_device_name_set(saved_name));
     ESP_ERROR_CHECK(xTaskCreate(notify_task, "ble_notify", 4096, NULL, 4, NULL) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
     nimble_port_freertos_init(host_task);
+}
+
+bool ble_bridge_uart_publish(const bridge_packet_t *packet) {
+    if(!uart_bridge_selected() || !ble_bridge_connected() || !notify_queue)return false;
+    if(xQueueSend(notify_queue,packet,0)==pdTRUE)return true;
+    atomic_fetch_add(&dropped,1);return false;
 }

@@ -15,3 +15,11 @@ bool dual_link_connected(void);
 void dual_link_can_rx(const uint8_t packet[20]);
 bool dual_link_can_take(uint8_t packet[20]);
 uint32_t dual_link_dropped(void);
+
+// Data-type changes create a fresh session and discard queued old-type traffic.
+void dual_link_set_uart(bool enabled);
+uint32_t dual_link_generation(void);
+bool dual_link_uart_rx(const uint8_t *data, size_t size);
+bool dual_link_uart_take(uint8_t *data, size_t *size);
+uint32_t dual_link_uart_dropped(void);
+void dual_link_reset_data(void);

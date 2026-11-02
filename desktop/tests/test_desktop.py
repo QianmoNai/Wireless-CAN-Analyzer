@@ -33,6 +33,14 @@ class ProtocolTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ipv4('127.0.0.999')
 
+    def test_uart_command(self):
+        p = bytes([1, 0x18, 3, 0, 0, 255, 65]) + bytes(9) + (7).to_bytes(4, 'little')
+        self.assertEqual(setting_command(p.hex()), p)
+        for offset, value in [(2, 0), (2, 13), (3, 1), (7, 1), (16, 0)]:
+            bad = bytearray(p); bad[offset] = value
+            with self.assertRaises(ValueError):
+                setting_command(bad.hex())
+
     def test_wifi_fragmentation_and_validation(self):
         name = '中文网络'*2
         p = wifi_commands(5,name,'12345678',31)
@@ -74,6 +82,27 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.channel.roster = [dict(key=self.key,family='dm',sampleHz=100)]
     async def asyncTearDown(self):
         await self.channel.close()
+
+    async def test_uart_excludes_can_and_retains_raw_data(self):
+        c = self.channel
+        await c.handle('setPolling', [self.key, 1, True, 100])
+        c.receive(packet(21, a=1, x=115200))
+        self.assertTrue(c.uart)
+        self.assertFalse(c.polls)
+        with self.assertRaises(ValueError):
+            await c.handle('manual', [dict(identifier=1, data=[])])
+        with self.assertRaises(ValueError):
+            await c.handle('send', [packet(0x12, x=500000).hex()])
+        uart = bytes([1, 0x18, 3, 0, 0, 255, 65]) + bytes(9) + (7).to_bytes(4, 'little')
+        await c.handle('send', [uart.hex()])
+        self.assertEqual(c.transport.writes[-1], uart)
+        raw = bytes([1, 19, 3, 0, 0, 255, 65]) + bytes(9) + (1).to_bytes(4, 'little')
+        c.receive(raw)
+        self.assertEqual(c.packets[-1][0], raw)
+        c.receive(packet(21, a=0))
+        with self.assertRaises(ValueError):
+            await c.handle('send', [uart.hex()])
+        self.assertFalse(c.uart)
 
     async def test_manual_success_requires_can_result(self):
         c = self.channel

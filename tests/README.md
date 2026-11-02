@@ -12,6 +12,8 @@ bash scripts/test-host.sh
 
 覆盖 CAN 所有者循环、轮询查询、错误计数、速率和估算负载、BLE 数据筛选、ACK 调度、电机/IMU 订阅、蓝牙名称存储、本机按键与屏幕逻辑、App 查询和重连配置，以及有界接收、连接优先级、环形历史、WebView 资源路由和构建脚本保护。
 
+GPIO3 指示灯测试运行真实驱动配合 GPIO 输出模型，覆盖连接基线、RX/TX 活动、持续高流量下 50ms 短灭和至少 150ms 点亮、任务更新延迟、断连重连、计数/时间回绕与 GPIO 失败隔离；同时编译运行关闭配置和旧 ESP32 目标，检查其不操作 GPIO3。该测试不依赖屏幕或无线硬件，不能验证实际 LED 亮度及焊接。
+
 ## 浏览器界面测试
 
 ```bash
@@ -57,3 +59,15 @@ Wi-Fi 新增：凭据分片/事务超时/重放和擦除测试、Java 本地 TLS
 ## 双机 ESP-NOW 转发
 
 主机测试额外需要 OpenSSL 3 开发库。`test_dual_protocol.c` 使用实际配对/会话代码验证密码学握手、双端确认和重放隔离；`test_dual_runtime.c` 通过 `dual_runtime_a.c` / `dual_runtime_b.c` 分别编译两份实际运行代码，模拟独立队列、异步无线回调和 NVS，覆盖双向转发、重传去重、积压过期、断线和模式切换、计时回绕及 NVS 失败。现有 CAN owner 和四方向渲染测试同时覆盖双机入口。主机模拟不能证明射频吞吐或实物 CAN 接线正确，硬件验收项见 `docs/DUAL_CAN.md`。
+
+### UART / 声音合并（1.23.0）
+
+`bash scripts/test-host.sh` 包含实际 UART worker 的二进制收发、FIFO 完成应答、模式/连接隔离、输入校验、驱动错误和丢弃统计，以及 CAN owner 在 UART 选择时停止查询/转发、设置 v1–v5 迁移、四档声音和七项菜单滚动。Java 命令过滤器和接收队列测试覆盖 UART 命令与 CAN 订阅切换时保留 UART 数据。
+
+共享 WebView 的串口测试：安装 Playwright 后执行 `node tests/test_uart_ui.cjs`；可用 `PLAYWRIGHT_CHROMIUM_EXECUTABLE` 指定浏览器。覆盖模式自动切换、HEX/跨包 UTF-8、包序号间隙、12 字节分段、确认早于写完成、token 匹配、取消与断线。截图输出到 `android/dist/preview-uart-*.png`。这些测试使用原生通信桩，不代表实体无线链路测试。
+
+桌面端用 `desktop/.venv/bin/python -m unittest discover -s desktop/tests -v` 检查 UART 命令、模式互斥和原始数据路由。
+
+### USB直连（1.24.0 / Desktop 1.2.0）
+
+主机测试编译实际 USB worker，验证握手、分段、会话隔离、心跳到期、拔线、短写失败、控制优先及队列满；CRC 损坏后重新同步另有独立测试。屏幕测试覆盖 v6 配置迁移、CAN/UART 的 USB 设置持久化与红色主题脏区刷新。桌面测试覆盖握手与旧会话过滤、短写不重放、关闭串口、保留 BLE/Wi-Fi 信息；离线 UI 测试检查 USB 入口和扫描列表。驱动桩与离线界面不代替真实硬件验收。

@@ -10,8 +10,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/QianmoNai/BLE-CAN-Scope/releases/tag/desktop-v1.0.0"><img src="https://img.shields.io/badge/Firmware-1.21.0-65e6cb?style=flat-square&amp;labelColor=17212f" alt="Firmware 1.21.0"></a>
-  <a href="https://github.com/QianmoNai/BLE-CAN-Scope/releases/tag/desktop-v1.0.0"><img src="https://img.shields.io/badge/Android_App-1.20.0-88baff?style=flat-square&amp;labelColor=17212f" alt="Android App 1.20.0"></a>
+  <a href="https://github.com/QianmoNai/Wireless-CAN-Analyzer/releases/tag/desktop-v1.0.0"><img src="https://img.shields.io/badge/Firmware-1.21.0-65e6cb?style=flat-square&amp;labelColor=17212f" alt="Firmware 1.21.0"></a>
+  <a href="https://github.com/QianmoNai/Wireless-CAN-Analyzer/releases/tag/desktop-v1.0.0"><img src="https://img.shields.io/badge/Android_App-1.20.0-88baff?style=flat-square&amp;labelColor=17212f" alt="Android App 1.20.0"></a>
   <img src="https://img.shields.io/badge/Transport-Bluetooth_LE-65e6cb?style=flat-square&amp;labelColor=17212f" alt="Bluetooth LE">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPL--3.0-ccd6e0?style=flat-square&amp;labelColor=17212f" alt="GPL-3.0-only"></a>
 </p>
@@ -31,11 +31,15 @@
 
 <sub>Bluetooth LE CAN analyzer with ESP32-S3 firmware and an Android app. Multi-device monitoring, motor and IMU decoding, live charts, and an onboard display.</sub>
 
-当前源码固件 **1.21.0** / App **1.20.0** 支持蓝牙安全配网、局域网通信选择，以及实体按键切换蓝牙蓝色 / Wi-Fi 紫色界面。固件提供蜂鸣器低 / 中 / 高三档试验音量、页面滑动、菜单选中框移动和蓝紫主题渐变；1.20.3 修正整屏切换时的 DMA 调度等待，并柔化页面滑动起步；1.20.4 将四个方向的亮度加减对调，统一为上方或左侧按键增加、下方或右侧按键减少，详见 [本机面板操作](docs/LOCAL_PANEL.md)。原有蓝牙保留，使用步骤见 [Wi-Fi 配网与通信说明](docs/WIFI.md)。本次 Release 包含安卓、Linux、Windows 与 ESP32-S3 固件四类运行文件。
+当前源码固件 **1.24.1** / App **1.21.0** 支持蓝牙安全配网、局域网通信选择，以及实体按键切换蓝牙蓝色 / Wi-Fi 紫色界面。固件提供蜂鸣器低 / 中 / 高三档试验音量、页面滑动、菜单选中框移动和蓝紫主题渐变；1.20.3 修正整屏切换时的 DMA 调度等待，并柔化页面滑动起步；1.20.4 将四个方向的亮度加减对调，统一为上方或左侧按键增加、下方或右侧按键减少，详见 [本机面板操作](docs/LOCAL_PANEL.md)。原有蓝牙保留，使用步骤见 [Wi-Fi 配网与通信说明](docs/WIFI.md)。本次 Release 包含安卓、Linux、Windows 与 ESP32-S3 固件四类运行文件。
+
+**1.23.0 新增无线串口**：设备屏幕选择 CAN 或 UART，使用开发板 TX（GPIO43）/RX（GPIO44）与其他单片机连接；通过原有蓝牙或 Wi-Fi 在 App 接收/发送 HEX、UTF-8 数据。默认 115200 / 8N1，串口速率可在屏幕设置。声音与音量合并为“关闭、低、中、高”。详见 [接线和使用说明](docs/UART.md)。需同时更新固件及 App；下方历史 Release 下载仍为原版本。
+
+当前源码固件保留 **1.22.0** 新增的 [GPIO3 绿色通信指示灯](docs/STATUS_LED.md)：未连接熄灭、连接常亮、当前选中的 CAN/UART 数据成功收发时闪烁，兼容蓝牙、Wi-Fi 与双机 A/B，并独立于屏幕工作。下方现有 Release 的固件仍为 1.21.0，不包含此新增功能。
 
 ## Linux / Windows 桌面上位机
 
-新增 **CAN Scope Desktop 1.0.0**：蓝牙 / Wi-Fi、四通道、电机与 IMU 曲线、经典 CAN 单次发送、配置导入导出及 CSV 记录导出。Linux 启动 `bash desktop/start.sh`，Windows 双击 `desktop/start.bat`；独立打包和使用说明见 [桌面版文档](desktop/README.md)。
+当前桌面源码 **CAN Scope Desktop 1.2.3**：新增与固件 1.23.0 配套的 CAN/UART 数据选择与无线串口 HEX/文本收发，保留蓝牙 / Wi-Fi、四通道、电机与 IMU 曲线、经典 CAN 单次发送、配置导入导出及 CSV 记录导出。Linux 启动 `bash desktop/start.sh`，Windows 双击 `desktop/start.bat`；独立打包和使用说明见 [桌面版文档](desktop/README.md)。
 
 <a id="preview"></a>
 
@@ -60,7 +64,7 @@
   <img src="docs/local-panel-preview.png" alt="ST7789 中文总览与设置两页，横竖屏模拟数据" width="728">
 </p>
 
-<sub>本机页面由固件实际绘制代码生成，使用模拟数据。中文总览与设置两页，支持背光亮度、声音开关、三档音量、通信模式与 0°/90°/180°/270° 四方向，设置断电保存；本机不显示报文数据流。</sub>
+<sub>本机页面由固件实际绘制代码生成，使用模拟数据。中文总览与设置两页，支持背光亮度、声音四档、CAN/UART 数据选择、通信模式与 0°/90°/180°/270° 四方向，设置断电保存；本机不显示报文数据流。</sub>
 
 ## 为机器人调试准备
 
@@ -88,17 +92,17 @@
 
 ## 下载与安装
 
-**[前往 Release 下载 →](https://github.com/QianmoNai/BLE-CAN-Scope/releases/tag/desktop-v1.0.0)**
+**[前往 Release 下载 →](https://github.com/QianmoNai/Wireless-CAN-Analyzer/releases/tag/desktop-v1.0.0)**
 
 | 下载内容 | 版本 | 适用环境 |
 | --- | --- | --- |
-| [Android APK](https://github.com/QianmoNai/BLE-CAN-Scope/releases/download/desktop-v1.0.0/BLE-CAN-Scope-Android-1.20.0-debug.apk) | **1.20.0** | Android 8.0 及以上，支持 BLE |
-| [Linux 运行包](https://github.com/QianmoNai/BLE-CAN-Scope/releases/download/desktop-v1.0.0/CAN-Scope-Desktop-1.0.0-Linux-x64.tar.gz) | **1.0.0** | x64，Ubuntu 24.04 兼容运行库 |
-| [Windows 运行包](https://github.com/QianmoNai/BLE-CAN-Scope/releases/download/desktop-v1.0.0/CAN-Scope-Desktop-1.0.0-Windows-x64.zip) | **1.0.0** | Windows 10/11 x64 |
-| [ESP32-S3 烧录包](https://github.com/QianmoNai/BLE-CAN-Scope/releases/download/desktop-v1.0.0/BLE-CAN-Scope-ESP32-S3-1.21.0.zip) | **1.21.0** | ESP32-S3，4MB Flash；三个镜像、烧录脚本与说明 |
-| [SHA-256 校验文件](https://github.com/QianmoNai/BLE-CAN-Scope/releases/download/desktop-v1.0.0/SHA256SUMS) | 本次发行 | 覆盖四类完整安装/烧录包 |
+| [Android APK](https://github.com/QianmoNai/Wireless-CAN-Analyzer/releases/download/desktop-v1.0.0/BLE-CAN-Scope-Android-1.20.0-debug.apk) | **1.20.0** | Android 8.0 及以上，支持 BLE |
+| [Linux 运行包](https://github.com/QianmoNai/Wireless-CAN-Analyzer/releases/download/desktop-v1.0.0/CAN-Scope-Desktop-1.0.0-Linux-x64.tar.gz) | **1.0.0** | x64，Ubuntu 24.04 兼容运行库 |
+| [Windows 运行包](https://github.com/QianmoNai/Wireless-CAN-Analyzer/releases/download/desktop-v1.0.0/CAN-Scope-Desktop-1.0.0-Windows-x64.zip) | **1.0.0** | Windows 10/11 x64 |
+| [ESP32-S3 烧录包](https://github.com/QianmoNai/Wireless-CAN-Analyzer/releases/download/desktop-v1.0.0/BLE-CAN-Scope-ESP32-S3-1.21.0.zip) | **1.21.0** | ESP32-S3，4MB Flash；三个镜像、烧录脚本与说明 |
+| [SHA-256 校验文件](https://github.com/QianmoNai/Wireless-CAN-Analyzer/releases/download/desktop-v1.0.0/SHA256SUMS) | 本次发行 | 覆盖四类完整安装/烧录包 |
 
-[Gitee 同步发行页](https://gitee.com/qianmonai/BLE-CAN-Scope/releases/desktop-v1.0.0) 提供相同 APK 和固件包；桌面大包采用分卷，按附件说明合并。
+[Gitee 同步发行页](https://gitee.com/qianmonai/Wireless-CAN-Analyzer/releases/desktop-v1.0.0) 提供相同 APK 和固件包；桌面大包采用分卷，按附件说明合并。
 
 > 固件与 App 独立编号，以上版本配套使用。仓库当前为私有，下载需要登录具有访问权限的 GitHub 账号。APK 使用开发签名；更换签名需要卸载时，请先导出配置。
 
@@ -130,6 +134,7 @@
 | --- | --- | --- |
 | CAN 发送 / 接收 | **4 / 5** | SN65HVD230 CTX / CRX |
 | BT1 / BT2 / BT3 | **1 / 2 / 7** | 按键另一端接 GND，内部上拉 |
+| 通信绿灯 | **3** | 经 1kΩ 接 0805 LED 阳极，阴极 GND；GPIO3 经 10kΩ 下拉 |
 | 背光 PWM | **6** | 背光 MOSFET 栅极 |
 | LCD RESET / D-C / CS | **8 / 9 / 10** | 屏幕复位、命令、片选 |
 | LCD MOSI / SCLK | **11 / 12** | SPI 数据与时钟 |
@@ -145,7 +150,7 @@ CAN 终端电阻按总线两端布置。完整供电、插座引脚顺序及面�
 
 ### ESP32-S3 固件
 
-当前固件源码版本 **1.21.0** 提供中文界面、切换动画和四方向设置，菜单选择随屏幕方向映射；亮度编辑统一为上方或左侧按键增加、下方或右侧按键减少；方向编辑固定 BT1 顺时针、BT3 逆时针；声音、音量和通信模式选中后中键直接切换。本机报文页已移除，完整安装包与烧录包见上方下载表。
+当前固件源码版本 **1.24.1** 提供中文界面、切换动画和四方向设置，菜单选择随屏幕方向映射；亮度编辑统一为上方或左侧按键增加、下方或右侧按键减少；方向编辑固定 BT1 顺时针、BT3 逆时针；声音合并为关闭/低/中/高，声音、通信模式与数据选择均由中键直接切换。本机报文页已移除，完整安装包与烧录包见上方下载表。
 
 新增屏幕按键配对的“双机A端”（绿色）和“双机B端”（黄色），两端各接独立 CAN 总线，通过 ESP-NOW 双向转发，无需 App。配对步骤、1 Mbit/s 默认 CAN 配置和测试范围见 [双机 CAN 转发](docs/DUAL_CAN.md)。
 
@@ -177,7 +182,7 @@ bash android/build.sh
 
 产物：`android/dist/CAN-Scope-debug.apk`。脚本在本机生成开发签名，密钥不随源码分发。自行构建 APK 的签名与作者 APK 不同，可能无法直接覆盖安装；如需卸载旧版本，请先在 App 内导出配置。
 
-Android 默认缓存为 `${XDG_CACHE_HOME:-$HOME/.cache}/can-scope-android/<项目路径哈希>`，可用 `CAN_ANDROID_BUILD_DIR` 指定目录。同一目录拒绝并发构建；每次清理旧 class/dex，签名验证通过后原子替换 APK。当前源码 App 版本为 **1.18.2**，包含[采样、绘图和首页更新优化](docs/PERFORMANCE.md)。完整安装包与烧录包见上方下载表。
+Android 默认缓存为 `${XDG_CACHE_HOME:-$HOME/.cache}/can-scope-android/<项目路径哈希>`，可用 `CAN_ANDROID_BUILD_DIR` 指定目录。同一目录拒绝并发构建；每次清理旧 class/dex，签名验证通过后原子替换 APK。当前源码 App 版本为 **1.21.0**，包含[采样、绘图和首页更新优化](docs/PERFORMANCE.md)。完整安装包与烧录包见上方下载表。
 
 <details>
 <summary><strong>目录结构</strong></summary>
@@ -230,7 +235,11 @@ BLE-CAN-Scope/
 ---
 
 <p align="center">
-  <a href="https://github.com/QianmoNai/BLE-CAN-Scope">GitHub</a> ·
-  <a href="https://gitee.com/qianmonai/BLE-CAN-Scope">Gitee</a> ·
-  <a href="https://github.com/QianmoNai/BLE-CAN-Scope/releases/tag/desktop-v1.0.0">Release</a>
+  <a href="https://github.com/QianmoNai/Wireless-CAN-Analyzer">GitHub</a> ·
+  <a href="https://gitee.com/qianmonai/Wireless-CAN-Analyzer">Gitee</a> ·
+  <a href="https://github.com/QianmoNai/Wireless-CAN-Analyzer/releases/tag/desktop-v1.0.0">Release</a>
 </p>
+
+从已有构建目录升级时，应使用新构建目录或将控制台设为 None；旧 sdkconfig 不会自动应用新的默认控制台配置。
+
+USB直连（红色屏幕）支持 CAN / UART 两种数据选择，配套 Windows/Linux Desktop 1.2.0，应用日志与控制台关闭。接线及连接步骤见 [USB 使用说明](docs/USB.md)。

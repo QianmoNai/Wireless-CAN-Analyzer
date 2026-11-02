@@ -12,6 +12,11 @@
   bool dual_##n##_connected(void);                                             \
   void dual_##n##_can_rx(const uint8_t p[20]);                                 \
   bool dual_##n##_can_take(uint8_t p[20]);                                     \
+  void dual_##n##_set_uart(bool enabled);                                      \
+  void dual_##n##_reset_data(void);                                           \
+  bool dual_##n##_uart_rx(const uint8_t *data,size_t size);                     \
+  bool dual_##n##_uart_take(uint8_t *data,size_t *size);                         \
+  uint32_t dual_##n##_uart_dropped(void);                                      \
   void dual_##n##_tick(void);
 DECLARE(a) DECLARE(b) static int current;
 static uint32_t time_ms;
@@ -113,7 +118,7 @@ int esp_now_del_peer(const uint8_t *mac) {
 }
 static uint8_t captured[250];
 static size_t captured_size;
-static unsigned transmissions[9];
+static unsigned transmissions[10];
 typedef struct {
   bool pending, drop;
   uint32_t due;
@@ -347,6 +352,23 @@ int main(void) {
   ticks(1800);
   assert(dual_a_connected() && dual_b_connected());
   assert(!take(1, p));
+  // Typed UART packets preserve binary bytes and cannot enter the CAN queue.
+  current=0;dual_a_set_uart(true);current=1;dual_b_set_uart(true);ticks(1600);
+  assert(dual_a_connected()&&dual_b_connected());
+  uint8_t serial[DUAL_UART_CHUNK],received_serial[DUAL_UART_CHUNK];size_t serial_size=0;
+  for(unsigned i=0;i<sizeof(serial);i++)serial[i]=(uint8_t)i;
+  current=0;assert(dual_a_uart_rx(serial,sizeof(serial)));
+  current=1;assert(dual_b_uart_rx(serial,13));ticks(40);
+  current=1;assert(dual_b_uart_take(received_serial,&serial_size)&&serial_size==sizeof(serial)&&!memcmp(serial,received_serial,serial_size));
+  current=0;assert(dual_a_uart_take(received_serial,&serial_size)&&serial_size==13&&!memcmp(serial,received_serial,13));
+  assert(!take(0,p)&&!take(1,p));
+  drop_ack=1;current=0;assert(dual_a_uart_rx(serial,37));ticks(80);
+  current=1;assert(dual_b_uart_take(received_serial,&serial_size)&&serial_size==37);
+  assert(!dual_b_uart_take(received_serial,&serial_size));
+  current=0;assert(dual_a_uart_rx(serial,20));dual_a_set_uart(false);
+  current=1;dual_b_set_uart(false);ticks(1600);
+  assert(!take(1,p));current=1;assert(!dual_b_uart_take(received_serial,&serial_size));
+  input(0,0x601,0,8);ticks(40);assert(take(1,p)&&dual_u32(p+4)==0x601);
   // Leaving the management page must not tear down an established bridge.
   press(0, DUAL_BUTTON_CANCEL);
   assert(dual_a_connected());

@@ -56,9 +56,38 @@ def run(app, window, output):
         js("showTab('live');document.getElementById('sendOnce').scrollIntoView();JSON.stringify({visible:!document.getElementById('view-live').hidden,send:document.getElementById('sendOnce').textContent})",done)
     def settings():
         capture('-live')
-        js("showTab('settings');document.getElementById('view-settings').scrollIntoView();true",lambda _:QTimer.singleShot(600,isolation))
-    def isolation():
+        js("showTab('settings');document.getElementById('view-settings').scrollIntoView();true",lambda _:QTimer.singleShot(600,uart))
+    def uart():
         capture('-settings')
+        code = """
+        onNative('packets',{items:[STATUS,RX],dropped:0});
+        document.getElementById('view-uart').scrollIntoView();
+        true;
+        """.replace('STATUS', json.dumps(packet(21,a=1,x=115200,y=6).hex()))
+        rx = bytes([1,19,6,0,0,255,65,228,184,173]) + bytes(6) + (1).to_bytes(4,'little')
+        js(code.replace('RX',json.dumps(rx.hex())),lambda _:QTimer.singleShot(300,uart_check))
+    def uart_check():
+        code = """
+        JSON.stringify({visible:!$('view-uart').hidden,canHidden:$('view-live').hidden,
+         motorsHidden:document.querySelector('[data-tab="motor"]').hidden,
+         binary:$('uartLog').textContent,sendEnabled:!$('uartSend').disabled,
+         bitrateDisabled:$('saveBitrate').disabled,csvDisabled:$('desktopCsv').disabled});
+        """
+        def done(value):
+            checks['uart']=json.loads(value or '{}')
+            capture('-uart')
+            js("$('uartDisplay').value='text';$('uartDisplay').onchange();JSON.stringify({text:$('uartLog').textContent})",uart_text)
+        js(code,done)
+    def uart_text(value):
+        checks['uart_text']=json.loads(value or '{}').get('text','')
+        js("onNative('packets',{items:[STATUS],dropped:0});JSON.stringify({can:!window.uartMode,motorsVisible:!document.querySelector('[data-tab=\"motor\"]').hidden})".replace('STATUS',json.dumps(packet(21,x=115200).hex())),uart_restored)
+    def uart_restored(value):
+        checks['uart_restored']=json.loads(value or '{}')
+        js("onNative('networkMode',{mode:'usb',busy:false});onNative('device',{address:'usb:TEST',name:'ESP32 USB',transport:'usb',rssi:0});JSON.stringify({mode:$('connectionMode').value,badge:$('transportBadge').textContent,manualHidden:$('lanManual').hidden,port:$('deviceList').textContent.includes('usb:TEST')})", usb_checked)
+    def usb_checked(value):
+        checks['usb']=json.loads(value or '{}')
+        isolation()
+    def isolation():
         if 2 not in window.ready:
             failure('second channel did not load')
             return
@@ -74,6 +103,10 @@ def run(app, window, output):
         report=dict(ready=sorted(window.ready),js_errors=window.js_errors,checks=checks)
         output.with_suffix('.json').write_text(json.dumps(report,ensure_ascii=False,indent=2), encoding='utf-8')
         ok=(not window.js_errors and checks.get('isolated') and checks.get('overview',{}).get('cards')==1 and checks.get('detail',{}).get('samples')==50 and checks.get('live',{}).get('visible'))
+        uart=checks.get('uart',{})
+        ok=ok and all(uart.get(k) for k in ('visible','canHidden','motorsHidden','sendEnabled','bitrateDisabled','csvDisabled')) and uart.get('binary')=='00 FF 41 E4 B8 AD' and '中' in checks.get('uart_text','') and all(checks.get('uart_restored',{}).get(k) for k in ('can','motorsVisible'))
+        usb=checks.get('usb',{})
+        ok=ok and usb.get('mode')=='usb' and usb.get('badge')=='USB直连' and usb.get('manualHidden') and usb.get('port')
         print("Smoke checks completed", flush=True)
         # Leave the JavaScript result callback before tearing down its page.
         def quit_test():
