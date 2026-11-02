@@ -7,6 +7,8 @@ from pathlib import Path
 import sys
 import tempfile
 import threading
+from .rendering import configure
+configure()
 from shiboken6 import delete, isValid
 
 from PySide6.QtCore import QObject, Signal, Slot, QTimer, QUrl, QFile, QIODevice, QStandardPaths
@@ -16,6 +18,7 @@ from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineScript, QWebEngineUrlRequestInterceptor, QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from .engine import Channel
+from . import __version__
 
 SOURCE = Path(__file__).resolve().parent
 ASSETS = Path(sys._MEIPASS)/'assets' if hasattr(sys, '_MEIPASS') else SOURCE.parents[1]/'android/app/src/main/assets'
@@ -125,7 +128,7 @@ def script(name, source, point):
 class Window(QMainWindow):
     def __init__(self, folder, smoke=False):
         super().__init__()
-        self.setWindowTitle('CAN Scope Desktop · Linux / Windows')
+        self.setWindowTitle(f'CAN Scope Desktop {__version__} · Linux / Windows')
         self.resize(1320, 920)
         self.setMinimumSize(900, 650)
         self.smoke = smoke

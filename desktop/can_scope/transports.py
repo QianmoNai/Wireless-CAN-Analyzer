@@ -5,6 +5,7 @@ import hmac
 import json
 import socket
 import ssl
+import sys
 import time
 from .protocol import SERVICE, WRITE, NOTIFY, NETWORK, PORT, ipv4, secret, wifi_commands
 
@@ -151,7 +152,10 @@ async def scan_ble(found):
         if SERVICE in [x.lower() for x in adv.service_uuids]:
             devices[device.address] = device
             found(dict(address=device.address, name=adv.local_name or device.name or 'ESP32-CAN', rssi=adv.rssi))
-    async with BleakScanner(detection_callback=advertisement, service_uuids=[SERVICE]):
+    # BlueZ 5.87 can crash in its UUID discovery filter (bluez/bluez#2282).
+    # Linux filters advertisements above; keep native filtering elsewhere.
+    options = {} if sys.platform == 'linux' else {'service_uuids': [SERVICE]}
+    async with BleakScanner(detection_callback=advertisement, **options):
         await asyncio.sleep(5)
     return devices
 
