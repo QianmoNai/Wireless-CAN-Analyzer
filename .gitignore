@@ -15,10 +15,22 @@ local.properties
 *.keystore
 *.jks
 *.p12
+*.pfx
 *.pem
+*.key
+id_rsa
+id_ed25519
+id_ecdsa
 .env
 .env.*
 !.env.example
+# Packaged applications and compiled firmware
+*.apk
+*.aab
+*.bin
+*.elf
+*.o
+*.obj
 # Local tests and caches
 __pycache__/
 *.py[cod]
