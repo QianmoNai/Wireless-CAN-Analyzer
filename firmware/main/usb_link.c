@@ -1,6 +1,7 @@
 #include "usb_link.h"
 #include "usb_protocol.h"
 #include "ack_delivery.h"
+#include "uart_bridge.h"
 #include "network_link.h"
 #include "settings_protocol.h"
 #include "sdkconfig.h"
@@ -18,10 +19,14 @@ static usb_decoder_t decoder;
 static uint32_t millis(void){return (uint32_t)(esp_timer_get_time()/1000);}
 bool usb_link_connected(void){return network_usb_mode()&&atomic_load(&session_id)&&
     (uint32_t)(millis()-atomic_load(&last_ping))<4000&&usb_serial_jtag_is_connected();}
+static void discard_queue(QueueHandle_t queue){
+    queued_t q;
+    while(xQueueReceive(queue,&q,0)==pdTRUE)uart_bridge_drop_packet(&q.packet);
+}
 // The same guard serializes mode changes, command submission and session resets.
 static void clear_session(void){
     atomic_store(&session_id,0);decoder.used=0;
-    xQueueReset(raw_out);xQueueReset(control_out);
+    discard_queue(raw_out);discard_queue(control_out);
 }
 void usb_link_reset(void){
     if(!guard)return;
@@ -79,7 +84,12 @@ static void service(const uint8_t *bytes,int n){
         queued_t q;
         for(unsigned count=0;ok&&count<32&&usb_link_connected()&&
             (xQueueReceive(control_out,&q,0)==pdTRUE||xQueueReceive(raw_out,&q,0)==pdTRUE);count++)
+        {
             if(q.session==atomic_load(&session_id))ok=send_packet(q.session,q.packet.bytes);
+            // A partial CUSB frame has no usable payload. Accepted queued UART
+            // packets are owned here; queue rejection is owned by the caller.
+            if(!ok || q.session!=atomic_load(&session_id))uart_bridge_drop_packet(&q.packet);
+        }
         if(!ok){clear_session();ble_bridge_reset_session();}
     }
     xSemaphoreGive(guard);

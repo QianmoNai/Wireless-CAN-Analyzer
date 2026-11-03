@@ -60,6 +60,16 @@ int main(void){
  dropped=drop_total;link=false;input_count=4;step();assert(drop_total==dropped+4);link=true;
  uart_event_t e={.type=UART_FIFO_OVF};xQueueSend(events,&e,0);input_count=9;step();assert(error_total==2&&input_count==0);
  uart_bridge_configure(false,9600);step();fail_open=true;uart_bridge_configure(true,19200);step();assert(!ready&&error_total==3);
+ // Downstream accounting accepts only actual UART RX payload bytes and is
+ // cumulative across status reads, disconnect and baud/mode changes.
+ dropped=drop_total;bridge_packet_t lost={.bytes={1,19,7}};
+ uart_bridge_drop_packet(&lost);lost.bytes[2]=12;uart_bridge_drop_packet(&lost);
+ lost.bytes[2]=0;uart_bridge_drop_packet(&lost);lost.bytes[2]=13;uart_bridge_drop_packet(&lost);
+ lost.bytes[2]=5;lost.bytes[3]=1;uart_bridge_drop_packet(&lost);lost.bytes[3]=0;
+ lost.bytes[1]=20;uart_bridge_drop_packet(&lost);lost.bytes[1]=19;lost.bytes[0]=0;uart_bridge_drop_packet(&lost);
+ assert(drop_total==dropped+19);
+ uart_bridge_stats_t snapshot;uart_bridge_stats(&snapshot);assert(snapshot.dropped==dropped+19);
+ uart_bridge_disconnect();uart_bridge_stats(&snapshot);assert(snapshot.dropped==dropped+19);
  publish_status();assert(published[published_count-1].bytes[1]==21&&published[published_count-1].bytes[3]==1);
  for(unsigned i=0;i<allocated_count;i++){free(allocated[i]->data);free(allocated[i]);}
  puts("UART bridge: binary RX, pinned UART1, FIFO completion ACK, mode/disconnect isolation, malformed commands, queue backpressure and hardware error reporting PASS");

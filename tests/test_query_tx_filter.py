@@ -32,6 +32,7 @@ PRELUDE = r'''
 #include "uart_protocol.h"
 static bool selected_uart;
 bool uart_bridge_selected(void){return selected_uart;}
+void uart_bridge_drop_packet(const bridge_packet_t *p){(void)p;}
 #define portENTER_CRITICAL(lock) ((void)(lock))
 #define portEXIT_CRITICAL(lock) ((void)(lock))
 struct queue { unsigned count,limit; bridge_packet_t last; };

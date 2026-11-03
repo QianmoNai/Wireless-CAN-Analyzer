@@ -146,6 +146,11 @@ bool uart_bridge_send(const uint8_t p[20]) {
     bool ok=xQueueSend(commands,&c,0)==pdTRUE;if(ok)xTaskNotifyGive(worker);return ok;
 }
 void uart_bridge_disconnect(void){atomic_fetch_add(&connection_generation,1);if(worker)xTaskNotifyGive(worker);}
+void uart_bridge_drop_packet(const bridge_packet_t *p){
+    if(p->bytes[0]==1 && p->bytes[1]==UART_RX_EVENT && p->bytes[2]>=1 &&
+       p->bytes[2]<=UART_WIRE_BYTES && !p->bytes[3])
+        atomic_fetch_add(&drop_total,p->bytes[2]);
+}
 void uart_bridge_stats(uart_bridge_stats_t *s){
     *s=(uart_bridge_stats_t){.rx=atomic_load(&rx_total),.tx=atomic_load(&tx_total),.dropped=atomic_load(&drop_total)+dual_link_uart_dropped(),
         .errors=atomic_load(&error_total),.baud=atomic_load(&config_request)>>1,.ready=atomic_load(&ready)};
@@ -156,5 +161,6 @@ void uart_bridge_configure(bool selected,uint32_t baud){(void)selected;(void)bau
 bool uart_bridge_selected(void){return false;}
 bool uart_bridge_send(const uint8_t p[20]){(void)p;return false;}
 void uart_bridge_disconnect(void){}
+void uart_bridge_drop_packet(const bridge_packet_t *p){(void)p;}
 void uart_bridge_stats(uart_bridge_stats_t *s){memset(s,0,sizeof(*s));}
 #endif

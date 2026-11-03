@@ -42,6 +42,7 @@ compile_run test_notify_resource firmware/main/notify_resource.c firmware/main/a
 cc -std=c11 -Itests/name_stubs -Ifirmware/main tests/test_name_store.c firmware/main/name_store.c -o "$test_build_dir/test_name_store"
 "$test_build_dir/test_name_store"
 python3 tests/test_query_tx_filter.py
+python3 tests/test_uart_downstream.py
 python3 tests/test_build_scripts.py
 python3 tests/test_asset_routes.py
 python3 tests/test_panel_font.py

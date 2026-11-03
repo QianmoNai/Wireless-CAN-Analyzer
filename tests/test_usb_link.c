@@ -13,7 +13,10 @@ int xSemaphoreGive(SemaphoreHandle_t q){(void)q;return 1;}
 int xTaskCreate(void(*f)(void*),const char*n,unsigned s,void*a,unsigned p,void*h){(void)f;(void)n;(void)s;(void)a;(void)p;(void)h;return 1;}
 void vTaskDelay(unsigned t){(void)t;}
 static uint32_t now=10;static bool selected=true,physical=true,short_write=false;
-static unsigned resets,commands_received,command_status;
+static unsigned resets,commands_received,command_status,uart_dropped;
+void uart_bridge_drop_packet(const bridge_packet_t *p){
+ if(p->bytes[0]==1&&p->bytes[1]==19&&p->bytes[2]>=1&&p->bytes[2]<=12&&!p->bytes[3])uart_dropped+=p->bytes[2];
+}
 static uint8_t sent[32768];static size_t sent_count;
 int64_t esp_timer_get_time(void){return (int64_t)now*1000;}
 bool network_usb_mode(void){return selected;}
@@ -41,14 +44,21 @@ int main(void){
  feed(11,command);assert(!commands_received);
  feed(10,command);assert(commands_received==1&&sent[sent_count-23]==18);
  command_status=17;feed(10,command);assert(sent[sent_count-22]==17);
- bridge_packet_t raw={.bytes={1,19}},control={.bytes={1,21}};
+ bridge_packet_t raw={.bytes={1,19,12}},control={.bytes={1,21}};
  for(unsigned i=0;i<128;i++)assert(usb_link_send(&raw));
- assert(!usb_link_send(&raw));assert(usb_link_send(&control));
+ // Caller owns immediate rejection: USB must not count it a second time.
+ raw.bytes[2]=7;assert(!usb_link_send(&raw));assert(uart_dropped==0);assert(usb_link_send(&control));
  size_t before=sent_count;service(NULL,0);assert(sent[before+9]==21&&sent_count==before+32*32);
  hello(11);assert(session_id==11&&raw_out->count==0&&resets==2);
+ assert(uart_dropped==65*12); // 31 + 32 raw frames delivered before split HELLO completes; 65 reset.
+ assert(usb_link_send(&raw));raw.bytes[2]=3;assert(usb_link_send(&raw));
+ unsigned dropped_before=uart_dropped;short_write=true;service(NULL,0);short_write=false;
+ assert(!usb_link_connected()&&uart_dropped==dropped_before+7+3);
+ hello(11); // Neither short-written nor cleared packets may be counted twice.
+ assert(uart_dropped==dropped_before+10);
  feed(10,command);assert(commands_received==2);
  now+=3999;feed(11,ping);assert(usb_link_connected());
- now+=4001;service(NULL,0);assert(!usb_link_connected()&&resets==3);
+ unsigned reset_before=resets;now+=4001;service(NULL,0);assert(!usb_link_connected()&&resets==reset_before+1);
  feed(11,command);assert(commands_received==2);
  hello(12);physical=false;service(NULL,0);assert(!usb_link_connected());physical=true;
  hello(13);feed(13,bye);assert(!usb_link_connected());

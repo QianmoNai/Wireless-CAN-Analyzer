@@ -1,5 +1,6 @@
 #include "network_link.h"
 #include "usb_link.h"
+#include "uart_bridge.h"
 #include "dual_link.h"
 #include "network_protocol.h"
 #include "network_identity.h"
@@ -107,7 +108,33 @@ static void discovery(int fd){
  // Reply only to a small, versioned discovery request; never expose credentials.
  if(n==19&&!memcmp(message,"CAN_SCOPE_DISCOVER_1",19)){char reply[100];int count=snprintf(reply,sizeof(reply),"CAN_SCOPE_1 %s %d",device_id,NET_PORT);sendto(fd,reply,count,0,(struct sockaddr*)&peer,len);}
 }
-static bool tls_write_all(esp_tls_t *tls,const uint8_t *p,size_t n){uint32_t deadline=millis()+1500;while(n){int r=esp_tls_conn_write(tls,p,n);if(r>0){p+=r;n-=r;}else if(r!=ESP_TLS_ERR_SSL_WANT_READ&&r!=ESP_TLS_ERR_SSL_WANT_WRITE)return false;if((int32_t)(millis()-deadline)>=0)return false;if(r<=0)vTaskDelay(pdMS_TO_TICKS(5));}return true;}
+static bool tls_write_count(esp_tls_t *tls,const uint8_t *p,size_t n,size_t *completed){
+ *completed=0;uint32_t deadline=millis()+1500;
+ while(n){int r=esp_tls_conn_write(tls,p,n);
+  if(r>0){p+=r;n-=r;*completed+=r;}
+  else if(r!=ESP_TLS_ERR_SSL_WANT_READ&&r!=ESP_TLS_ERR_SSL_WANT_WRITE)return false;
+  if((int32_t)(millis()-deadline)>=0)return false;
+  if(r<=0)vTaskDelay(pdMS_TO_TICKS(5));
+ }return true;
+}
+static bool tls_write_all(esp_tls_t *tls,const uint8_t *p,size_t n){
+ size_t completed;return tls_write_count(tls,p,n,&completed);
+}
+static bool tls_write_batch(esp_tls_t *tls,const uint8_t *batch,unsigned count){
+ size_t completed;
+ if(tls_write_count(tls,batch,count*20,&completed))return true;
+ // Fully written 20-byte frames already belong to the receiver. A partial
+ // frame is unusable at EOF, so its entire UART payload is discarded once.
+ for(unsigned i=completed/20;i<count;i++){
+  bridge_packet_t packet;memcpy(packet.bytes,batch+20*i,20);
+  uart_bridge_drop_packet(&packet);
+ }
+ return false;
+}
+static void discard_network_queue(QueueHandle_t queue){
+ bridge_packet_t packet;
+ while(xQueueReceive(queue,&packet,0)==pdTRUE)uart_bridge_drop_packet(&packet);
+}
 static void serve_client(int fd){
  unsigned epoch=atomic_load(&network_epoch);struct timeval timeout={.tv_sec=4};setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout));setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&timeout,sizeof(timeout));
  esp_tls_t *tls=esp_tls_init();if(!tls){close(fd);return;}
@@ -118,20 +145,20 @@ static void serve_client(int fd){
  unsigned mismatch=0;for(unsigned i=0;i<32;i++)mismatch|=auth[4+i]^network_token[i];
  if(memcmp(auth,"CAN1",4)||mismatch||!network_wifi_mode()||epoch!=atomic_load(&network_epoch))goto done;
  if(!tls_write_all(tls,(uint8_t*)"OK01",4))goto done;
- fcntl(fd,F_SETFL,O_NONBLOCK);xQueueReset(raw_out);xQueueReset(control_out);ble_bridge_reset_session();atomic_store(&linked,true);
+ fcntl(fd,F_SETFL,O_NONBLOCK);discard_network_queue(raw_out);discard_network_queue(control_out);ble_bridge_reset_session();atomic_store(&linked,true);
  uint8_t incoming[20];unsigned at=0;uint32_t last_rx=millis();
  while(network_connected()&&epoch==atomic_load(&network_epoch)){
   // Limit each batch so commands and mode changes are serviced under full CAN load.
   uint8_t batch[20*16];unsigned count=0;bridge_packet_t p;
   while(count<16&&(xQueueReceive(control_out,&p,0)==pdTRUE||xQueueReceive(raw_out,&p,0)==pdTRUE)){memcpy(batch+20*count++,p.bytes,20);}
-  if(count&&!tls_write_all(tls,batch,count*20))break;
+  if(count&&!tls_write_batch(tls,batch,count))break;
   int n=esp_tls_conn_read(tls,incoming+at,20-at);
   if(n>0){at+=n;last_rx=millis();if(at==20){at=0;if(incoming[0]==1&&incoming[1]==0x7f){if(!tls_write_all(tls,incoming,20))break;continue;}if(epoch!=atomic_load(&network_epoch))break;int status=ble_bridge_command(incoming);bridge_packet_t ack={.bytes={1,18,status,0}};memcpy(ack.bytes+4,incoming+16,4);if(!tls_write_all(tls,ack.bytes,20))break;}}
   else if(n==0||(n!=ESP_TLS_ERR_SSL_WANT_READ&&n!=ESP_TLS_ERR_SSL_WANT_WRITE))break;
   if((uint32_t)(millis()-last_rx)>12000)break;
   vTaskDelay(pdMS_TO_TICKS(2));
  }
- atomic_store(&linked,false);if(epoch==atomic_load(&network_epoch))ble_bridge_reset_session();
+ atomic_store(&linked,false);discard_network_queue(raw_out);discard_network_queue(control_out);if(epoch==atomic_load(&network_epoch))ble_bridge_reset_session();
  done:esp_tls_server_session_delete(tls);close(fd);
 }
 static void server_task(void *arg){

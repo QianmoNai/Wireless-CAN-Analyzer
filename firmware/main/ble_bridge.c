@@ -63,6 +63,11 @@ static atomic_bool subscribed;
 static atomic_uint dropped;
 static atomic_bool motor_busy, stop_requested;
 static void advertise(void);
+static void discard_raw_queue(void){
+    if(!notify_queue)return;
+    bridge_packet_t packet;
+    while(xQueueReceive(notify_queue,&packet,0)==pdTRUE)uart_bridge_drop_packet(&packet);
+}
 static portMUX_TYPE name_lock = portMUX_INITIALIZER_UNLOCKED;
 static char saved_name[BRIDGE_NAME_MAX + 1] = "ESP32-CAN";
 static bridge_packet_t name_status(uint8_t result) {
@@ -116,7 +121,7 @@ int ble_bridge_command(const uint8_t bytes[20])
         bridge_packet_t ack={0};
         portENTER_CRITICAL(&home_lock);bool ok=home_command(&home_status,&packet,&ack);portEXIT_CRITICAL(&home_lock);
         if(!ok)return BLE_ATT_ERR_VALUE_NOT_ALLOWED;
-        if(p[1]==0x17){xQueueReset(notify_queue);ble_bridge_publish(&ack);}
+        if(p[1]==0x17){discard_raw_queue();ble_bridge_publish(&ack);}
         return 0;
     }
     if (p[1] == 0x21) {
@@ -158,7 +163,7 @@ int ble_bridge_command(const uint8_t bytes[20])
 
 void ble_bridge_reset_session(void){
     reset_home();uart_bridge_disconnect();atomic_store(&stop_requested,true);
-    if(notify_queue)xQueueReset(notify_queue);
+    if(notify_queue)discard_raw_queue();
     if(control_notify_queue)xQueueReset(control_notify_queue);
     if(ack_notify_queue)xQueueReset(ack_notify_queue);
     if(command_queue)xQueueReset(command_queue);
@@ -321,6 +326,32 @@ static void notify_delay(void *context, unsigned milliseconds)
 {
     vTaskDelay(pdMS_TO_TICKS(milliseconds));
 }
+// A false USB/LAN enqueue or failed BLE submission leaves this packet here.
+// Their queues account for later failures only after accepting ownership.
+static void deliver_packet(const bridge_packet_t *packet,bool ack,bool control)
+{
+    if(!ble_bridge_connected() || suppress_packet(packet)){
+        uart_bridge_drop_packet(packet);
+        return;
+    }
+    if(ack){
+        if(!bridge_deliver_ack(packet,notify_connected,notify_send,notify_delay,NULL))
+            atomic_fetch_add(&dropped,1);
+        return;
+    }
+    bool delivered=false;
+    for(unsigned attempt=0;attempt<(control?3:1);attempt++){
+        if(!ble_bridge_connected())break;
+        if(notify_send(NULL,packet)){delivered=true;break;}
+        if(control)vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    if(!delivered){
+        atomic_fetch_add(&dropped,1);
+        uart_bridge_drop_packet(packet);
+        // Keep the existing failure backoff and queue scheduling unchanged.
+        if(!control)vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
 static void notify_task(void *arg)
 {
     bridge_packet_t packet;
@@ -366,29 +397,7 @@ static void notify_task(void *arg)
         bool ack = xQueueReceive(ack_notify_queue, &packet, 0) == pdTRUE;
         bool control = !ack && xQueueReceive(control_notify_queue, &packet, 0) == pdTRUE;
         if (!ack && !control && xQueueReceive(notify_queue, &packet, pdMS_TO_TICKS(10)) != pdTRUE) continue;
-        if (!ble_bridge_connected()) continue;
-        if(suppress_packet(&packet))continue;
-        if(ack) {
-            if(!bridge_deliver_ack(&packet,notify_connected,notify_send,notify_delay,NULL))
-                atomic_fetch_add(&dropped,1);
-            continue;
-        }
-        bool delivered = false;
-        for (unsigned attempt = 0; attempt < (control ? 3 : 1); attempt++) {
-            if (!ble_bridge_connected()) break;
-            if (notify_send(NULL, &packet)) {
-                delivered = true;
-                break;
-            }
-            if (control) vTaskDelay(pdMS_TO_TICKS(10));
-        }
-        if (!delivered) {
-            atomic_fetch_add(&dropped, 1);
-            // A full raw queue must not busy-loop allocating and freeing the
-            // same exhausted pool. Yield only on failure; healthy traffic has
-            // no added rate limit, and the next loop checks the ACK queue first.
-            if (!control) vTaskDelay(pdMS_TO_TICKS(10));
-        }
+        deliver_packet(&packet,ack,control);
     }
 }
 void ble_bridge_publish(const bridge_packet_t *packet)
@@ -403,8 +412,10 @@ void ble_bridge_publish(const bridge_packet_t *packet)
     if(suppress)return; // intentional suppression, not a dropped frame
     QueueHandle_t queue = bridge_packet_is_ack(packet) ? ack_notify_queue :
         (bridge_packet_is_raw(packet) ? notify_queue : control_notify_queue);
-    if (ble_bridge_connected() && xQueueSend(queue, packet, 0) != pdTRUE)
+    if (ble_bridge_connected() && xQueueSend(queue, packet, 0) != pdTRUE){
         atomic_fetch_add(&dropped, 1);
+        uart_bridge_drop_packet(packet);
+    }
 }
 uint32_t ble_bridge_dropped(void) { return atomic_load(&dropped); }
 bool ble_bridge_connected(void) { if(network_dual_mode())return false;return network_usb_mode()?usb_link_connected():network_wifi_mode()?network_connected():atomic_load(&subscribed); }
