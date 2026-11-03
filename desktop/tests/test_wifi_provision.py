@@ -162,6 +162,35 @@ class OfflineCliTests(unittest.TestCase):
             self.assertIn(meaning, network_diagnostics_text(dict(stage=stage)))
         self.assertIn('未知断开原因', network_diagnostics_text(dict(reason=65535)))
 
+    def test_compact_snapshot_decodes_timestamps_and_safe_failure_details(self):
+        origin = 2**32 + 100
+        value = dict(state=4, error=4, busy=False, mode=0, reason=2, stage=4, api_err=0, got_ip=0,
+                     diag=[7, origin, 1, -1, -1, 1, 'dcd87b53ee5c', -59, 1, '01', 80, '90da7273722c', 12],
+                     ssid='SYNTHETIC_PRIVATE', token='SYNTHETIC_PRIVATE', fp='SYNTHETIC_PRIVATE')
+        safe = network_status_fields(value)
+        self.assertEqual(safe['sta_start_ms'], origin + 1)
+        self.assertEqual(safe['connected_ms'], -1)
+        self.assertEqual(safe['attempt_id'], 7)
+        self.assertEqual(safe['disconnect_count'], 1)
+        self.assertEqual(safe['sta_mac'], '90:da:72:73:72:2c')
+        self.assertEqual(network_status_fields(safe), safe)
+        with redirect_stderr(io.StringIO()) as output:
+            cli.report_failure(WifiProvisionError(value), '[3/7] 配网发送/接入')
+        text = output.getvalue()
+        for expected in ('bssid=dc:d8:7b:53:ee:5c', 'connected_ms=未发生',
+                         'rssi=-59', 'channel=1', 'country=01', 'TX功率上限=20 dBm',
+                         'BLE实际间隔=15 ms', 'attempt_id=7', '不代表已关联'):
+            self.assertIn(expected, text)
+        self.assertNotIn('SYNTHETIC_PRIVATE', text + repr(WifiProvisionError(value)))
+        for index, invalid in ((0, True), (2, 2**32), (6, 'SYNTHETIC_PRIVATE'), (9, 'SYNTHETIC_PRIVATE')):
+            broken = list(value['diag'])
+            broken[index] = invalid
+            self.assertEqual(network_status_fields(dict(diag=broken)), {})
+        complete = list(value['diag'])
+        complete[3:5] = [10, 20]
+        decoded = network_status_fields(dict(diag=complete))
+        self.assertEqual((decoded['connected_ms'], decoded['got_ip_ms']), (origin+10, origin+20))
+
     def test_unsafe_status_fields_and_neighbor_ssids_are_not_retained(self):
         bad = WifiProvisionError(dict(error='SYNTHETIC-PRIVATE', reason='SYNTHETIC-PRIVATE',
                                       state=True, mode=-1, busy='SYNTHETIC-PRIVATE'))
@@ -321,7 +350,7 @@ class ProvisionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('RSSI=-54 dBm authmode=3', text)
         self.assertIn('信道=2', text)
         self.assertEqual(text.count('reason=203（关联失败）'), 2)
-        self.assertEqual(text.count('stage=4（wait_ip/等待 IP）'), 2)
+        self.assertEqual(text.count('stage=4（wait_ip/等待接入或 IP，不代表已关联）'), 2)
         self.assertIn('api_err=0（0x00000000）', text)
         self.assertNotIn('SYNTHETIC-PRIVATE', text)
         self.assertNotIn('Neighbor', text)

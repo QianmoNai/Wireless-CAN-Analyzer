@@ -68,6 +68,27 @@ class HotspotTests(unittest.TestCase):
         self.assertIn('DHCPACK', output[5])
         self.assertNotIn(private, repr(output))
 
+    def test_auth_failures_ack_and_departures_are_distinct_safe_events(self):
+        prefix = 'csap0: STA 90:DA:72:73:72:2C IEEE 802.11: '
+        cases = [('authenticated', '认证成功'), ('associated (aid 1)', '关联成功'),
+                 ('authentication failed status_code=13', '认证失败'),
+                 ('association rejected (status 17)', '关联失败'),
+                 ('did not acknowledge authentication response', '认证响应未 ACK'),
+                 ('association response not ACKed', '关联响应未 ACK'),
+                 ('deauthenticated (reason=2)', '去认证'),
+                 ('disassociated reason_code=4', '解除关联')]
+        for message, label in cases:
+            with self.subTest(message=message):
+                output = hotspot.safe_event('hostapd', prefix + message + ' PSK=SYNTHETIC_PRIVATE')
+                self.assertTrue(output.startswith(label + ' MAC=90:da:72:73:72:2c'))
+                self.assertNotIn('SYNTHETIC_PRIVATE', output)
+        self.assertIn('status=13', hotspot.safe_event('hostapd', prefix + cases[2][0]))
+        self.assertIn('status=17', hotspot.safe_event('hostapd', prefix + cases[3][0]))
+        self.assertIn('reason=2', hotspot.safe_event('hostapd', prefix + cases[6][0]))
+        self.assertIn('reason=4', hotspot.safe_event('hostapd', prefix + cases[7][0]))
+        self.assertIsNone(hotspot.safe_event('hostapd', 'PSK=authenticated SYNTHETIC_PRIVATE'))
+        self.assertEqual(hotspot.safe_event('hostapd', 'csap0: AP-ENABLED PSK=01:02:03:04:05:06'), 'AP 已启用')
+
     def test_isolation_writes_only_new_interface_knobs_before_up(self):
         writes = []
         with patch.object(Path, 'write_text', lambda path, value: writes.append((str(path), value))), \

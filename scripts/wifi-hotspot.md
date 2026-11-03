@@ -52,6 +52,19 @@ journalctl -f -u canscope-test-hostapd.service -u canscope-test-dhcp.service
 
 正常可见认证、关联、四次握手完成以及 DHCPDISCOVER/OFFER/REQUEST/ACK。日志不用 `-K`、`-d` 或 `-dd`，不打印 PSK。主机已有 DHCP 服务时，本测试服务只绑定 csap0；失败则回滚，不停止其他 dnsmasq。
 
+过滤器也保留认证/关联失败、响应未被 ACK、去认证/解除关联，并仅提取 STA MAC 与数字 status/reason，不转发原始消息。INFO 能看成功事件和部分失败，但没有日志不等于 AP 没收到帧；DEBUG 管理帧日志仍未启用。
+
+新固件的受保护 STATUS 保留原字段，并增加固定 13 项 `diag` 数组，以满足 512 字节（含 NUL）的边界：
+
+```text
+[attempt_id, attempt_ms, sta_start_delta_ms, connected_delta_ms, got_ip_delta_ms,
+ disconnect_count, bssid_hex, rssi, channel, country, tx_power_qdbm, sta_mac_hex, ble_interval]
+```
+
+`attempt_ms` 来自单调时钟，不是墙上时间；三个事件偏移以毫秒计，-1 表示本次 APPLY 内未观察到（STA 也可能此前已启动）。主机还原绝对单调毫秒，并在配网失败和 `--diagnose` 时显示。channel 来自 CONNECTED 事件，未连接时来自当前射频 getter，不能冒充已关联信道；RSSI 优先保留首次断开事件值。BSSID/STA MAC 为 12 位 hex，空串表示未知；country 为两个 ASCII 字符或空串；RSSI/TX 的 -128、channel/BLE interval 的 0 表示未知。TX 是驱动发射功率上限（0.25 dBm 单位），不是实测瞬时功率；BLE interval 是实际协商值（1.25 ms 单位）。断开计数饱和在 65535；attempt_id 从 1 开始，重启重置，溢出跳过 0。APPLY 在主动清理之前冻结整份快照，后续扫描、后台重连和清理不能覆盖。
+
+`stage=4` 仍沿用原协议编号，但含义是 connect 请求已提交、等待接入或 IP，不能证明已关联。新增诊断不修改选网、重试、BLE 调度/包格式或认证策略。
+
 ## 清理
 
 ```bash

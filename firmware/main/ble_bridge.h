@@ -13,6 +13,8 @@ void ble_bridge_reset_session(void);
 void ble_bridge_publish(const bridge_packet_t *packet);
 uint32_t ble_bridge_dropped(void);
 bool ble_bridge_connected(void);
+/* Actual negotiated GAP interval, in 1.25 ms units; 0 = no connection. */
+uint16_t ble_bridge_connection_interval(void);
 bool ble_bridge_take_stop(void);
 void ble_bridge_set_motor_busy(bool busy);
 static inline uint32_t wire_u32(const uint8_t *p) {

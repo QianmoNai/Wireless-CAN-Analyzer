@@ -34,7 +34,7 @@ static wifi_ap_record_t scan_records[SCAN_MAX];
 static unsigned scan_count,scan_page;
 static bool scan_reply,busy;
 static uint8_t state,error_code;
-static network_diagnostics_t diagnostics={.reason=-1};
+static network_diagnostics_t diagnostics={.reason=-1,.start_ms=-1,.connected_ms=-1,.ip_ms=-1,.rssi=INT8_MIN,.tx_power=INT8_MIN};
 static char device_id[13];
 typedef struct { uint8_t op; network_credentials_t credentials; } request_t;
 static uint32_t millis(void){return esp_timer_get_time()/1000;}
@@ -58,8 +58,31 @@ void network_set_mode(unsigned mode){
 }
 bool network_send(const bridge_packet_t *p){return network_connected()&&xQueueSend(bridge_packet_is_raw(p)?raw_out:control_out,p,0)==pdTRUE;}
 static void wifi_event(void *arg,esp_event_base_t base,int32_t id,void *data){
- if(base==IP_EVENT&&id==IP_EVENT_STA_GOT_IP&&!network_dual_mode()){ip_event_got_ip_t *e=data;xSemaphoreTake(lock,portMAX_DELAY);network_diagnostics_got_ip(&diagnostics);xSemaphoreGive(lock);atomic_store(&station_ip,e->ip_info.ip.addr);atomic_store(&online,true);}
- if(base==WIFI_EVENT&&id==WIFI_EVENT_STA_DISCONNECTED){wifi_event_sta_disconnected_t *e=data;xSemaphoreTake(lock,portMAX_DELAY);network_diagnostics_disconnect(&diagnostics,e->reason);xSemaphoreGive(lock);atomic_fetch_add(&disconnect_events,1);atomic_store(&disconnect_reason,e->reason);atomic_store(&online,false);atomic_store(&station_ip,0);}
+ uint64_t now_ms=(uint64_t)(esp_timer_get_time()/1000);
+ if(base==WIFI_EVENT&&id==WIFI_EVENT_STA_START){xSemaphoreTake(lock,portMAX_DELAY);network_diagnostics_start(&diagnostics,now_ms);xSemaphoreGive(lock);}
+ if(base==WIFI_EVENT&&id==WIFI_EVENT_STA_CONNECTED){wifi_event_sta_connected_t *e=data;xSemaphoreTake(lock,portMAX_DELAY);network_diagnostics_connected(&diagnostics,now_ms,e->bssid,e->channel);xSemaphoreGive(lock);}
+ if(base==IP_EVENT&&id==IP_EVENT_STA_GOT_IP&&!network_dual_mode()){ip_event_got_ip_t *e=data;xSemaphoreTake(lock,portMAX_DELAY);network_diagnostics_got_ip(&diagnostics,now_ms);xSemaphoreGive(lock);atomic_store(&station_ip,e->ip_info.ip.addr);atomic_store(&online,true);}
+ if(base==WIFI_EVENT&&id==WIFI_EVENT_STA_DISCONNECTED){wifi_event_sta_disconnected_t *e=data;xSemaphoreTake(lock,portMAX_DELAY);network_diagnostics_disconnect(&diagnostics,e->reason,e->bssid,e->rssi);xSemaphoreGive(lock);atomic_fetch_add(&disconnect_events,1);atomic_store(&disconnect_reason,e->reason);atomic_store(&online,false);atomic_store(&station_ip,0);}
+}
+static void capture_radio(void){
+ /* Read only public driver getters. Never read wifi_config/SSID/password. */
+ uint8_t mac[6]={0},channel=0;wifi_second_chan_t second;wifi_country_t country={0};
+ int8_t power=INT8_MIN;int rssi=INT8_MIN;
+ if(esp_wifi_get_mac(WIFI_IF_STA,mac)!=ESP_OK)memset(mac,0,sizeof(mac));
+ if(esp_wifi_get_channel(&channel,&second)!=ESP_OK)channel=0;
+ if(esp_wifi_get_country(&country)!=ESP_OK)memset(&country,0,sizeof(country));
+ if(esp_wifi_get_max_tx_power(&power)!=ESP_OK)power=INT8_MIN;
+ if(esp_wifi_sta_get_rssi(&rssi)!=ESP_OK)rssi=INT8_MIN;
+ uint16_t interval=ble_bridge_connection_interval();
+ xSemaphoreTake(lock,portMAX_DELAY);
+ if(diagnostics.active){
+  memcpy(diagnostics.sta_mac,mac,6);diagnostics.tx_power=power;diagnostics.ble_interval=interval;
+  if(!diagnostics.channel)diagnostics.channel=channel; /* CONNECTED channel wins */
+  if(diagnostics.reason==-1&&rssi>=INT8_MIN&&rssi<=INT8_MAX)diagnostics.rssi=(int8_t)rssi;
+  if((country.cc[0]>='A'&&country.cc[0]<='Z'&&country.cc[1]>='A'&&country.cc[1]<='Z')||
+     (country.cc[0]=='0'&&country.cc[1]=='1')){diagnostics.country[0]=country.cc[0];diagnostics.country[1]=country.cc[1];}
+ }
+ xSemaphoreGive(lock);
 }
 static esp_err_t save_credentials(const network_credentials_t *c){nvs_handle_t h;esp_err_t e=nvs_open("can_network",NVS_READWRITE,&h);if(e!=ESP_OK)return e;e=c?nvs_set_blob(h,"wifi",c,sizeof(*c)):nvs_erase_key(h,"wifi");if(e==ESP_ERR_NVS_NOT_FOUND)e=ESP_OK;if(e==ESP_OK)e=nvs_commit(h);nvs_close(h);return e;}
 static void station_api(bool capture,uint8_t stage,esp_err_t err){
@@ -71,7 +94,7 @@ static bool begin_station(const network_credentials_t *c,bool capture){
  // Drain the previous association's event before beginning another attempt.
  if(disconnected==ESP_OK){uint32_t until=millis()+1000;while(before==atomic_load(&disconnect_events)&&(int32_t)(until-millis())>0)vTaskDelay(pdMS_TO_TICKS(10));}
  atomic_store(&online,false);atomic_store(&station_ip,0);atomic_store(&disconnect_reason,0);
- if(capture){xSemaphoreTake(lock,portMAX_DELAY);network_diagnostics_begin(&diagnostics);xSemaphoreGive(lock);}
+ if(capture){xSemaphoreTake(lock,portMAX_DELAY);network_diagnostics_begin(&diagnostics,(uint64_t)(esp_timer_get_time()/1000));xSemaphoreGive(lock);}
  wifi_config_t cfg={0};memcpy(cfg.sta.ssid,c->ssid,c->ssid_len);memcpy(cfg.sta.password,c->password,c->password_len);cfg.sta.pmf_cfg.capable=true;
  station_api(capture,NET_STAGE_SET_CONFIG,ESP_OK);
  esp_err_t err=esp_wifi_set_config(WIFI_IF_STA,&cfg);memset(&cfg,0,sizeof(cfg));station_api(capture,NET_STAGE_SET_CONFIG,err);if(err!=ESP_OK)return false;
@@ -100,7 +123,7 @@ int network_config_write(const uint8_t p[20]){
 }
 void network_config_disconnect(void){if(!lock)return;xSemaphoreTake(lock,portMAX_DELAY);network_assembly_reset(&assembly);scan_reply=false;xSemaphoreGive(lock);network_pairing_end();}
 size_t network_config_read(char *out,size_t size){
- if(size<512)return 0;
+ if(size<NETWORK_STATUS_JSON_LIMIT)return 0;
  if(!lock)return snprintf(out,size,"{\"state\":4,\"error\":9}");
  xSemaphoreTake(lock,portMAX_DELAY);
  int n=0;
@@ -115,7 +138,8 @@ size_t network_config_read(char *out,size_t size){
  }else{
   char token[65],ssid[65],ip[16]="";hex_bytes(token,network_token,32);hex_bytes(ssid,saved.ssid,saved.ssid_len);
   struct in_addr a={.s_addr=atomic_load(&station_ip)};if(a.s_addr)inet_ntoa_r(a,ip,sizeof(ip));
-  n=snprintf(out,size,"{\"state\":%u,\"error\":%u,\"busy\":%s,\"mode\":%u,\"ip\":\"%s\",\"ssid\":\"%s\",\"id\":\"%s\",\"fp\":\"%s\",\"token\":\"%s\",\"port\":%d,\"reason\":%ld,\"stage\":%u,\"api_err\":%ld,\"got_ip\":%u}",state,error_code,busy?"true":"false",network_wifi_mode(),ip,ssid,device_id,network_fingerprint,token,NET_PORT,(long)diagnostics.reason,diagnostics.stage,(long)diagnostics.api_err,diagnostics.got_ip);
+  network_status_t status={state,error_code,busy,network_wifi_mode(),ip,ssid,device_id,network_fingerprint,token};
+  n=(int)network_status_json(out,size,&status,&diagnostics);
  }
  xSemaphoreGive(lock);return n>0&&(size_t)n<size?(size_t)n:0;
 }
@@ -227,7 +251,8 @@ static void manager_task(void *arg){
      station_api(true,NET_STAGE_SAVE,ESP_OK);esp_err_t err=save_credentials(&r.credentials);station_api(true,NET_STAGE_SAVE,err);
      success=err==ESP_OK;save_failed=!success;
     }
-    // Freeze before publishing the result and before any intentional cleanup.
+    // Sample before cleanup, then freeze; STATUS/scans never refresh this snapshot.
+    capture_radio();
     xSemaphoreTake(lock,portMAX_DELAY);network_diagnostics_finish(&diagnostics);int32_t reason=diagnostics.reason;xSemaphoreGive(lock);
     if(success){xSemaphoreTake(lock,portMAX_DELAY);saved=r.credentials;xSemaphoreGive(lock);credentials_ok=true;keep_until=millis()+60000;set_status(2,0);}
     else{set_status(4,save_failed?5:reason==WIFI_REASON_AUTH_FAIL||reason==WIFI_REASON_HANDSHAKE_TIMEOUT?2:reason==WIFI_REASON_NO_AP_FOUND?3:4);esp_wifi_disconnect();atomic_store(&online,false);atomic_store(&station_ip,0);retry=millis()+10000;}
@@ -255,6 +280,7 @@ void network_init(void){
  wifi_init_config_t cfg=WIFI_INIT_CONFIG_DEFAULT();if(esp_wifi_init(&cfg)!=ESP_OK)return;
  esp_wifi_set_storage(WIFI_STORAGE_RAM);esp_wifi_set_mode(WIFI_MODE_STA);
  if(!dual_link_init())set_status(4,9);
+ esp_event_handler_register(WIFI_EVENT,WIFI_EVENT_STA_START,wifi_event,NULL);esp_event_handler_register(WIFI_EVENT,WIFI_EVENT_STA_CONNECTED,wifi_event,NULL);
  esp_event_handler_register(WIFI_EVENT,WIFI_EVENT_STA_DISCONNECTED,wifi_event,NULL);esp_event_handler_register(IP_EVENT,IP_EVENT_STA_GOT_IP,wifi_event,NULL);
  if(xTaskCreate(manager_task,"wifi_config",6144,NULL,2,NULL)!=pdPASS||xTaskCreate(server_task,"wifi_tls",12288,NULL,3,NULL)!=pdPASS){set_status(4,9);return;}atomic_store(&started,true);
 }

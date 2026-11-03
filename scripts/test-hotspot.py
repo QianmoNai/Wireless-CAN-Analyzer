@@ -628,16 +628,40 @@ def down():
 
 def safe_event(kind, line):
     """Translate allowlisted events; never print raw daemon output or hostnames."""
-    address = re.search(MAC, line)
     if kind == 'hostapd':
-        labels = (('authenticated', '认证'), ('associated', '关联'),
-                  ('pairwise key handshake completed', '四次握手完成'),
-                  ('AP-STA-CONNECTED', '客户端连接'), ('AP-STA-DISCONNECTED', '客户端断开'),
-                  ('AP-ENABLED', 'AP 已启用'), ('AP-DISABLED', 'AP 已停止'))
-        for marker, label in labels:
-            if marker in line:
-                return label + (' MAC=' + address[0].lower() if address else '')
+        # Reconstruct events from a known prefix, never echo any daemon text.
+        control = re.match(r'^(?:csap0: )?(AP-ENABLED|AP-DISABLED|AP-STA-CONNECTED|AP-STA-DISCONNECTED)\b(?:\s+(' + MAC + r'))?', line)
+        if control:
+            label = {'AP-ENABLED': 'AP 已启用', 'AP-DISABLED': 'AP 已停止',
+                     'AP-STA-CONNECTED': '客户端连接', 'AP-STA-DISCONNECTED': '客户端断开'}[control[1]]
+            if control[1].startswith('AP-STA-'):
+                return label + ' MAC=' + control[2].lower() if control[2] else None
+            return label
+        sta = re.match(r'^csap0: STA (' + MAC + r') (?:IEEE 802\.11|WPA): (.*)$', line)
+        if not sta:
+            return None
+        message = sta[2]
+        labels = (
+            (r'^deauth(?:enticated|entication|enticate)?\b', '去认证'),
+            (r'^disassoc(?:iated|iation|iate)?\b', '解除关联'),
+            (r'^(?:did not acknowledge|not ACKed) authentication response\b|^auth(?:entication)? response\b.*\bnot ACKed\b', '认证响应未 ACK'),
+            (r'^(?:did not acknowledge|not ACKed) association response\b|^assoc(?:iation)? response\b.*\bnot ACKed\b', '关联响应未 ACK'),
+            (r'^(?:auth(?:entication)?\b.*\b(?:fail\w*|reject\w*|denied|timeout|timed out)|not allowed to authenticate\b)', '认证失败'),
+            (r'^(?:assoc(?:iation)?\b.*\b(?:fail\w*|reject\w*|denied|timeout|timed out)|not allowed to associate\b)', '关联失败'),
+            (r'^authenticated\b', '认证成功'),
+            (r'^associated\b', '关联成功'),
+            (r'^pairwise key handshake completed\b', '四次握手完成'),
+        )
+        for pattern, label in labels:
+            if re.search(pattern, message, re.IGNORECASE):
+                result = label + ' MAC=' + sta[1].lower()
+                for field in ('status', 'reason'):
+                    code = re.search(r'\b' + field + r'(?:_code| code)?\s*(?:[=:]\s*|\s+)([0-9]{1,5})(?![0-9])', message)
+                    if code and int(code[1]) <= 65535:
+                        result += ' ' + field + '=' + str(int(code[1]))
+                return result
     elif kind == 'dhcp':
+        address = re.search(MAC, line)
         event = re.search(r'\b(DHCPDISCOVER|DHCPOFFER|DHCPREQUEST|DHCPACK|DHCPNAK)\(csap0\)', line)
         if event:
             ip = re.search(r'\b10\.77\.0\.\d{1,3}\b', line)

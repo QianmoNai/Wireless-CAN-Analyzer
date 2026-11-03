@@ -677,6 +677,11 @@ void ble_bridge_publish(const bridge_packet_t *packet)
     }
 }
 uint32_t ble_bridge_dropped(void) { return atomic_load(&dropped); }
+uint16_t ble_bridge_connection_interval(void) {
+    struct ble_gap_conn_desc desc;
+    int handle=atomic_load(&connection);
+    return handle!=BLE_HS_CONN_HANDLE_NONE&&!ble_gap_conn_find(handle,&desc)?desc.conn_itvl:0;
+}
 bool ble_bridge_connected(void) { if(network_dual_mode())return false;return network_usb_mode()?usb_link_connected():network_wifi_mode()?network_connected():atomic_load(&subscribed); }
 bool ble_bridge_take_stop(void) { return atomic_exchange(&stop_requested, false); }
 void ble_bridge_set_motor_busy(bool busy) { atomic_store(&motor_busy, busy); }

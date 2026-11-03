@@ -3,11 +3,23 @@ import asyncio
 import hashlib
 import hmac
 import json
+import re
 import socket
 import ssl
 import sys
 import time
 from .protocol import SERVICE, WRITE, NOTIFY, NETWORK, PORT, ipv4, secret, wifi_commands
+
+
+_MONOTONIC_MS_MAX = (2**63-1)//1000
+_DIAGNOSTIC_INTS = (
+    ('attempt_id', 0, 2**32-1), ('attempt_ms', 0, _MONOTONIC_MS_MAX),
+    ('sta_start_ms', -1, _MONOTONIC_MS_MAX+2**32-1),
+    ('connected_ms', -1, _MONOTONIC_MS_MAX+2**32-1),
+    ('got_ip_ms', -1, _MONOTONIC_MS_MAX+2**32-1),
+    ('disconnect_count', 0, 65535), ('rssi', -127, 127), ('channel', 1, 255),
+    ('tx_power_qdbm', -127, 127), ('ble_interval', 1, 65535),
+)
 
 
 def network_status_fields(value):
@@ -20,13 +32,46 @@ def network_status_fields(value):
                            ('api_err', -(2**31), 2**31-1), ('got_ip', 0, 1)):
         if type(value.get(key)) is int and low <= value[key] <= high:
             result[key] = value[key]
+    # Also accept our own normalized status (e.g. WifiProvisionError.status).
+    for key, low, high in _DIAGNOSTIC_INTS:
+        if type(value.get(key)) is int and low <= value[key] <= high:
+            result[key] = value[key]
+    for key in ('bssid', 'sta_mac'):
+        if type(value.get(key)) is str and re.fullmatch(r'(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}', value[key]):
+            result[key] = value[key].lower()
+    if type(value.get('country')) is str and re.fullmatch(r'[A-Z]{2}|01', value['country']):
+        result['country'] = value['country']
+    # Compact array keeps the existing protected STATUS below 512 B, including
+    # its original TLS fields. Never retain the array or arbitrary nested text.
+    diag = value.get('diag')
+    bounds = {0: (0, 2**32-1), 1: (0, _MONOTONIC_MS_MAX),
+              2: (-1, 2**32-1), 3: (-1, 2**32-1), 4: (-1, 2**32-1),
+              5: (0, 65535), 7: (-128, 127), 8: (0, 255),
+              10: (-128, 127), 12: (0, 65535)}
+    if (type(diag) is list and len(diag) == 13
+            and all(type(diag[i]) is int and low <= diag[i] <= high for i, (low, high) in bounds.items())
+            and all(type(diag[i]) is str and re.fullmatch(r'(?:[0-9a-fA-F]{12})?', diag[i]) for i in (6, 11))
+            and type(diag[9]) is str and re.fullmatch(r'(?:[A-Z]{2}|01)?', diag[9])):
+        decoded = dict(attempt_id=diag[0], attempt_ms=diag[1], disconnect_count=diag[5])
+        for key, index in (('sta_start_ms', 2), ('connected_ms', 3), ('got_ip_ms', 4)):
+            decoded[key] = -1 if diag[index] == -1 else diag[1]+diag[index]
+        for key, index, missing in (('rssi', 7, -128), ('channel', 8, 0),
+                                    ('tx_power_qdbm', 10, -128), ('ble_interval', 12, 0)):
+            if diag[index] != missing:
+                decoded[key] = diag[index]
+        for key, index in (('bssid', 6), ('sta_mac', 11)):
+            if diag[index]:
+                decoded[key] = ':'.join(diag[index][i:i+2].lower() for i in range(0, 12, 2))
+        if diag[9]:
+            decoded['country'] = diag[9]
+        result.update(decoded)
     return result
 
 
 # ESP-IDF wifi_err_reason_t, not the separate provisioning error_code enum.
 _WIFI_REASONS = {
     -1: '未收到断开事件（stage=0 表示启动后尚无 APPLY）',
-    1: '未指定原因', 2: '认证过期', 3: '认证后离开', 4: '因不活跃被断开',
+    1: '未指定原因', 2: '认证过期/认证响应超时（也可能来自 AP）', 3: '认证后离开', 4: '因不活跃被断开',
     5: 'AP 关联数已满', 6: '未认证站点发送 Class 2 帧',
     7: '未关联站点发送 Class 3 帧', 8: '主动离开关联', 9: '关联时尚未认证',
     10: '功率能力不符合要求', 11: '支持信道不符合要求', 12: 'BSS 切换断开',
@@ -43,19 +88,33 @@ _WIFI_REASONS = {
     211: '未找到符合认证模式阈值的 AP', 212: '未找到符合 RSSI 阈值的 AP',
 }
 _WIFI_STAGES = {0: '尚无 APPLY', 1: 'set_config/设置配置', 2: 'start/启动',
-                3: 'connect/发起连接', 4: 'wait_ip/等待 IP', 5: 'save/保存'}
+                3: 'connect/发起连接', 4: 'wait_ip/等待接入或 IP，不代表已关联', 5: 'save/保存'}
 
 
 def network_diagnostics_text(value):
-    """Format only whitelisted integers; no backend messages or arbitrary JSON."""
+    """Format bounded numbers/MAC/country only; no arbitrary backend text."""
     safe = network_status_fields(value)
     reason, stage, err = (safe.get(key) for key in ('reason', 'stage', 'api_err'))
     reason_text = ('未提供（当前固件需要增加诊断字段）' if reason is None else
                    str(reason) + '（' + _WIFI_REASONS.get(reason, '未知断开原因') + '）')
     stage_text = '未提供' if stage is None else str(stage) + '（' + _WIFI_STAGES[stage] + '）'
     err_text = '未提供' if err is None else str(err) + '（0x' + format(err & 0xffffffff, '08x') + '）'
-    return ('reason=' + reason_text + '；stage=' + stage_text + '；api_err=' + err_text
+    text = ('reason=' + reason_text + '；stage=' + stage_text + '；api_err=' + err_text
             + '；got_ip=' + str(safe.get('got_ip', '未提供')))
+    if 'attempt_id' in safe:
+        text += '；attempt_id=' + str(safe['attempt_id']) + '；attempt_ms=' + str(safe.get('attempt_ms', '未提供'))
+        for key in ('sta_start_ms', 'connected_ms', 'got_ip_ms'):
+            stamp = safe.get(key, -1)
+            text += '；' + key + '=' + ('未发生（本次 APPLY 内）' if stamp == -1 else str(stamp))
+        for key in ('disconnect_count', 'bssid', 'rssi', 'country', 'sta_mac'):
+            text += '；' + key + '=' + str(safe.get(key, '未提供'))
+        text += '；channel=' + str(safe.get('channel', '未提供'))
+        if safe.get('connected_ms', -1) == -1:
+            text += '（当前射频信道，未证明关联）'
+        power, interval = safe.get('tx_power_qdbm'), safe.get('ble_interval')
+        text += '；TX功率上限=' + ('未提供' if power is None else f'{power/4:g} dBm')
+        text += '；BLE实际间隔=' + ('未提供' if interval is None else f'{interval*1.25:g} ms')
+    return text
 
 
 class WifiProvisionError(ValueError):
