@@ -13,6 +13,7 @@
 #include "can_load.h"
 #include "can_rates.h"
 #include "board_ui.h"
+#include "device_settings.h"
 #include "board_status_led.h"
 #include "uart_bridge.h"
 #include "dual_link.h"
@@ -175,6 +176,7 @@ void app_main(void)
     ESP_ERROR_CHECK(rx_queue && tx_done_queue && command_queue && query_command_queue ? ESP_OK : ESP_ERR_NO_MEM);
     ble_bridge_init(command_queue, query_command_queue);
     uart_bridge_init();
+    device_settings_init();
     twai_node_handle_t node;
     twai_onchip_node_config_t config = {
         .io_cfg = {.tx = CAN_TX_GPIO, .rx = CAN_RX_GPIO,

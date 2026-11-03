@@ -10,6 +10,31 @@ Default peripheral name: `ESP32-CAN` (persistently configurable in App 1.6 firmw
 
 Each packet is exactly 20 bytes. No MTU negotiation or fragmentation is required (ATT MTU 23). Integers are unsigned little-endian. Firmware rejects invalid version, type, length, flags, ID or DLC with ATT errors; a full command queue returns insufficient resources. ATT write success means **queued**, not CAN TX success.
 
+## Persistent remote settings (firmware 1.24.2)
+
+Command `0x19` queries or updates the shared configuration used by the screen, with updates persisted in the existing `local_panel` / `settings` NVS value. BLE commands, authenticated Wi-Fi transport and native USB share the validator and settings owner; existing CAN/UART commands and event types 19/20/21 keep their meanings. The owner also runs without a working LCD. A motor pulse in progress or settings initialization still in progress rejects a settings request with insufficient resources (`17`); a read-only query may be retried after startup.
+
+| Offset | Bytes | Command `0x19` |
+| --- | --- | --- |
+| 0 | 1 | Version = 1 |
+| 1 | 1 | Type = `0x19` |
+| 2 | 1 | Operation: 0 query, 1 set |
+| 3 | 1 | Set mask: bit0 network, bit1 data, bit2 UART baud; no other bits |
+| 4 | 1 | Network: 0 BLE, 1 Wi-Fi, 2 dual A, 3 dual B, 4 USB |
+| 5 | 1 | Data: 0 CAN, 1 UART |
+| 6 | 2 | Reserved, zero |
+| 8 | 4 | UART baud, one of 9600/19200/38400/57600/115200/230400/460800/921600 |
+| 12 | 4 | Reserved, zero |
+| 16 | 4 | Nonzero request token |
+
+A query requires bytes 3–15 to be zero. A set requires mask 1–7, and every unselected field must be zero. Validation covers the complete request before any modification; invalid values/padding return ATT value-not-allowed (`19`, also in the USB type18 admission result) and do not alter settings.
+
+Event **22 decimal** acknowledges an admitted valid request: byte0=1, byte1=22, byte2 result (`0` queried, `1` saved, `2` NVS failure), byte3 configured network, byte4 configured data, bytes5–7 zero, baud u32 at8, bytes12–15 zero, original token u32 at16. Result1 is emitted only after NVS commit, or when the identical value is already durable. A save failure preserves the previous configuration. A query returns the shared configured values; it does not reread or flush NVS, and can include a recent screen change awaiting its delayed save. The independent settings worker applies the shared configuration to transports and the UART driver shortly afterwards; event22 is not UART readiness or a byte-delivery acknowledgment. Use existing event21 and actual traffic for those checks.
+
+The screen reads the same settings snapshot. Its delayed saves use compare-and-set so an older screen snapshot cannot overwrite a concurrent remote save. Switching transport resets the old connection and pending commands; its completion reply may be lost, so reconnect and query using a fresh token. Entering USB requires the normal HELLO before CAN/UART traffic. Do not automatically retry a CAN/UART send whose completion is unknown.
+
+Native USB additionally supports a limited bootstrap before HELLO and while another network mode is selected: a valid query, or a valid set whose network bit is selected and network is **4**, can be sent in the existing CRC-protected CUSB frame with a nonzero session ID. Firmware replies directly with type18 and, if admitted, event22 under that ID, without creating a data session. Data-only changes and selecting another network are rejected before a USB session; while a session exists, settings requests under other session IDs are ignored. The existing HELLO session replacement rule is unchanged. This physical USB path avoids consuming external UART data as AT commands. See [USB.md](USB.md) for the CLI.
+
 ## Frames and results
 
 | Offset | Bytes | Meaning |

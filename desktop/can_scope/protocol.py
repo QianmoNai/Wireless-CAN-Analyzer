@@ -8,6 +8,9 @@ WRITE = 'c0de0002-1212-efde-1523-785feabcd123'
 NOTIFY = 'c0de0003-1212-efde-1523-785feabcd123'
 NETWORK = 'c0de0004-1212-efde-1523-785feabcd123'
 PORT = 32323
+UART_BAUDRATES = (9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600)
+SETTINGS_COMMAND = 0x19
+SETTINGS_EVENT = 22
 
 
 def u32(p, offset):
@@ -16,6 +19,27 @@ def u32(p, offset):
 
 def packet(kind, a=0, b=0, x=0, y=0, z=0, token=0):
     return struct.pack('<BBBBIIII', 1, kind, a, b, x, y, z, token)
+
+
+def device_settings_command(network=None, data=None, baud=None, token=1):
+    """None leaves a field unchanged; no fields queries the current settings."""
+    if type(token) is not int or not 1 <= token <= 0xffffffff:
+        raise ValueError('设置 token 须为非零 32 位整数')
+    for value, allowed, label in ((network, range(5), '通信模式'), (data, (0, 1), '数据选择'),
+                                  (baud, UART_BAUDRATES, 'UART 波特率')):
+        if value is not None and (type(value) is not int or value not in allowed):
+            raise ValueError('无效'+label)
+    mask = int(network is not None) | (int(data is not None) << 1) | (int(baud is not None) << 2)
+    return struct.pack('<BBBBBBHIII', 1, SETTINGS_COMMAND, int(bool(mask)), mask,
+                       network or 0, data or 0, 0, baud or 0, 0, token)
+
+
+def device_settings_status(p):
+    if (len(p) != 20 or p[:2] != bytes((1, SETTINGS_EVENT)) or p[2] > 2
+            or p[3] > 4 or p[4] > 1 or any(p[5:8]) or any(p[12:16])
+            or u32(p, 8) not in UART_BAUDRATES or not u32(p, 16)):
+        raise ValueError('设备设置响应无效')
+    return dict(status=p[2], network=p[3], data=p[4], baud=u32(p, 8), token=u32(p, 16))
 
 
 def ipv4(value):
@@ -48,6 +72,17 @@ def setting_command(value):
     p = bytes.fromhex(value)
     if p[0] != 1:
         raise ValueError('不支持的协议版本')
+    if p[1] == 0x19 and u32(p, 16) and p[6:8] == bytes(2) and p[12:16] == bytes(4):
+        # Remote settings share the firmware's strict unused-field rules.
+        if p[2] == 0 and not any(p[3:16]):
+            return p
+        mask = p[3]
+        if p[2] == 1 and 1 <= mask <= 7:
+            network = p[4] <= 4 if mask & 1 else p[4] == 0
+            data = p[5] <= 1 if mask & 2 else p[5] == 0
+            baud = u32(p, 8) in (9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600) if mask & 4 else u32(p, 8) == 0
+            if network and data and baud:
+                return p
     if p[1] == 0x18 and 1 <= p[2] <= 12 and not p[3] and not any(p[4+p[2]:16]) and u32(p,16):
         return p
     if p[1] == 0x12 and p[2:4] == b'\0\0' and p[8:16] == bytes(8) and u32(p, 4) in (125000, 250000, 500000, 1000000):

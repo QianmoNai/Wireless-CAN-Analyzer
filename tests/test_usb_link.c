@@ -23,12 +23,17 @@ int usb_serial_jtag_write_bytes(const void*p,size_t n,uint32_t w){(void)w;assert
 int usb_serial_jtag_read_bytes(void*p,uint32_t n,uint32_t w){(void)p;(void)n;(void)w;return 0;}
 void ble_bridge_reset_session(void){resets++;}
 int ble_bridge_command(const uint8_t p[20]){assert(p[0]==1);commands_received++;return command_status;}
+int ble_bridge_settings_command(const uint8_t p[20],bridge_packet_t *reply){
+ assert(settings_command_valid(p));commands_received++;
+ *reply=(bridge_packet_t){.bytes={1,SETTINGS_EVENT,p[2]?1:0}};
+ wire_put_u32(reply->bytes+16,wire_u32(p+16));return command_status;
+}
 bool bridge_packet_is_raw(const bridge_packet_t*p){return p->bytes[1]==1||p->bytes[1]==19;}
 static void feed(uint32_t id,const uint8_t*p){uint8_t frame[32];usb_encode(frame,id,p);service(frame,13);service(frame+13,19);}
 static void hello(uint32_t id){uint8_t p[20]={1,USB_HELLO};memcpy(p+4,"CANUSB1",7);feed(id,p);}
 int main(void){
  usb_link_init();assert(!usb_link_connected());
- uint8_t command[20]={1,0x19,1},ping[20]={1,USB_PING},bye[20]={1,USB_BYE};
+ uint8_t command[20]={1,0x18,1},ping[20]={1,USB_PING},bye[20]={1,USB_BYE};
  feed(10,command);assert(!commands_received);
  selected=false;hello(10);assert(!usb_link_connected()&&!sent_count);selected=true;
  hello(10);assert(usb_link_connected()&&resets==1&&sent_count==32&&sent[10]==1);
@@ -49,6 +54,18 @@ int main(void){
  hello(13);feed(13,bye);assert(!usb_link_connected());
  hello(14);short_write=true;feed(14,ping);assert(!usb_link_connected());short_write=false;
  hello(15);usb_link_reset();assert(!usb_link_connected());feed(15,command);assert(commands_received==2);
+ // Non-USB mode keeps the decoder across reads and only admits bootstrap.
+ selected=false;sent_count=0;command_status=0;
+ uint8_t query[20]={1,SETTINGS_COMMAND};wire_put_u32(query+16,123);
+ feed(16,query);assert(commands_received==3&&sent_count==64&&sent[9]==18&&sent[41]==SETTINGS_EVENT&&!usb_link_connected());
+ uint8_t setting[20]={1,SETTINGS_COMMAND,1,SETTINGS_DATA,0,1};wire_put_u32(setting+16,124);
+ feed(16,setting);assert(commands_received==3&&sent_count==96&&sent[74]==19);
+ setting[3]|=SETTINGS_NETWORK;setting[4]=4;
+ feed(16,setting);assert(commands_received==4&&sent_count==160&&!usb_link_connected());
+ selected=true;hello(17);assert(usb_link_connected());
+ before=sent_count;feed(18,query);assert(sent_count==before&&commands_received==4);
+ setting[3]=SETTINGS_DATA;setting[4]=0;feed(17,setting);assert(commands_received==5&&sent_count==before+64);
+ feed(17,bye);assert(!usb_link_connected());
  free(raw_out->data);free(raw_out);free(control_out->data);free(control_out);
  puts("USB firmware: handshake, partial input, session isolation, priority/backpressure, heartbeat, unplug, close and short write PASS");
 }

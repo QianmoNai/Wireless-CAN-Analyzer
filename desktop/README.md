@@ -1,4 +1,6 @@
-# CAN Scope Desktop 1.2.3
+# CAN Scope Desktop 1.2.4
+
+1.2.4 配合固件 1.24.2 提供可自动调用的远程设置接口，查询/保存通信模式、CAN/UART 与八档串口波特率。无需实体按键进入 USB + UART：先关闭占用串口的桌面/监视器，在仓库根目录运行 `desktop/.venv/bin/python scripts/serial-settings.py --port /dev/ttyACM0 --mode usb --data uart --baud 115200`，再正常打开桌面连接。只查询时省略设置参数，不改变设备模式。桌面桥接 API `deviceSettings` 和显式 `prepare_usb` Python API 使用相同校验；现有 USB 连接保留 HELLO 兼容路径。详见 [USB 协议与自动测试](../docs/USB.md)。
 
 1.2.3 在 Linux 默认使用软件渲染，绕开 NVIDIA/Wayland 下观察到的 Qt WebEngine 图形合成阻塞。CAN 列表复用固定行元素并缓存时间文本，隐藏时停止重绘；Linux 默认将每个渲染进程的 V8 老生代预算设为 256 MiB，促使连续接收时及时回收临时对象（并非整个应用的内存上限），不改变记录保留数量。串口接收区保留最近 64 KiB，每 250ms 按小文本块更新；隐藏或暂停时不重绘，仍继续接收。软件渲染和更及时的内存回收可能增加 CPU 使用量；排查时可设置 `CAN_SCOPE_HARDWARE_RENDERING=1` 恢复原硬件渲染策略。Windows 图形后端不变。
 

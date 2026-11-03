@@ -5,7 +5,8 @@ import unittest
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from can_scope.usb_protocol import Decoder, encode, HELLO, PING
-from can_scope.usb_transport import UsbTransport
+from can_scope.usb_transport import UsbTransport, prepare_usb
+from can_scope.protocol import packet, u32
 from can_scope.engine import Channel
 
 
@@ -124,3 +125,85 @@ class UsbTests(unittest.IsolatedAsyncioTestCase):
                 c.receive(bytes([1,21,int(uart)])+bytes(17))
                 self.assertEqual(c.uart,uart)
         finally: await c.close()
+
+
+class BootstrapTests(unittest.IsolatedAsyncioTestCase):
+    async def test_explicit_bootstrap_persists_once_and_releases_port(self):
+        class SettingsSerial(FakeSerial):
+            network = 0
+            data = 0
+            baud = 115200
+            def write(self, frame):
+                self.writes.append(frame)
+                for session, p in self.decoder.feed(frame):
+                    if p[1] != 25:
+                        raise AssertionError('bootstrap must not establish a session')
+                    if p[2]:
+                        self.network = p[4]
+                        self.data = p[5] if p[3]&2 else self.data
+                        self.baud = u32(p,8) if p[3]&4 else self.baud
+                    ack = packet(22,a=int(bool(p[2])),b=self.network,x=self.data,y=self.baud,token=u32(p,16))
+                    self.input.extend(encode(session,ack))
+                return len(frame)
+        port = SettingsSerial()
+        with patch('serial.Serial',return_value=port):
+            result = await prepare_usb('TEST',data=1,baud=230400)
+        self.assertEqual((result['network'],result['data'],result['baud']), (4,1,230400))
+        self.assertFalse(port.is_open)
+        commands = [Decoder().feed(frame)[0][1] for frame in port.writes]
+        self.assertEqual([p[2] for p in commands],[0,1])
+        self.assertEqual(commands[1][3],7)
+
+    async def test_invalid_bootstrap_never_opens_port(self):
+        with patch('serial.Serial') as serial:
+            with self.assertRaises(ValueError):await prepare_usb('TEST',baud=123)
+            serial.assert_not_called()
+
+    async def test_bootstrap_does_not_replay_unconfirmed_setting(self):
+        class NoSetReply(FakeSerial):
+            def write(self, frame):
+                self.writes.append(frame)
+                for session, p in self.decoder.feed(frame):
+                    if p[2] == 0:
+                        self.input.extend(encode(session,packet(22,b=4,y=115200,token=u32(p,16))))
+                return len(frame)
+        port=NoSetReply()
+        with patch('serial.Serial',return_value=port):
+            with self.assertRaisesRegex(ConnectionError,'设置结果可能未知'):
+                await prepare_usb('TEST',data=1,timeout=.04)
+        commands=[Decoder().feed(frame)[0][1] for frame in port.writes]
+        self.assertEqual([p[2] for p in commands],[0,1])
+        self.assertFalse(port.is_open)
+
+    async def test_bootstrap_surfaces_admission_rejection(self):
+        class Rejected(FakeSerial):
+            def write(self, frame):
+                for session, p in self.decoder.feed(frame):
+                    self.input.extend(encode(session,packet(18,a=3,b=25,x=u32(p,16))))
+                return len(frame)
+        port=Rejected()
+        with patch('serial.Serial',return_value=port):
+            with self.assertRaisesRegex(ValueError,'状态码 3'):
+                await prepare_usb('TEST')
+        self.assertFalse(port.is_open)
+
+    async def test_bootstrap_retries_only_query_during_device_startup(self):
+        class Starting(FakeSerial):
+            queries = 0
+            def write(self, frame):
+                self.writes.append(frame)
+                for session,p in self.decoder.feed(frame):
+                    self.queries += 1
+                    if self.queries == 1:
+                        reply=packet(18,a=0x11,b=25,x=u32(p,16))
+                    else:
+                        reply=packet(22,b=4,y=115200,token=u32(p,16))
+                    self.input.extend(encode(session,reply))
+                return len(frame)
+        port=Starting()
+        with patch('serial.Serial',return_value=port):
+            state=await prepare_usb('TEST',timeout=.8)
+        self.assertEqual(state['network'],4)
+        self.assertEqual(port.queries,2)
+        self.assertTrue(all(Decoder().feed(f)[0][1][2] == 0 for f in port.writes))
+        self.assertFalse(port.is_open)

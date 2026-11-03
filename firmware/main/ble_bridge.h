@@ -8,6 +8,7 @@
 typedef struct { uint8_t bytes[20]; } bridge_packet_t;
 void ble_bridge_init(QueueHandle_t commands, QueueHandle_t query_commands);
 int ble_bridge_command(const uint8_t bytes[20]);
+int ble_bridge_settings_command(const uint8_t bytes[20],bridge_packet_t *reply);
 void ble_bridge_reset_session(void);
 void ble_bridge_publish(const bridge_packet_t *packet);
 uint32_t ble_bridge_dropped(void);

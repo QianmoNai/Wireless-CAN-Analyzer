@@ -50,6 +50,8 @@ with sync_playwright() as p:
             return Math.abs(c.right-t.right-16)<1 && Math.abs(c.bottom-t.bottom-16)<1 && s.right<=t.left && s.bottom<=c.bottom-15;
         })""")
     home.set_viewport_size({'width': 375, 'height': 915})
+    # Let the resize handler settle before it can cancel the new drag preview.
+    home.evaluate('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))')
     home.evaluate("const c=document.querySelector('.motor'),r=c.getBoundingClientRect();liftCard({card:c,lastX:r.left+20,lastY:r.top+20})")
     assert home.locator('.drag-preview .motor-temperature strong').inner_text() == '35 °C'
     home.evaluate('finishDrag(false)')

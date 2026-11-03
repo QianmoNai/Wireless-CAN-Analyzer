@@ -7,7 +7,7 @@
  const usbHint=document.createElement('p');usbHint.className='hint';usbHint.textContent='USB直连：屏幕切换到 USB直连，用数据线连接原生 USB 口，搜索并选择串口。外接单片机仍使用 TX/RX 引脚。';$('connectionMode').parentElement.append(usbHint);
  document.querySelector('.eyebrow').textContent='DESKTOP · LINUX / WINDOWS';
  const bar=document.createElement('div');bar.className='desktop-bar';
- bar.innerHTML='<button class="secondary" id="desktopExport">导出通道配置</button><button class="secondary" id="desktopImport">导入通道配置</button><button class="secondary" id="desktopCsv">导出当前帧记录 CSV</button><span class="desktop-title">CAN Scope Desktop 1.2.3 · 各通道配置独立保存</span>';
+ bar.innerHTML='<button class="secondary" id="desktopExport">导出通道配置</button><button class="secondary" id="desktopImport">导入通道配置</button><button class="secondary" id="desktopCsv">导出当前帧记录 CSV</button><span class="desktop-title">CAN Scope Desktop 1.2.4 · 各通道配置独立保存</span>';
  document.querySelector('.app').prepend(bar);
  $('desktopExport').onclick=()=>{try{invoke('exportConfig',JSON.stringify({format:'can-scope-config',version:1,channels:[ConfigIO.exportChannel(1,$('deviceName').textContent,'')]}))}catch(e){toast(e.message)}};
  $('desktopImport').onclick=()=>invoke('importConfig');
@@ -26,6 +26,6 @@
  const original=window.onNative;
  window.onNative=(type,d)=>{if(type==='manualResult'){const line=document.createElement('div');line.textContent=new Date().toLocaleTimeString()+' #'+d.token+' '+d.status;$('sendResult').prepend(line);while($('sendResult').children.length>40)$('sendResult').lastChild.remove()}else original(type,d);$('desktopCsv').disabled=!!window.uartMode;$('desktopCsv').title=window.uartMode?'CSV 导出适用于 CAN 帧记录':''};
  // App lifecycle copy differs on desktop: minimizing does not disconnect.
- document.querySelectorAll('.protocol').forEach(p=>{p.textContent='CAN Scope Desktop 1.2.3 · 本地运行 · 关闭窗口断开连接；最小化继续监控。'});
+ document.querySelectorAll('.protocol').forEach(p=>{p.textContent='CAN Scope Desktop 1.2.4 · 本地运行 · 关闭窗口断开连接；最小化继续监控。'});
  document.querySelectorAll('p').forEach(p=>{if(p.textContent.includes('在手机输入设备屏幕'))p.textContent=p.textContent.replace('在手机输入设备屏幕','在系统蓝牙配对窗口输入设备屏幕')});
 })();

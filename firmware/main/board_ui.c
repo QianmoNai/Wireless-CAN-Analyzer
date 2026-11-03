@@ -3,6 +3,7 @@
 #include "uart_bridge.h"
 #include "network_link.h"
 #include "dual_link.h"
+#include "device_settings.h"
 #if CONFIG_CAN_LOCAL_PANEL
 #include "board_ui_render.h"
 #include "board_ui_animation.h"
@@ -17,7 +18,6 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/task.h"
-#include "nvs.h"
 #ifdef CAN_PANEL_BENCHMARK
 #include <stdio.h>
 #include <inttypes.h>
@@ -40,23 +40,6 @@ void board_ui_observe(const bridge_packet_t *p)
     portEXIT_CRITICAL(&snapshot_lock);
 }
 
-static uint32_t load_settings(void)
-{
-    nvs_handle_t handle; uint32_t value=0;
-    if (nvs_open("local_panel",NVS_READONLY,&handle)==ESP_OK) {
-        nvs_get_u32(handle,"settings",&value); nvs_close(handle);
-    }
-    return value;
-}
-static esp_err_t save_settings(uint32_t value)
-{
-    nvs_handle_t handle;
-    esp_err_t err=nvs_open("local_panel",NVS_READWRITE,&handle);
-    if (err!=ESP_OK) return err;
-    err=nvs_set_u32(handle,"settings",value);
-    if (err==ESP_OK) err=nvs_commit(handle);
-    nvs_close(handle); return err;
-}
 static bool color_done(esp_lcd_panel_io_handle_t io, esp_lcd_panel_io_event_data_t *event, void *ctx)
 {
     BaseType_t wake=pdFALSE;
@@ -129,11 +112,8 @@ typedef struct {
 static void ui_task(void *arg)
 {
     display_task=xTaskGetCurrentTaskHandle();
-    ui_model_t ui; ui_model_init(&ui,load_settings());
+    ui_model_t ui; ui_model_init(&ui,0);device_settings_read(&ui);
     ui_animation_t animation;ui_animation_init(&animation,&ui);
-    network_set_mode(ui_mode(&ui));
-    uart_bridge_configure(ui.uart,ui_uart_baud(&ui));
-    uint32_t persisted=ui_model_settings(&ui), changed_at=0, retry_at=0;
     bool save_failed=false, panel_ready=false;
     ui_button_t keys[3]={0}; const int pins[]={PIN_BT1,PIN_BT2,PIN_BT3};
     esp_lcd_panel_handle_t panel=NULL; esp_lcd_panel_io_handle_t io=NULL;
@@ -163,7 +143,7 @@ static void ui_task(void *arg)
 #endif
     for (;;) {
         uint32_t now=(uint32_t)(esp_timer_get_time()/1000);
-        uint32_t before=ui_model_settings(&ui);
+        uint32_t before=device_settings_read(&ui);
 #ifdef CAN_PANEL_BENCHMARK
         // Local, non-persistent navigation only: no network or CAN commands.
         if(!rendering && benchmark_action<4 && (int32_t)(now-benchmark_next)>=0){
@@ -189,23 +169,13 @@ static void ui_task(void *arg)
         ui_animation_target(&animation,&ui,now);
         ui_render_pose_t pose;
         bool animating=ui_animation_sample(&animation,now,&pose);
-        network_set_mode(ui_mode(&ui));
-        uart_bridge_configure(ui.uart,ui_uart_baud(&ui));
+        device_settings_update(&ui,before);
         if(!ui.sound || (beep_active && (int32_t)(beep_until-now)<=0))beep_active=false;
         err=board_buzzer_set(beep_active,ui.volume);
         if(err!=ESP_OK)break;
-        uint32_t current=ui_model_settings(&ui);
-        if (current!=before) { changed_at=now; retry_at=now+1500; }
-        // Flash commits cannot pause an animation or extend a short beep.
-        if (!rendering && !animating && !beep_active && current!=persisted &&
-            (uint32_t)(now-changed_at)>=1500 && (int32_t)(now-retry_at)>=0) {
-            err=save_settings(current);
-            bool failed=err!=ESP_OK;
-            if(failed!=save_failed)requested=true;
-            save_failed=failed;
-            if (!save_failed) persisted=current;
-            else { ESP_LOGW(TAG,"Settings not saved: %s",esp_err_to_name(err)); retry_at=now+10000; }
-        }
+        bool failed=device_settings_save_failed();
+        if(failed!=save_failed)requested=true;
+        save_failed=failed;
         if (panel_ready && ui.brightness!=applied_brightness) {
             err=backlight(ui.brightness);
             if (err!=ESP_OK) break;

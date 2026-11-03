@@ -4,9 +4,77 @@ import secrets
 import os
 import time
 from .usb_protocol import Decoder, encode, HELLO, PING, BYE
+from .protocol import device_settings_command, device_settings_status
 
 HANDSHAKE_TIMEOUT = 4.0
 HANDSHAKE_INTERVAL = 0.5
+
+
+def open_port(device):
+    import serial
+    options = {"exclusive": True} if os.name == "posix" else {}
+    port = serial.Serial(port=None, baudrate=115200, timeout=0, write_timeout=.5, **options)
+    try:
+        port.dtr = False
+        port.rts = False
+        port.port = device
+        port.open()
+        port.reset_input_buffer()
+        return port
+    except BaseException:
+        port.close()
+        raise
+
+
+async def prepare_usb(device, data=None, baud=None, timeout=8.0):
+    """Explicitly persist USB mode without HELLO; release the port when applied.
+
+    Requires settings-capable firmware. It never establishes a data session or
+    sends UART/CAN data. A settings mutation is submitted once; only reads retry.
+    """
+    mutation = device_settings_command(network=4, data=data, baud=baud, token=2)
+    session = secrets.randbelow(0xffffffff) + 1
+    decoder = Decoder()
+    port = open_port(device)
+    deadline = time.monotonic() + timeout
+    async def request(p, retry=False):
+        due = 0
+        while time.monotonic() < deadline:
+            if time.monotonic() >= due:
+                frame = encode(session, p)
+                if await asyncio.to_thread(port.write, frame) != len(frame):
+                    raise ConnectionError('USB 设置写入不完整，结果未知')
+                due = time.monotonic() + (.25 if retry else timeout)
+            for nonce, response in decoder.feed(port.read(min(4096, port.in_waiting))):
+                if nonce != session:
+                    continue
+                if response[:2] == bytes((1, 18)) and response[3] == 0x19 and int.from_bytes(response[4:8], 'little') == int.from_bytes(p[16:20], 'little') and response[2]:
+                    # A newly opened native USB port may catch device startup.
+                    # 0x11 means settings are not initialized yet. Retry only
+                    # the read-only query; a mutation is still submitted once.
+                    if retry and response[2] == 0x11:
+                        continue
+                    raise ValueError('设备拒绝 USB 设置命令，状态码 '+str(response[2]))
+                if response[:2] == bytes((1, 22)):
+                    status = device_settings_status(response)
+                    if status['token'] == int.from_bytes(p[16:20], 'little'):
+                        return status
+            await asyncio.sleep(.005)
+        raise ConnectionError('USB 远程设置超时，请确认固件支持设置接口；设置结果可能未知')
+    try:
+        query = device_settings_command(token=1)
+        current = await request(query, retry=True)
+        if current['status'] != 0:
+            raise ConnectionError('设备设置读取失败，状态码 '+str(current['status']))
+        if current['network'] != 4 or (data is not None and current['data'] != data) or (baud is not None and current['baud'] != baud):
+            current = await request(mutation)
+            if current['status'] != 1:
+                raise ConnectionError('设备未保存 USB 设置，状态码 '+str(current['status']))
+        if current['network'] != 4 or (data is not None and current['data'] != data) or (baud is not None and current['baud'] != baud):
+            raise ConnectionError('设备应用的 USB 设置与请求不一致')
+        return current
+    finally:
+        port.close()
 
 
 async def scan_usb(found):
@@ -31,18 +99,11 @@ class UsbTransport:
         self.failed = False
 
     async def connect(self, device):
-        import serial
         self.ready = asyncio.get_running_loop().create_future()
         try:
             # Do not deliberately toggle reset lines. Some host/device states
             # still restart the device on open, so HELLO tolerates startup.
-            options = {"exclusive": True} if os.name == "posix" else {}
-            self.port = serial.Serial(port=None, baudrate=115200, timeout=0, write_timeout=.5, **options)
-            self.port.dtr = False
-            self.port.rts = False
-            self.port.port = device
-            self.port.open()
-            self.port.reset_input_buffer()
+            self.port = open_port(device)
             self.tasks = [asyncio.create_task(self.read())]
             deadline = time.monotonic() + HANDSHAKE_TIMEOUT
             while True:

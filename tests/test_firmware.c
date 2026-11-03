@@ -7,6 +7,7 @@
 #include "../firmware/main/ble_bridge.h"
 #include "../firmware/main/uart_bridge.h"
 void uart_bridge_init(void){}
+void device_settings_init(void){}
 static bool simulated_uart;
 bool uart_bridge_selected(void){return simulated_uart;}
 void uart_bridge_stats(uart_bridge_stats_t *s){memset(s,0,sizeof(*s));}

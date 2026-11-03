@@ -43,6 +43,9 @@ int main(void)
     packet.bytes[2] = 0; // Periodic name's last bytes must not look like a token.
     assert(!bridge_packet_is_ack(&packet));
     assert(!bridge_packet_is_raw(&packet));
+    packet.bytes[1]=22;wire_put_u32(packet.bytes+16,42);
+    assert(bridge_packet_is_ack(&packet)&&!bridge_packet_is_raw(&packet));
+    wire_put_u32(packet.bytes+16,0);assert(!bridge_packet_is_ack(&packet));
     packet.bytes[1]=3;packet.bytes[2]=0x80;wire_put_u32(packet.bytes+16,0);
     assert(bridge_packet_is_raw(&packet)&&!bridge_packet_is_ack(&packet)); // Arbitration diagnostics remain low-priority raw.
 

@@ -110,7 +110,7 @@ class Bridge(QObject):
                 self.window.showFullScreen() if args[0] else self.window.showNormal()
             elif name in ('setMonitorVisible',):
                 pass
-            elif name in ('connectionMode', 'networkState', 'wifiConfigure', 'connectLan', 'showDetail', 'leaveDetail', 'dashboard', 'scan', 'connect', 'disconnect', 'setPolling', 'send', 'manual', 'delivered', 'reconnect'):
+            elif name in ('connectionMode', 'networkState', 'wifiConfigure', 'connectLan', 'showDetail', 'leaveDetail', 'dashboard', 'scan', 'connect', 'disconnect', 'setPolling', 'send', 'manual', 'delivered', 'reconnect', 'deviceSettings'):
                 self.window.runtime.call(self.slot, name, args)
         except Exception as e:
             self.window.deliver(self.slot, 'error', json.dumps(dict(message=str(e))))

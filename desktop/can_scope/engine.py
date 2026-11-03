@@ -3,7 +3,7 @@ import asyncio
 from collections import deque
 import json
 import time
-from .protocol import packet, u32, setting_command, can_command, secret
+from .protocol import packet, u32, setting_command, can_command, secret, device_settings_command, device_settings_status
 from .transports import BleTransport, LanTransport, scan_ble, discover
 from .usb_transport import UsbTransport, scan_usb
 
@@ -197,6 +197,15 @@ class Channel:
             except BaseException:
                 await self.disconnect('连接未完成')
                 raise
+        elif name == 'deviceSettings':
+            if len(args) != 1 or not isinstance(args[0], dict) or set(args[0]) - {'network', 'data', 'baud'}:
+                raise ValueError('设备设置参数无效')
+            command = device_settings_command(**args[0], token=self.next_token())
+            result = device_settings_status(await self.acknowledge(command, 22, self.token))
+            self.emit('deviceSettings', result)
+            if result['status'] not in (0, 1):
+                raise ValueError('设备未保存设置，状态码 '+str(result['status']))
+            return result
         elif name == 'send':
             self.polls.clear()
             command = setting_command(args[0])

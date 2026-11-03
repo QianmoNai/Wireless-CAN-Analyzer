@@ -3,7 +3,7 @@
 bool bridge_packet_is_ack(const bridge_packet_t *packet)
 {
     uint8_t type = packet->bytes[1];
-    if (type == 5 || type == 8 || type == 10 || type == 20)
+    if (type == 5 || type == 8 || type == 10 || type == 20 || type == 22)
         return wire_u32(packet->bytes + 16) != 0;
     return type == 7 && packet->bytes[2] != 0;
 }

@@ -2,6 +2,7 @@
 #include "network_link.h"
 #include "usb_link.h"
 #include "uart_bridge.h"
+#include "device_settings.h"
 #include "esp_random.h"
 void ble_store_config_init(void);
 #include "home_status.h"
@@ -89,12 +90,22 @@ static void rename_device(const uint8_t *bytes, uint8_t len) {
     ble_bridge_publish(&reply);
 }
 
+int ble_bridge_settings_command(const uint8_t p[20],bridge_packet_t *reply) {
+    if(atomic_load(&motor_busy))return BLE_ATT_ERR_INSUFFICIENT_RES;
+    return device_settings_command(p,reply);
+}
+
 int ble_bridge_command(const uint8_t bytes[20])
 {
     if(network_dual_mode())return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
     bridge_packet_t packet;memcpy(packet.bytes,bytes,20);
     uint8_t *p = packet.bytes;
     if (p[0] != 1) return BLE_ATT_ERR_VALUE_NOT_ALLOWED;
+    if(p[1]==SETTINGS_COMMAND){
+        bridge_packet_t reply;int result=ble_bridge_settings_command(p,&reply);
+        if(!result)ble_bridge_publish(&reply);
+        return result;
+    }
     if(p[1]==UART_SEND_COMMAND){
         if(!uart_command_valid(p) || !uart_bridge_selected())return BLE_ATT_ERR_VALUE_NOT_ALLOWED;
         return uart_bridge_send(p)?0:BLE_ATT_ERR_INSUFFICIENT_RES;

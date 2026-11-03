@@ -10,12 +10,26 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from can_scope.protocol import can_command, packet, u32, setting_command, wifi_commands, ipv4
+from can_scope.protocol import can_command, packet, u32, setting_command, wifi_commands, ipv4, device_settings_command, device_settings_status
 from can_scope.engine import Channel
 from can_scope.transports import LanTransport, BleTransport
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_remote_device_settings_validation(self):
+        p = device_settings_command(network=4, data=1, baud=115200, token=42)
+        self.assertEqual(p, bytes((1, 25, 1, 7, 4, 1)) + bytes(2) + (115200).to_bytes(4, 'little') + bytes(4) + (42).to_bytes(4, 'little'))
+        self.assertEqual(device_settings_command(token=9), packet(25, token=9))
+        for values in ({'network':5}, {'data':2}, {'baud':12345}, {'token':0}, {'data':True}, {'token':2**32}):
+            with self.assertRaises(ValueError):device_settings_command(**values)
+        status = device_settings_status(packet(22, a=1, b=4, x=1, y=115200, token=42))
+        self.assertEqual((status['network'], status['data'], status['baud']), (4, 1, 115200))
+        with self.assertRaises(ValueError):device_settings_status(packet(21))
+        for offset in (2, 3, 4, 5, 6, 7, 12, 13, 14, 15, 16):
+            invalid = bytearray(packet(22, b=4, y=115200, token=1))
+            invalid[offset] = 9 if offset != 16 else 0
+            with self.assertRaises(ValueError):device_settings_status(bytes(invalid))
+
     def test_classic_can(self):
         for extended, identifier in ((False, 0x7ff), (True, 0x1fffffff)):
             p = can_command(identifier, bytes(range(8)), extended, token=42)
@@ -66,6 +80,8 @@ class FakeTransport:
             self.channel.receive(packet(8, a=0 if u32(p,8) else 1,x=u32(p,4),y=u32(p,8),token=u32(p,16)))
         elif p[1] == 0x17:
             self.channel.receive(packet(10,a=p[2],b=p[3],y=u32(p,8),token=u32(p,16)))
+        elif p[1] == 0x19:
+            self.channel.receive(packet(22,a=1 if p[2] else 0,b=4,x=1,y=115200,token=u32(p,16)))
     async def close(self):
         self.closed = True
 
@@ -82,6 +98,17 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.channel.roster = [dict(key=self.key,family='dm',sampleHz=100)]
     async def asyncTearDown(self):
         await self.channel.close()
+
+    async def test_remote_device_settings_ack_and_rejection(self):
+        c = self.channel
+        result = await c.handle('deviceSettings', [{'data':1, 'baud':115200}])
+        self.assertEqual((result['status'],result['data'],result['baud']), (1,1,115200))
+        self.assertEqual(c.transport.writes[-1],device_settings_command(data=1,baud=115200,token=c.token))
+        self.assertEqual(self.events[-1][0],'deviceSettings')
+        for settings in ({'data':2}, {'baud':1}, {'unrelated':1}):
+            count = len(c.transport.writes)
+            with self.assertRaises(ValueError):await c.handle('deviceSettings',[settings])
+            self.assertEqual(len(c.transport.writes),count)
 
     async def test_uart_excludes_can_and_retains_raw_data(self):
         c = self.channel
