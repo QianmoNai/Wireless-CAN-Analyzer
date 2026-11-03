@@ -40,6 +40,51 @@ class CacheTests(unittest.TestCase):
 
 
 class OfflineCliTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == 'linux', 'Linux file permission/NOFOLLOW semantics')
+    def test_password_file_checks_mode_owner_links_size_before_reading(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'fixture.password'
+            path.write_text('SyntheticFixtureOnly\n')
+            path.chmod(0o600)
+            with patch('getpass.getpass', side_effect=AssertionError('interactive password forbidden')), \
+                 patch('builtins.input', side_effect=AssertionError('SSID input forbidden')):
+                self.assertEqual(cli.read_credentials('Fixture', path), ('Fixture', 'SyntheticFixtureOnly'))
+            for mode in (0o644, 0o400, 0o660):
+                path.chmod(mode)
+                with patch.object(cli.os, 'read', side_effect=AssertionError('read forbidden')):
+                    with self.assertRaises(cli.StopProvision):
+                        cli.read_password_file(path)
+            path.chmod(0o600)
+            with patch.object(cli.os, 'geteuid', return_value=path.stat().st_uid + 1), \
+                 patch.object(cli.os, 'read', side_effect=AssertionError('read forbidden')):
+                with self.assertRaises(cli.StopProvision):
+                    cli.read_password_file(path)
+            link = Path(directory) / 'symlink'
+            link.symlink_to(path)
+            with self.assertRaises(OSError):
+                cli.read_password_file(link)
+            os.link(path, Path(directory) / 'hardlink')
+            with self.assertRaises(cli.StopProvision):
+                cli.read_password_file(path)
+            (Path(directory) / 'hardlink').unlink()
+            path.write_bytes(b'A' * 66)
+            with self.assertRaises(cli.StopProvision):
+                cli.read_password_file(path)
+            path.write_bytes(b'\xff' * 8)
+            with self.assertRaises(cli.StopProvision) as error:
+                cli.read_password_file(path)
+            self.assertNotIn('\\xff', str(error.exception))
+
+    def test_target_and_subnet_parser_reject_bad_identity_and_address(self):
+        self.assertEqual(cli.target_address(cli.TARGET + '@11:22:33:44:55:66'), '11:22:33:44:55:66')
+        for target in ('bad@11:22:33:44:55:66', cli.TARGET, cli.TARGET + '@unknown'):
+            with self.assertRaises(cli.argparse.ArgumentTypeError):
+                cli.target_address(target)
+        self.assertEqual(str(cli.discovery_subnet('10.77.0.0/24')), '10.77.0.0/24')
+        for subnet in ('8.8.8.0/24', '10.77.0.1/24', '::/64', '10.77.0.0/32'):
+            with self.assertRaises(cli.argparse.ArgumentTypeError):
+                cli.discovery_subnet(subnet)
+
     def test_wifi_error_uses_structured_fields_and_correct_save_failure(self):
         value = dict(state=4, error=5, busy=False, mode=0, reason=15,
                      ssid='SYNTHETIC-PRIVATE', fp='SYNTHETIC-PRIVATE', token='SYNTHETIC-PRIVATE')
@@ -181,10 +226,16 @@ class ProvisionTests(unittest.IsolatedAsyncioTestCase):
         link.client = client
         await link.use_existing_bond()
         message = bus.call.await_args.args[0]
-        self.assertEqual((message.member, message.body), ('Get', ['org.bluez.Device1', 'Paired']))
+        self.assertEqual((message.member, message.body), ('Get', ['org.bluez.Device1', 'Bonded']))
+        self.assertEqual([call.args[0].body[-1] for call in bus.call.await_args_list], ['Paired', 'Bonded'])
         self.assertTrue(link.provision_authenticated)
         client.pair.assert_not_awaited()
         bus.call.return_value.body = [Variant('b', False)]
+        with self.assertRaises(ConnectionError):
+            await link.use_existing_bond()
+        self.assertFalse(link.provision_authenticated)
+        bus.call.side_effect = [SimpleNamespace(message_type=MessageType.METHOD_RETURN, body=[Variant('b', True)]),
+                                SimpleNamespace(message_type=MessageType.METHOD_RETURN, body=[Variant('b', False)])]
         with self.assertRaises(ConnectionError):
             await link.use_existing_bond()
         self.assertFalse(link.provision_authenticated)
@@ -256,7 +307,23 @@ class ProvisionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual([row['address'] for row in rows], ['wifi:192.168.1.42'])
             sock.bind.assert_called_once_with(('', 0))
 
-    async def exercise(self, identity=cli.TARGET, fail_apply=False, lose_mode_ack=False):
+    async def test_hotspot_subnet_filters_replies_and_target_still_checks_scan_address(self):
+        async def discovery(identity, found, *, broadcast):
+            self.assertEqual(broadcast, '10.77.0.255')
+            for address in ('192.168.1.42', '10.77.0.0', '10.77.0.255', '10.77.0.20'):
+                found(dict(address='wifi:' + address))
+        with redirect_stdout(io.StringIO()), patch('builtins.input', side_effect=AssertionError('confirmation forbidden')):
+            self.assertEqual(await cli.find_ip(discovery, cli.discovery_subnet('10.77.0.0/24')), '10.77.0.20')
+            address = '11:22:33:44:55:66'
+            scanner = AsyncMock(return_value={address: SimpleNamespace(address=address)})
+            self.assertEqual((await cli.select_device(scanner, address))[0], address)
+            scanner.return_value[address].address = '00:00:00:00:00:00'
+            with self.assertRaises(cli.StopProvision):
+                await cli.select_device(scanner, address)
+            with self.assertRaises(cli.StopProvision):
+                await cli.select_device(scanner, '00:00:00:00:00:00')
+
+    async def exercise(self, identity=cli.TARGET, fail_apply=False, lose_mode_ack=False, reuse=False, bonded=True):
         events, clients, buffers = [], [], []
         address = '11:22:33:44:55:66'  # Deliberately different from STA ID.
         other = 'AA:BB:CC:DD:EE:FF'
@@ -278,7 +345,14 @@ class ProvisionTests(unittest.IsolatedAsyncioTestCase):
             async def start_notify(self, _, notify):
                 self.notify = notify
             async def pair(self):
+                test.assertFalse(reuse)
                 events.append('pair')
+            @property
+            def _backend(self):
+                from dbus_fast import MessageType, Variant
+                return SimpleNamespace(_device_path='/org/bluez/hci0/dev_11_22_33_44_55_66',
+                    _bus=SimpleNamespace(call=AsyncMock(return_value=SimpleNamespace(
+                        message_type=MessageType.METHOD_RETURN, body=[Variant('b', bonded)]))))
             async def write_gatt_char(self, uuid, data, response):
                 if uuid == NETWORK:
                     buffers.append(data)
@@ -327,7 +401,7 @@ class ProvisionTests(unittest.IsolatedAsyncioTestCase):
             found(dict(address='wifi:10.42.0.42'))  # Ignore replies outside requested subnet.
             found(dict(address='wifi:192.168.1.42'))
 
-        def credentials():
+        def credentials(*_):
             events.append('credentials')
             return 'Fixture SSID', 'FixturePassword'
 
@@ -350,12 +424,14 @@ class ProvisionTests(unittest.IsolatedAsyncioTestCase):
                  patch.object(cli, 'pairing_agent', agent), \
                  patch('builtins.input', return_value=address), patch.object(cli, 'read_credentials', credentials), \
                  redirect_stdout(io.StringIO()) as output, redirect_stderr(output):
-                if identity != cli.TARGET or fail_apply:
+                options = SimpleNamespace(reuse_bond=True, target=address, ssid=None,
+                                          password_file=None, subnet=cli.SUBNET) if reuse else None
+                if identity != cli.TARGET or fail_apply or not bonded:
                     with self.assertRaises(Exception):
-                        await cli.provision()
+                        await cli.provision(options)
                     self.assertEqual(load_connection(path), dict(unrelated=True))
                 else:
-                    await cli.provision()
+                    await cli.provision(options)
                     saved = load_connection(path)
                     self.assertTrue(all(saved.get(k) for k in ('id', 'fp', 'token', 'ip')))
                     self.assertEqual((saved['id'], saved['ip'], saved['mode']), (cli.TARGET, '192.168.1.42', 'wifi'))
@@ -365,7 +441,7 @@ class ProvisionTests(unittest.IsolatedAsyncioTestCase):
                 text = output.getvalue()
                 self.assertTrue('FixturePassword' not in text and '11' * 32 not in text and '22' * 32 not in text)
         self.assertEqual(len(clients), 1)
-        self.assertEqual(events.count('pair'), 1)
+        self.assertEqual(events.count('pair'), 0 if reuse else 1)
         self.assertFalse(clients[0].is_connected)
         # Mutable protocol buffers must be wiped on success and failure.
         self.assertTrue(all(not any(buffer) for buffer in buffers if isinstance(buffer, bytearray)))
@@ -380,6 +456,19 @@ class ProvisionTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(events.index('apply'), events.index('mode'))
         self.assertLess(events.index('mode'), events.index('discover'))
         self.assertEqual([event for event in events if event in ('tls', 'query')], ['tls', 'query'])
+
+    async def test_reuse_bond_never_pairs_or_registers_agent(self):
+        with patch.object(cli, 'read_credentials', wraps=cli.read_credentials):
+            events = await self.exercise(reuse=True)
+        self.assertNotIn('register-agent', events)
+        self.assertNotIn('pair', events)
+        self.assertIn('apply', events)
+
+    async def test_missing_bond_stops_before_password_or_mutation(self):
+        events = await self.exercise(reuse=True, bonded=False)
+        self.assertNotIn('apply', events)
+        self.assertNotIn('credentials', events)
+        self.assertNotIn('pair', events)
 
     async def test_wrong_identity_never_reads_or_sends_password(self):
         events = await self.exercise(identity='abcdef012345')

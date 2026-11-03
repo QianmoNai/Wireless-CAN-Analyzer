@@ -185,12 +185,13 @@ class BleTransport:
         bus, path = getattr(backend, '_bus', None), getattr(backend, '_device_path', None)
         if self.closed or not self.client or not self.client.is_connected or bus is None or not path:
             raise ConnectionError('无法检查当前目标的已有蓝牙绑定；不会自动配对')
-        reply = await asyncio.wait_for(bus.call(Message(
-            destination='org.bluez', path=path, interface='org.freedesktop.DBus.Properties',
-            member='Get', signature='ss', body=['org.bluez.Device1', 'Paired'])), 5)
-        if (reply.message_type != MessageType.METHOD_RETURN or len(reply.body) != 1
-                or reply.body[0].value is not True):
-            raise ConnectionError('当前目标没有已确认的蓝牙绑定；不会自动配对')
+        for property_name in ('Paired', 'Bonded'):
+            reply = await asyncio.wait_for(bus.call(Message(
+                destination='org.bluez', path=path, interface='org.freedesktop.DBus.Properties',
+                member='Get', signature='ss', body=['org.bluez.Device1', property_name])), 5)
+            if (reply.message_type != MessageType.METHOD_RETURN or len(reply.body) != 1
+                    or reply.body[0].value is not True):
+                raise ConnectionError('当前目标没有已确认的蓝牙绑定；不会自动配对')
         self.provision_authenticated = True
 
     async def provision(self, operation, ssid, password, status, networks, *, pair=True):

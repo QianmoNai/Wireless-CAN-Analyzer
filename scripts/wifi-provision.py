@@ -15,6 +15,7 @@ import logging
 import os
 from pathlib import Path
 import re
+import stat
 import sys
 import warnings
 
@@ -125,16 +126,43 @@ def protect_process():
     sys.excepthook = lambda *_: print('配网异常，详细内容已隐藏；请按恢复命令查询设备。', file=sys.stderr)
 
 
-def read_credentials():
-    ssid = input('SSID（区分大小写，支持 2.4 GHz 网络）：')
+def read_password_file(path):
+    """Validate the opened inode before reading; never interpolate file data/errors."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    raw = bytearray()
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600
+                or info.st_uid != os.geteuid() or info.st_nlink != 1):
+            raise StopProvision('密码文件必须是当前用户所有、权限恰好 0600 的普通文件，且不能是链接。')
+        raw.extend(os.read(fd, 66))
+        if len(raw) > 65:
+            raise StopProvision('密码文件过长。')
+        if raw.endswith(b'\n'):
+            raw.pop()
+        try:
+            return raw.decode('ascii')
+        except UnicodeError:
+            raise StopProvision('密码文件必须使用 ASCII，末尾可有一个换行。') from None
+    finally:
+        raw[:] = bytes(len(raw))
+        os.close(fd)
+
+
+def read_credentials(ssid=None, password_file=None):
+    if ssid is None:
+        ssid = input('SSID（区分大小写，支持 2.4 GHz 网络）：')
     if not 1 <= len(ssid.encode('utf8')) <= 32 or '\0' in ssid:
         raise StopProvision('SSID 须为 1–32 UTF-8 字节且不能包含空字符。')
     password = ''
     try:
         # Refuse getpass's echoing fallback, including when /dev/tty is unavailable.
-        with warnings.catch_warnings():
-            warnings.simplefilter('error', getpass.GetPassWarning)
-            password = getpass.getpass('Wi-Fi 密码（不回显；开放网络直接回车）：')
+        if password_file is not None:
+            password = read_password_file(password_file)
+        else:
+            with warnings.catch_warnings():
+                warnings.simplefilter('error', getpass.GetPassWarning)
+                password = getpass.getpass('Wi-Fi 密码（不回显；开放网络直接回车）：')
         valid = (not password or
                  (8 <= len(password) <= 63 and all(32 <= ord(c) <= 126 for c in password)) or
                  (len(password) == 64 and all(c in '0123456789abcdefABCDEF' for c in password)))
@@ -147,7 +175,26 @@ def read_credentials():
         ssid = password = ''
 
 
-async def select_device(scan):
+def target_address(value):
+    # The target contains both identities; never infer the BLE MAC from STA MAC.
+    parts = value.split('@')
+    if (len(parts) != 2 or parts[0].lower() != TARGET or
+            not re.fullmatch(r'(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}', parts[1])):
+        raise argparse.ArgumentTypeError('格式必须为目标 ID@完整BLE地址；只允许 ID 90da7273722c。')
+    return parts[1].upper()
+
+
+def discovery_subnet(value):
+    try:
+        net = ipaddress.IPv4Network(value)
+        if not net.is_private or not 16 <= net.prefixlen <= 30:
+            raise ValueError
+        return net
+    except ValueError:
+        raise argparse.ArgumentTypeError('发现网段须为私有 IPv4 网络，前缀 /16 至 /30。') from None
+
+
+async def select_device(scan, target=None):
     print('[1/7] 扫描 CAN Scope BLE 服务（约 5 秒）；其他设备不会被连接或配对。')
     devices = await scan(lambda _: None)
     choices = {address.upper(): device for address, device in devices.items()
@@ -157,23 +204,26 @@ async def select_device(scan):
     for address in sorted(choices):
         print('  BLE 地址：' + address)
     print('目标 STA ID：' + TARGET + '。BLE 地址可能与 STA ID 不同，请先核对实体设备和已知 BLE 地址。')
-    address = input('只输入已确认属于该目标设备的完整 BLE 地址（回车取消）：').strip().upper()
+    address = target if target else input('只输入已确认属于该目标设备的完整 BLE 地址（回车取消）：').strip().upper()
     if address not in choices:
         raise StopProvision('未确认扫描列表中的目标地址，已停止。')
+    observed = getattr(choices[address], 'address', address)
+    if not isinstance(observed, str) or observed.upper() != address:
+        raise StopProvision('扫描结果中的设备地址不一致，已停止。')
     return address, choices[address]
 
 
-async def find_ip(discover):
-    print('[6/7] 在 192.168.1.0/24 发送 UDP 32323 发现，最长约 30 秒。')
+async def find_ip(discover, subnet=SUBNET):
+    print(f'[6/7] 在 {subnet} 发送 UDP 32323 发现，最长约 30 秒。')
     for _ in range(10):
         found = set()
 
         def accept(row):
             ip = ipaddress.IPv4Address(row['address'].removeprefix('wifi:'))
-            if ip in SUBNET and ip not in (SUBNET.network_address, SUBNET.broadcast_address):
+            if ip in subnet and ip not in (subnet.network_address, subnet.broadcast_address):
                 found.add(str(ip))
 
-        await discover(TARGET, accept, broadcast=str(SUBNET.broadcast_address))
+        await discover(TARGET, accept, broadcast=str(subnet.broadcast_address))
         if len(found) > 1:
             raise StopProvision('同一设备 ID 出现多个 IP，已停止；请检查网络中的重复设备或发现报文。')
         if found:
@@ -196,13 +246,13 @@ def matching_scan_rows(rows, ssid):
     return matches
 
 
-async def diagnose():
+async def diagnose(options=None):
     """Existing authenticated bond only. Never touch the connection cache."""
     import json
     from can_scope.engine import Channel
     from can_scope.transports import BleTransport, network_diagnostics_text, network_status_fields, scan_ble
     step('诊断/BLE 扫描选择')
-    address, device = await select_device(scan_ble)
+    address, device = await select_device(scan_ble, options.target) if options else await select_device(scan_ble)
     channel = Channel(lambda *_: None)
     ble = BleTransport(channel.receive, lambda _: None)
     latest = {}
@@ -226,7 +276,7 @@ async def diagnose():
         await asyncio.wait_for(ble.provision(1, '', '', status, lambda _: None, pair=False), 45)
         print('扫描前状态：' + json.dumps(latest, ensure_ascii=False))
         print('接入诊断：' + network_diagnostics_text(latest))
-        ssid = input('待诊断的 2.4 GHz SSID（只作匹配，不列出其他网络）：')
+        ssid = options.ssid if options and options.ssid is not None else input('待诊断的 2.4 GHz SSID（只作匹配，不列出其他网络）：')
         if not 1 <= len(ssid.encode('utf8')) <= 32 or '\0' in ssid:
             raise StopProvision('待诊断名称须为 1–32 UTF-8 字节且不能包含空字符。')
         matches = []
@@ -248,7 +298,7 @@ async def diagnose():
         await ble.close()
 
 
-async def provision():
+async def provision(options=None):
     from can_scope.connection_store import connection_folder, load_connection, save_connection
     from can_scope.engine import Channel
     from can_scope.protocol import secret
@@ -261,7 +311,7 @@ async def provision():
     path = connection_folder() / 'connection-1.json'
     saved = load_connection(path)  # Fail before pairing if the existing cache is corrupt.
     step('[1/7] BLE 扫描/选择')
-    address, device = await select_device(scan_ble)
+    address, device = await select_device(scan_ble, options.target) if options else await select_device(scan_ble)
     channel = Channel(lambda *_: None, saved, lambda value: save_connection(path, value))
 
     def disconnected(_):
@@ -293,18 +343,27 @@ async def provision():
         current = await channel.handle('deviceSettings', [{}])
         if current['status'] != 0 or current['network'] != 0:
             raise StopProvision('设备未处于蓝牙模式；请在设备屏幕切换后重新运行。')
-        print('[2/7] 注册本进程临时配对代理；仅对此地址调用一次配对/认证。')
-        print('请等待本终端出现“ESP32 六位配对码”提示，再输入目标屏幕上的六位码；不会在系统弹窗中输入。')
-        step('[2/7] 注册终端配对代理')
-        async with pairing_agent(ble.client, address):
-            step('[2/7] BLE 配对/认证和身份核对')
-            await asyncio.wait_for(ble.provision(1, '', '', status, lambda _: None), 105)
-        print('本进程配对代理已注销。')
+        if options and options.reuse_bond:
+            print('[2/7] 仅复用当前目标已有绑定；无绑定则停止，不注册代理、不调用 Pair。')
+            step('[2/7] 检查已有绑定/认证和身份核对')
+            try:
+                await ble.use_existing_bond()
+            except ConnectionError:
+                raise StopProvision('目标没有可复用的已有绑定，已停止；不会重新配对。') from None
+            await asyncio.wait_for(ble.provision(1, '', '', status, lambda _: None, pair=False), 45)
+        else:
+            print('[2/7] 注册本进程临时配对代理；仅对此地址调用一次配对/认证。')
+            print('请等待本终端出现“ESP32 六位配对码”提示，再输入目标屏幕上的六位码；不会在系统弹窗中输入。')
+            step('[2/7] 注册终端配对代理')
+            async with pairing_agent(ble.client, address):
+                step('[2/7] BLE 配对/认证和身份核对')
+                await asyncio.wait_for(ble.provision(1, '', '', status, lambda _: None), 105)
+            print('本进程配对代理已注销。')
         print('已通过加密 BLE 核对目标 ID；TLS 信任信息仅保留在内存中。')
         ssid = password = ''
         try:
             step('[3/7] 终端凭据输入')
-            ssid, password = read_credentials()
+            ssid, password = read_credentials(options.ssid, options.password_file) if options else read_credentials()
             print('[3/7] 发送 Wi-Fi 配置并等待设备接入；复用当前认证，不再次配对。')
             pending = ble.provision(5, ssid, password, status, lambda _: None, pair=False)
             ssid = password = ''
@@ -335,7 +394,7 @@ async def provision():
         await ble.close()
 
     step('[6/7] UDP 发现')
-    ip = await find_ip(discover)
+    ip = await find_ip(discover, options.subnet) if options else await find_ip(discover)
     print('设备 IP：' + ip)
     channel.saved['ip'] = ip
     step('[6/7] 保存发现的 IP')
@@ -393,11 +452,17 @@ def main():
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--dry-run', action='store_true', help='离线无凭据自检；不扫描、不配对、不写缓存、不操作硬件')
     mode.add_argument('--diagnose', action='store_true', help='仅用现有绑定读取安全状态并扫描目标 Wi-Fi；不配对、不读密码、不改模式/缓存')
+    parser.add_argument('--ssid', help='指定网络名称；不提供时仍在终端输入，不输出名称')
+    parser.add_argument('--password-file', type=Path, help='从当前用户所有的 0600 普通文件读取密码；拒绝符号链接，不回显')
+    parser.add_argument('--subnet', type=discovery_subnet, default=SUBNET, help='UDP 发现网段，默认 192.168.1.0/24；热点用 10.77.0.0/24')
+    parser.add_argument('--reuse-bond', action='store_true', help='只复用所选目标已有绑定；无绑定则退出，绝不重新配对')
+    parser.add_argument('--target', type=target_address, help='ID@BLE地址；跳过两次交互确认，仍扫描核对地址并认证读取目标 ID')
     args = parser.parse_args()
     protect_process()
     step('启动/参数检查')
     try:
-        print('诊断模式：只复用现有绑定读取状态并扫描，不配对、不读密码、不尝试接入或改模式。' if args.diagnose else NOTICE)
+        print('诊断模式：只复用现有绑定读取状态并扫描，不配对、不读密码、不尝试接入或改模式。' if args.diagnose else
+              '本脚本会复用所选设备已有绑定并修改设备的 Wi-Fi 设置；不会重新配对。' if args.reuse_bond else NOTICE)
         if args.dry_run:
             dry_run()
             return 0
@@ -407,9 +472,11 @@ def main():
             raise StopProvision('必须由用户在交互式终端运行；不接受重定向或管道输入。')
         print('请关闭桌面端和手机 App，在设备屏幕选择蓝牙模式；电脑保持现有网络连接。')
         action = '诊断' if args.diagnose else '配对并配置'
-        if input('确认仅' + action + '目标 ' + TARGET + '，请输入该 ID（回车取消）：').strip() != TARGET:
+        if not args.target and input('确认仅' + action + '目标 ' + TARGET + '，请输入该 ID（回车取消）：').strip() != TARGET:
             raise StopProvision('用户未确认，已停止。')
-        asyncio.run(diagnose() if args.diagnose else provision())
+        configured = args.target or args.ssid is not None or args.password_file or args.reuse_bond or args.subnet != SUBNET
+        asyncio.run((diagnose(args) if configured else diagnose()) if args.diagnose else
+                    (provision(args) if configured else provision()))
         return 0
     except (KeyboardInterrupt, EOFError) as exc:
         report_failure(exc)
