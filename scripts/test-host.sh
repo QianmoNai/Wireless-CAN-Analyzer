@@ -60,6 +60,7 @@ python3 tests/test_wifi_handoff.py
 python3 tests/test_wifi_tx_power.py
 python3 tests/test_wifi_socket_diag.py
 python3 tests/test_wifi_batch.py
+python3 tests/test_wifi_tls_flow.py
 node tests/test_imu.js
 node tests/test_motor_catalog.js
 node tests/test_history.js
