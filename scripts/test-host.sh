@@ -19,8 +19,8 @@ for led_config in "1 1" "1 0" "0 1"; do
 done
 cc -std=c11 -Wall -Wextra -Werror -Itests/buzzer_stubs -Ifirmware/main tests/test_board_buzzer.c firmware/main/board_buzzer.c -o "$test_build_dir/test_board_buzzer"
 "$test_build_dir/test_board_buzzer"
-cc -std=c11 -Wall -Wextra -Werror -Itests/uart_stubs -Itests/dual_stubs -Ifirmware/main tests/test_uart_bridge.c -o "$test_build_dir/test_uart_bridge"
-cc -std=c11 -Wall -Wextra -Werror -DCONFIG_BLE_TEST_DIAGNOSTICS=1 -Itests/uart_stubs -Itests/dual_stubs -Ifirmware/main tests/test_uart_bridge.c -o "$test_build_dir/test_uart_bridge_diag"
+cc -std=c11 -Wall -Wextra -Werror -Itests/uart_stubs -Itests/dual_stubs -Ifirmware/main tests/test_uart_bridge.c firmware/main/wifi_uart_diag.c -o "$test_build_dir/test_uart_bridge"
+cc -std=c11 -Wall -Wextra -Werror -DCONFIG_BLE_TEST_DIAGNOSTICS=1 -Itests/uart_stubs -Itests/dual_stubs -Ifirmware/main tests/test_uart_bridge.c firmware/main/wifi_uart_diag.c -o "$test_build_dir/test_uart_bridge_diag"
 "$test_build_dir/test_uart_bridge_diag"
 "$test_build_dir/test_uart_bridge"
 cc -std=c11 -Wall -Wextra -Werror -Itests/usb_stubs -Ifirmware/main tests/test_usb_link.c -o "$test_build_dir/test_usb_link"
@@ -30,6 +30,7 @@ cc -std=c11 -Wall -Wextra -Werror -Itests/settings_stubs -Itests/usb_stubs -Ifir
 "$test_build_dir/test_device_settings"
 compile_run test_network_protocol firmware/main/network_protocol.c
 compile_run test_network_diagnostics -Wall -Wextra -Werror firmware/main/network_diagnostics.c
+compile_run test_wifi_uart_diag -Wall -Wextra -Werror firmware/main/wifi_uart_diag.c
 cc -std=c11 -Wall -Wextra -Werror -Ifirmware/main tests/test_dual_protocol.c tests/dual_crypto_host.c firmware/main/dual_protocol.c firmware/main/dual_session.c -lcrypto -o "$test_build_dir/test_dual_protocol"
 "$test_build_dir/test_dual_protocol"
 cc -std=c11 -Wall -Wextra -Werror -Itests/dual_stubs -Ifirmware/main tests/test_dual_runtime.c tests/dual_runtime_a.c tests/dual_runtime_b.c tests/dual_crypto_host.c firmware/main/dual_protocol.c firmware/main/dual_session.c -lcrypto -o "$test_build_dir/test_dual_runtime"
@@ -57,6 +58,7 @@ python3 tests/test_ble_stress.py
 python3 tests/test_ble_connection_glue.py
 python3 tests/test_wifi_handoff.py
 python3 tests/test_wifi_tx_power.py
+python3 tests/test_wifi_socket_diag.py
 node tests/test_imu.js
 node tests/test_motor_catalog.js
 node tests/test_history.js

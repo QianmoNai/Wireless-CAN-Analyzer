@@ -5,6 +5,7 @@
 #include "network_protocol.h"
 #include "network_diagnostics.h"
 #include "network_identity.h"
+#include "wifi_uart_diag.h"
 #include "device_settings.h"
 #include "ack_delivery.h"
 #include "esp_wifi.h"
@@ -12,11 +13,13 @@
 #include "esp_event.h"
 #include "esp_timer.h"
 #include "esp_mac.h"
+#include "esp_random.h"
 #include "esp_tls.h"
 #include "nvs.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "lwip/sockets.h"
+#include "lwip/tcp.h"
 #include <stdatomic.h>
 #include <string.h>
 #include <stdio.h>
@@ -56,15 +59,23 @@ bool network_dual_mode(void){unsigned mode=atomic_load(&transport_mode);return m
 bool network_connected(void){return network_wifi_mode()&&atomic_load(&linked)&&atomic_load(&online);}
 void network_set_mode(unsigned mode){
  if(mode>4)return;
- if(atomic_exchange(&transport_mode,mode)!=mode){usb_link_reset();dual_link_request_mode(mode);atomic_fetch_add(&network_epoch,1);ble_bridge_reset_session();if(mode==0)ble_bridge_wifi_resume();}
+ if(atomic_exchange(&transport_mode,mode)!=mode){usb_link_reset();dual_link_request_mode(mode);atomic_fetch_add(&network_epoch,1);ble_bridge_reset_session();wifi_diag_mode(mode);if(mode==0)ble_bridge_wifi_resume();}
 }
-bool network_send(const bridge_packet_t *p){return network_connected()&&xQueueSend(bridge_packet_is_raw(p)?raw_out:control_out,p,0)==pdTRUE;}
+bool network_send(const bridge_packet_t *p){
+ if(!network_connected()){wifi_diag_drop(WD_LAN_REJECT_OFFLINE,p);return false;}
+ bool raw=bridge_packet_is_raw(p);QueueHandle_t q=raw?raw_out:control_out;
+ bool ok=xQueueSend(q,p,0)==pdTRUE;
+ wifi_diag_queue(raw?WD_LAN_RAW_DEPTH:WD_LAN_CONTROL_DEPTH,
+                 raw?WD_LAN_RAW_HIGH:WD_LAN_CONTROL_HIGH,uxQueueMessagesWaiting(q));
+ if(!ok)wifi_diag_drop(WD_LAN_REJECT_FULL,p); // Rejection observation, not another drop owner.
+ return ok;
+}
 static void wifi_event(void *arg,esp_event_base_t base,int32_t id,void *data){
  uint64_t now_ms=(uint64_t)(esp_timer_get_time()/1000);
  if(base==WIFI_EVENT&&id==WIFI_EVENT_STA_START){xSemaphoreTake(lock,portMAX_DELAY);network_diagnostics_start(&diagnostics,now_ms);xSemaphoreGive(lock);}
  if(base==WIFI_EVENT&&id==WIFI_EVENT_STA_CONNECTED){wifi_event_sta_connected_t *e=data;xSemaphoreTake(lock,portMAX_DELAY);network_diagnostics_connected(&diagnostics,now_ms,e->bssid,e->channel);xSemaphoreGive(lock);}
  if(base==IP_EVENT&&id==IP_EVENT_STA_GOT_IP&&!network_dual_mode()){ip_event_got_ip_t *e=data;xSemaphoreTake(lock,portMAX_DELAY);network_diagnostics_got_ip(&diagnostics,now_ms);xSemaphoreGive(lock);atomic_store(&station_ip,e->ip_info.ip.addr);atomic_store(&online,true);}
- if(base==WIFI_EVENT&&id==WIFI_EVENT_STA_DISCONNECTED){wifi_event_sta_disconnected_t *e=data;xSemaphoreTake(lock,portMAX_DELAY);network_diagnostics_disconnect(&diagnostics,e->reason,e->bssid,e->rssi);xSemaphoreGive(lock);atomic_fetch_add(&disconnect_events,1);atomic_store(&disconnect_reason,e->reason);atomic_store(&online,false);atomic_store(&station_ip,0);}
+ if(base==WIFI_EVENT&&id==WIFI_EVENT_STA_DISCONNECTED){wifi_event_sta_disconnected_t *e=data;xSemaphoreTake(lock,portMAX_DELAY);network_diagnostics_disconnect(&diagnostics,e->reason,e->bssid,e->rssi);xSemaphoreGive(lock);wifi_diag_add(WD_WIFI_DISCONNECTS,1,WD_NOW_SEQUENCE);wifi_diag_set(WD_WIFI_REASON,e->reason,WD_NOW_SEQUENCE);atomic_fetch_add(&disconnect_events,1);atomic_store(&disconnect_reason,e->reason);atomic_store(&online,false);atomic_store(&station_ip,0);}
 }
 static void capture_radio(void){
  /* Read only public driver getters. Never read wifi_config/SSID/password. */
@@ -171,14 +182,29 @@ static void discovery(int fd){
  // Reply only to a small, versioned discovery request; never expose credentials.
  if(n==19&&!memcmp(message,"CAN_SCOPE_DISCOVER_1",19)){char reply[100];int count=snprintf(reply,sizeof(reply),"CAN_SCOPE_1 %s %d",device_id,NET_PORT);sendto(fd,reply,count,0,(struct sockaddr*)&peer,len);}
 }
+static void tls_diagnostic_end(int64_t began,int64_t waiting,uint64_t blocked,bool ok,int error,int socket_error,bool timeout){
+ int64_t now=esp_timer_get_time();
+ if(waiting>=0)blocked+=(uint64_t)(now-waiting);
+ wifi_diag_add(WD_TLS_BLOCK_US_TOTAL,(uint32_t)blocked,WD_NOW_SEQUENCE);
+ wifi_diag_max(WD_TLS_BLOCK_US_MAX,(uint32_t)blocked);
+ wifi_diag_add(WD_TLS_CALL_US_TOTAL,(uint32_t)(now-began),WD_NOW_SEQUENCE);
+ wifi_diag_max(WD_TLS_CALL_US_MAX,(uint32_t)(now-began));
+ if(!ok){wifi_diag_add(WD_TLS_SEND_FAILURES,1,WD_NOW_SEQUENCE);
+  if(timeout)wifi_diag_add(WD_TLS_SEND_TIMEOUTS,1,WD_NOW_SEQUENCE);
+  wifi_diag_set(WD_TLS_LAST_ERROR,(uint32_t)error,WD_NOW_SEQUENCE);
+  wifi_diag_set(WD_SOCKET_LAST_ERRNO,(uint32_t)socket_error,WD_NOW_SEQUENCE);}
+}
 static bool tls_write_count(esp_tls_t *tls,const uint8_t *p,size_t n,size_t *completed){
+ int64_t began=esp_timer_get_time(),waiting=-1;uint64_t blocked=0;
+ wifi_diag_add(WD_TLS_SEND_CALLS,1,WD_NOW_SEQUENCE);wifi_diag_max(WD_TLS_PENDING_HIGH_BYTES,n);
  *completed=0;uint32_t deadline=millis()+1500;
- while(n){int r=esp_tls_conn_write(tls,p,n);
-  if(r>0){p+=r;n-=r;*completed+=r;}
-  else if(r!=ESP_TLS_ERR_SSL_WANT_READ&&r!=ESP_TLS_ERR_SSL_WANT_WRITE)return false;
-  if((int32_t)(millis()-deadline)>=0)return false;
+ while(n){int r=esp_tls_conn_write(tls,p,n);int saved_errno=errno;int64_t now=esp_timer_get_time();
+  if(r>0){p+=r;n-=r;*completed+=r;if(waiting>=0){blocked+=(uint64_t)(now-waiting);waiting=-1;}}
+  else if(r!=ESP_TLS_ERR_SSL_WANT_READ&&r!=ESP_TLS_ERR_SSL_WANT_WRITE){tls_diagnostic_end(began,waiting,blocked,false,r,saved_errno,false);return false;}
+  else {if(waiting<0)waiting=now;wifi_diag_add(WD_TLS_WANT_EVENTS,1,WD_NOW_SEQUENCE);}
+  if((int32_t)(millis()-deadline)>=0){tls_diagnostic_end(began,waiting,blocked,false,r,saved_errno,true);return false;}
   if(r<=0)vTaskDelay(pdMS_TO_TICKS(5));
- }return true;
+ }tls_diagnostic_end(began,waiting,blocked,true,0,0,false);return true;
 }
 static bool tls_write_all(esp_tls_t *tls,const uint8_t *p,size_t n){
  size_t completed;return tls_write_count(tls,p,n,&completed);
@@ -190,38 +216,77 @@ static bool tls_write_batch(esp_tls_t *tls,const uint8_t *batch,unsigned count){
  // frame is unusable at EOF, so its entire UART payload is discarded once.
  for(unsigned i=completed/20;i<count;i++){
   bridge_packet_t packet;memcpy(packet.bytes,batch+20*i,20);
+  wifi_diag_drop(WD_DROP_TLS,&packet);
   uart_bridge_drop_packet(&packet);
  }
  return false;
 }
 static void discard_network_queue(QueueHandle_t queue){
  bridge_packet_t packet;
- while(xQueueReceive(queue,&packet,0)==pdTRUE)uart_bridge_drop_packet(&packet);
+ while(xQueueReceive(queue,&packet,0)==pdTRUE){wifi_diag_drop(WD_DROP_LAN_RESET,&packet);uart_bridge_drop_packet(&packet);}
+}
+static bool data_socket_options(int fd){
+ int one=1;
+ if(setsockopt(fd,IPPROTO_TCP,TCP_NODELAY,&one,sizeof(one))){
+  wifi_diag_set(WD_SOCKET_LAST_ERRNO,errno,WD_NOW_SEQUENCE);
+  wifi_diag_set(WD_TCP_CLOSE_REASON,WD_CLOSE_OPTIONS,WD_NOW_SEQUENCE);return false;
+ }
+ wifi_diag_set(WD_TCP_NODELAY,1,WD_NOW_SEQUENCE);return true;
+}
+static bool tls_diagnostic_reply(esp_tls_t *tls,uint32_t token){
+ int rssi=INT32_MIN;wifi_phy_mode_t phy;
+ if(esp_wifi_sta_get_rssi(&rssi)!=ESP_OK)rssi=INT32_MIN;
+ wifi_diag_set(WD_WIFI_RSSI,(uint32_t)rssi,WD_NOW_SEQUENCE);
+ wifi_diag_set(WD_WIFI_PHY_MODE,esp_wifi_sta_get_negotiated_phymode(&phy)==ESP_OK?(uint32_t)phy:WD_UNKNOWN,WD_NOW_SEQUENCE);
+ wifi_diag_snapshot_t snapshot;wifi_diag_snapshot(&snapshot);
+ uint8_t frames[(WD_FIELDS+1)*20];
+ size_t n=wifi_diag_frames(&snapshot,token,frames,sizeof(frames));
+ return n&&tls_write_all(tls,frames,n);
 }
 static void serve_client(int fd){
+ if(!data_socket_options(fd)){close(fd);return;}
  unsigned epoch=atomic_load(&network_epoch);struct timeval timeout={.tv_sec=4};setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout));setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&timeout,sizeof(timeout));
  esp_tls_t *tls=esp_tls_init();if(!tls){close(fd);return;}
  esp_tls_cfg_server_t cfg={.servercert_buf=(uint8_t*)network_cert,.servercert_bytes=strlen(network_cert)+1,.serverkey_buf=(uint8_t*)network_key,.serverkey_bytes=strlen(network_key)+1,.tls_handshake_timeout_ms=4000};
- if(esp_tls_server_session_create(&cfg,fd,tls))goto done;
+ int handshake=esp_tls_server_session_create(&cfg,fd,tls);
+ if(handshake){wifi_diag_add(WD_TLS_HANDSHAKE_FAILURES,1,WD_NOW_SEQUENCE);wifi_diag_set(WD_TLS_LAST_ERROR,(uint32_t)handshake,WD_NOW_SEQUENCE);goto done;}
  uint8_t auth[36];unsigned received=0;uint32_t deadline=millis()+4000;
  while(received<sizeof(auth)){int n=esp_tls_conn_read(tls,auth+received,sizeof(auth)-received);if(n<=0)goto done;received+=n;if((int32_t)(millis()-deadline)>=0)goto done;}
  unsigned mismatch=0;for(unsigned i=0;i<32;i++)mismatch|=auth[4+i]^network_token[i];
  if(memcmp(auth,"CAN1",4)||mismatch||!network_wifi_mode()||epoch!=atomic_load(&network_epoch))goto done;
  if(!tls_write_all(tls,(uint8_t*)"OK01",4))goto done;
  fcntl(fd,F_SETFL,O_NONBLOCK);discard_network_queue(raw_out);discard_network_queue(control_out);ble_bridge_reset_session();atomic_store(&linked,true);
- uint8_t incoming[20];unsigned at=0;uint32_t last_rx=millis();
+ uint8_t incoming[20];unsigned at=0,close_reason=WD_CLOSE_MODE;uint32_t last_rx=millis();
  while(network_connected()&&epoch==atomic_load(&network_epoch)){
   // Limit each batch so commands and mode changes are serviced under full CAN load.
   uint8_t batch[20*16];unsigned count=0;bridge_packet_t p;
   while(count<16&&(xQueueReceive(control_out,&p,0)==pdTRUE||xQueueReceive(raw_out,&p,0)==pdTRUE)){memcpy(batch+20*count++,p.bytes,20);}
-  if(count&&!tls_write_batch(tls,batch,count))break;
+  wifi_diag_queue(WD_LAN_RAW_DEPTH,WD_LAN_RAW_HIGH,uxQueueMessagesWaiting(raw_out));
+  wifi_diag_queue(WD_LAN_CONTROL_DEPTH,WD_LAN_CONTROL_HIGH,uxQueueMessagesWaiting(control_out));
+  if(count&&!tls_write_batch(tls,batch,count)){close_reason=WD_CLOSE_WRITE;break;}
   int n=esp_tls_conn_read(tls,incoming+at,20-at);
-  if(n>0){at+=n;last_rx=millis();if(at==20){at=0;if(incoming[0]==1&&incoming[1]==0x7f){if(!tls_write_all(tls,incoming,20))break;continue;}if(epoch!=atomic_load(&network_epoch))break;int status=ble_bridge_command(incoming);bridge_packet_t ack={.bytes={1,18,status,0}};memcpy(ack.bytes+4,incoming+16,4);if(!tls_write_all(tls,ack.bytes,20))break;}}
-  else if(n==0||(n!=ESP_TLS_ERR_SSL_WANT_READ&&n!=ESP_TLS_ERR_SSL_WANT_WRITE))break;
-  if((uint32_t)(millis()-last_rx)>12000)break;
+  if(n>0){at+=n;last_rx=millis();if(at==20){at=0;
+   if(incoming[0]==1&&incoming[1]==0x7f){if(!tls_write_all(tls,incoming,20)){close_reason=WD_CLOSE_WRITE;break;}continue;}
+   if(epoch!=atomic_load(&network_epoch))break;
+   int status;
+   if(wifi_diag_query_valid(incoming)){
+    if(!tls_diagnostic_reply(tls,wire_u32(incoming+16))){close_reason=WD_CLOSE_DIAGNOSTIC;break;}status=0;
+   }else status=ble_bridge_command(incoming);
+   bridge_packet_t ack={.bytes={1,18,status,0}};memcpy(ack.bytes+4,incoming+16,4);
+   if(!tls_write_all(tls,ack.bytes,20)){close_reason=WD_CLOSE_WRITE;break;}
+  }}
+  else if(n==0){close_reason=WD_CLOSE_EOF;break;}
+  else if(n!=ESP_TLS_ERR_SSL_WANT_READ&&n!=ESP_TLS_ERR_SSL_WANT_WRITE){
+   wifi_diag_add(WD_TCP_READ_FAILURES,1,WD_NOW_SEQUENCE);wifi_diag_set(WD_TLS_LAST_ERROR,(uint32_t)n,WD_NOW_SEQUENCE);
+   wifi_diag_set(WD_SOCKET_LAST_ERRNO,errno,WD_NOW_SEQUENCE);close_reason=WD_CLOSE_READ;break;
+  }
+  if((uint32_t)(millis()-last_rx)>12000){close_reason=WD_CLOSE_HEARTBEAT;break;}
   vTaskDelay(pdMS_TO_TICKS(2));
  }
+ wifi_diag_add(WD_TCP_CLOSES,1,WD_NOW_SEQUENCE);wifi_diag_set(WD_TCP_CLOSE_REASON,close_reason,WD_NOW_SEQUENCE);
  atomic_store(&linked,false);discard_network_queue(raw_out);discard_network_queue(control_out);if(epoch==atomic_load(&network_epoch))ble_bridge_reset_session();
+ wifi_diag_queue(WD_LAN_RAW_DEPTH,WD_LAN_RAW_HIGH,uxQueueMessagesWaiting(raw_out));
+ wifi_diag_queue(WD_LAN_CONTROL_DEPTH,WD_LAN_CONTROL_HIGH,uxQueueMessagesWaiting(control_out));
  done:esp_tls_server_session_delete(tls);close(fd);
 }
 static void server_task(void *arg){
@@ -301,6 +366,7 @@ static void manager_task(void *arg){
  }
 }
 void network_init(void){
+ wifi_diag_boot(esp_random()); // Public boot correlation ID, not an authentication secret.
  lock=xSemaphoreCreateMutex();requests=xQueueCreate(2,sizeof(request_t));raw_out=xQueueCreate(128,sizeof(bridge_packet_t));control_out=xQueueCreate(32,sizeof(bridge_packet_t));
  if(!lock||!requests||!raw_out||!control_out)return;
  uint8_t mac[6];esp_read_mac(mac,ESP_MAC_WIFI_STA);hex_bytes(device_id,mac,6);

@@ -13,11 +13,12 @@ int xTaskCreate(void(*f)(void*),const char*n,unsigned s,void*a,unsigned p,TaskHa
 void xTaskNotifyGive(TaskHandle_t h){(void)h;}
 unsigned ulTaskNotifyTake(int c,unsigned w){(void)c;(void)w;return 0;}
 int64_t esp_timer_get_time(void){return 1000000;}
-static bool link=true,dual=false,admit=true,busy,fail_open,fail_write;
+static bool link=true,dual=false,wifi=false,admit=true,busy,fail_open,fail_write;
 static uint32_t peer_epoch;static unsigned baud_set,opens,closes;
 static uint8_t input[512],output[512];static size_t input_count,output_count;
 static bridge_packet_t published[256];static unsigned published_count;
 bool network_dual_mode(void){return dual;}
+bool network_wifi_mode(void){return wifi;}
 bool ble_bridge_connected(void){return link;}
 bool dual_link_connected(void){return link;}
 void dual_link_set_uart(bool u){(void)u;}
@@ -40,6 +41,7 @@ int uart_tx_chars(int p,const char*d,unsigned n){assert(p==1);if(fail_write)retu
 int uart_wait_tx_done(int p,unsigned w){assert(p==1&&w==0);return busy?1:0;}
 static bridge_packet_t command(unsigned len,unsigned token){bridge_packet_t p={.bytes={1,UART_SEND_COMMAND,len}};for(unsigned i=0;i<len&&i<12;i++)p.bytes[4+i]=i?i:0xff;wire_put_u32(p.bytes+16,token);return p;}
 int main(void){
+ wifi_diag_boot(1);wifi_diag_mode(1);wifi=true;
  uart_bridge_init();step();assert(!installed&&!uart_bridge_selected());
  bridge_packet_t c=command(12,10);assert(!uart_bridge_send(c.bytes));
  uart_bridge_configure(true,115200);step();assert(installed&&baud_set==115200&&opens==1);
@@ -66,6 +68,10 @@ int main(void){
  for(unsigned type=UART_BUFFER_FULL;type<=UART_PARITY_ERR;type++){
   e.type=type;xQueueSend(events,&e,0);input_count=7;rx_before=rx_total;step();assert(rx_total==rx_before+7);
  }
+ wifi_diag_snapshot_t diag;wifi_diag_snapshot(&diag);
+ assert(diag.records[WD_FIFO_OVERRUN_EVENTS].value==1&&diag.records[WD_RING_FULL_EVENTS].value==1);
+ assert(diag.records[WD_RING_HIGH_BYTES].value==256&&diag.records[WD_RING_LOST_BYTES].value==WD_UNKNOWN);
+ assert(diag.records[WD_UART_RX_BYTES].value==rx_total);
 #if CONFIG_BLE_TEST_DIAGNOSTICS
  uint32_t d[UD_WORDS];uart_bridge_diagnostics(d);
  assert(d[UD_FIFO_OVF]==1&&d[UD_ERROR_FLUSHES]==0&&d[UD_ERROR_FLUSH_BYTES]==0);

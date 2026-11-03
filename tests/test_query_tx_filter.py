@@ -31,6 +31,7 @@ PRELUDE = r'''
 #include "ack_delivery.h"
 #include "uart_protocol.h"
 #include "ble_diagnostics.h"
+#include "wifi_uart_diag.h"
 typedef struct {
  bridge_packet_t packet;
  uint32_t generation;
@@ -54,6 +55,7 @@ static int home_lock;
 static atomic_bool subscribed;
 static atomic_uint dropped;
 bool ble_bridge_connected(void){return atomic_load(&subscribed);}
+bool network_wifi_mode(void){return false;}
 int64_t esp_timer_get_time(void){return 0;}
 BaseType_t xQueueSend(QueueHandle_t q,const void *p,unsigned wait){
     if(q->count==q->limit)return pdFALSE;
@@ -142,7 +144,7 @@ int main(void){
 with tempfile.TemporaryDirectory(prefix="can-query-filter-") as temporary:
     harness = Path(temporary) / "filter.c"
     binary = Path(temporary) / "filter"
-    harness.write_text(PRELUDE + function("static uint32_t packet_generation(") + function("static unsigned packet_class(") + function("static unsigned packet_bytes(") + function("static bool enqueue_packet(") + function("static bool home_redundant(") + "\n" + function("void ble_bridge_publish(") + TEST)
+    harness.write_text(PRELUDE + function("static uint32_t packet_generation(") + function("static unsigned packet_class(") + function("static unsigned packet_bytes(") + function("static void wifi_note_queue(") + function("static bool enqueue_packet(") + function("static bool home_redundant(") + "\n" + function("void ble_bridge_publish(") + TEST)
     for enabled in (0, 1):
-        subprocess.run(["cc", "-DCONFIG_BLE_TEST_DIAGNOSTICS="+str(enabled), "-std=gnu11", "-O2", "-I" + str(ROOT / "tests/stubs"), "-I" + str(ROOT / "firmware/main"), str(harness), str(ROOT / "firmware/main/home_status.c"), str(ROOT / "firmware/main/ack_delivery.c"), "-o", str(binary)], check=True)
+        subprocess.run(["cc", "-DCONFIG_BLE_TEST_DIAGNOSTICS="+str(enabled), "-std=gnu11", "-O2", "-I" + str(ROOT / "tests/stubs"), "-I" + str(ROOT / "firmware/main"), str(harness), str(ROOT / "firmware/main/home_status.c"), str(ROOT / "firmware/main/ack_delivery.c"), str(ROOT / "firmware/main/wifi_uart_diag.c"), "-o", str(binary)], check=True)
         subprocess.run([str(binary)], check=True)

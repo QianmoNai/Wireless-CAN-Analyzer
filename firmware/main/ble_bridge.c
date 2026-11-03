@@ -2,6 +2,7 @@
 #include "network_link.h"
 #include "usb_link.h"
 #include "uart_bridge.h"
+#include "wifi_uart_diag.h"
 #include "device_settings.h"
 #include "esp_random.h"
 void ble_store_config_init(void);
@@ -97,6 +98,12 @@ static unsigned packet_class(const bridge_packet_t *p){
 }
 static unsigned packet_bytes(const bridge_packet_t *p){return p->bytes[1]==19?p->bytes[2]:0;}
 #endif
+static void wifi_note_queue(QueueHandle_t queue){
+    if(!network_wifi_mode())return;
+    unsigned depth=queue==notify_queue?WD_NOTIFY_RAW_DEPTH:
+        queue==control_notify_queue?WD_NOTIFY_CONTROL_DEPTH:WD_NOTIFY_ACK_DEPTH;
+    wifi_diag_queue(depth,depth+1,uxQueueMessagesWaiting(queue));
+}
 static bool enqueue_packet(QueueHandle_t queue,const bridge_packet_t *p){
     notify_item_t item={.packet=*p,.generation=packet_generation(p)};
 #if CONFIG_BLE_TEST_DIAGNOSTICS
@@ -104,6 +111,8 @@ static bool enqueue_packet(QueueHandle_t queue,const bridge_packet_t *p){
     unsigned cls=packet_class(p);
 #endif
     bool ok=xQueueSend(queue,&item,0)==pdTRUE;
+    wifi_note_queue(queue);
+    if(!ok)wifi_diag_drop(WD_DROP_NOTIFY_FULL,p);
     if(ok){bd_add(bd_index(cls,BD_ENQUEUED),1);bd_max(bd_index(cls,BD_HIGH_WATER),uxQueueMessagesWaiting(queue));}
     else{bd_add(bd_index(cls,BD_FULL_PACKETS),1);bd_add(bd_index(cls,BD_FULL_BYTES),packet_bytes(p));}
     if(ok)wake_notify();
@@ -111,6 +120,7 @@ static bool enqueue_packet(QueueHandle_t queue,const bridge_packet_t *p){
 }
 static bool dequeue_item(QueueHandle_t queue,notify_item_t *item,TickType_t wait){
     if(xQueueReceive(queue,item,wait)!=pdTRUE)return false;
+    wifi_note_queue(queue);
     bd_max(bd_index(packet_class(&item->packet),BD_MAX_AGE_MS),(esp_timer_get_time()-item->enqueued_us)/1000);
     return true;
 }
@@ -125,6 +135,7 @@ static void discard_raw_queue(void){
     bridge_packet_t packet;
     while(dequeue_packet(notify_queue,&packet,0)){
         bd_add(bd_index(BD_RAW,BD_RESET_BYTES),packet_bytes(&packet));
+        wifi_diag_drop(WD_DROP_NOTIFY_RESET,&packet);
         uart_bridge_drop_packet(&packet);
     }
 }
@@ -550,6 +561,8 @@ static void notify_delay(void *context, unsigned milliseconds)
 static void deliver_packet(const bridge_packet_t *packet,bool ack,bool control,uint32_t generation)
 {
     if(generation!=packet_generation(packet)||!packet_connected(packet) || suppress_packet(packet)){
+        wifi_diag_drop(generation!=packet_generation(packet)?WD_DROP_GENERATION:
+            !packet_connected(packet)?WD_DROP_INACTIVE:WD_DROP_SUPPRESSED,packet);
         bd_add(bd_index(packet_class(packet),BD_OTHER_BYTES),packet_bytes(packet));
         uart_bridge_drop_packet(packet);
         return;
@@ -569,6 +582,7 @@ static void deliver_packet(const bridge_packet_t *packet,bool ack,bool control,u
         if(retry_control)notify_delay(&generation,10);
     }
     if(!delivered){
+        wifi_diag_drop(WD_DROP_ROUTE,packet);
         bd_add(bd_index(packet_class(packet),notify_failure),packet_bytes(packet));
         bd_add(bd_index(packet_class(packet),BD_FAILED_PACKETS),1);
         atomic_fetch_add(&dropped,1);
@@ -754,7 +768,9 @@ void ble_bridge_init(QueueHandle_t commands, QueueHandle_t queries)
 }
 
 bool ble_bridge_uart_publish(const bridge_packet_t *packet) {
-    if(!uart_bridge_selected() || !ble_bridge_connected() || !notify_queue)return false;
+    if(!uart_bridge_selected() || !ble_bridge_connected() || !notify_queue){
+        wifi_diag_drop(WD_DROP_INACTIVE,packet);return false;
+    }
     if(enqueue_packet(notify_queue,packet))return true;
     atomic_fetch_add(&dropped,1);return false;
 }

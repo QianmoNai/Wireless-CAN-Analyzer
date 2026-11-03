@@ -1,6 +1,7 @@
 #include "uart_bridge.h"
 #include "dual_link.h"
 #include "network_link.h"
+#include "wifi_uart_diag.h"
 #include <stdatomic.h>
 #include <string.h>
 #include "sdkconfig.h"
@@ -15,6 +16,11 @@ typedef struct { bridge_packet_t packet; uint32_t generation,config; } uart_comm
 static QueueHandle_t commands,events;
 static atomic_uint config_request=115200u<<1, connection_generation;
 static atomic_uint rx_total,tx_total,drop_total,error_total;
+static void count_drop(unsigned n,unsigned cause){
+    atomic_fetch_add(&drop_total,n);
+    wifi_diag_add(WD_UART_DROP_BYTES,n,WD_NOW_SEQUENCE);
+    if(cause<WD_FIELDS)wifi_diag_add(cause,n,WD_NOW_SEQUENCE);
+}
 #if CONFIG_BLE_TEST_DIAGNOSTICS
 static atomic_uint ud[UD_WORDS];
 #define ud_add(word,n) atomic_fetch_add(&ud[word],n)
@@ -35,7 +41,7 @@ static void flush_rx(bool config_change) {
     ud_add(UD_BUFFER_QUERY_ERRORS,rc!=ESP_OK);
     ud_add(config_change?UD_CONFIG_FLUSHES:UD_ERROR_FLUSHES,1);
     ud_add(config_change?UD_CONFIG_FLUSH_BYTES:UD_ERROR_FLUSH_BYTES,buffered);
-    atomic_fetch_add(&drop_total,buffered);
+    count_drop(buffered,WD_CONFIG_FLUSH_BYTES);
     rc=uart_flush_input(PORT);
     ud_add(UD_FLUSH_ERRORS,rc!=ESP_OK);
     (void)rc;
@@ -54,11 +60,11 @@ static void result(const bridge_packet_t *command,unsigned status) {
     ble_bridge_publish(&p);
 }
 static void discard_pending(bool reply) {
-    if(tx_size){ud_add(UD_TX_DISCARD_BYTES,tx_size-tx_offset);atomic_fetch_add(&drop_total,tx_size-tx_offset);if(tx_app&&reply)result(&tx_command,3);}
+    if(tx_size){ud_add(UD_TX_DISCARD_BYTES,tx_size-tx_offset);count_drop(tx_size-tx_offset,WD_TX_DISCARD_BYTES);if(tx_app&&reply)result(&tx_command,3);}
     tx_size=tx_offset=0;tx_app=false;
     uart_command_t command;
     while(xQueueReceive(commands,&command,0)==pdTRUE){
-        ud_add(UD_TX_DISCARD_BYTES,command.packet.bytes[2]);atomic_fetch_add(&drop_total,command.packet.bytes[2]);
+        ud_add(UD_TX_DISCARD_BYTES,command.packet.bytes[2]);count_drop(command.packet.bytes[2],WD_TX_DISCARD_BYTES);
         if(reply && command.generation==atomic_load(&connection_generation))result(&command.packet,3);
     }
 }
@@ -90,12 +96,15 @@ static void step(void) {
         applied_config=config;applied_generation=epoch;peer_generation=peer;
     }
     if(!(config&1) || !installed)return;
+    size_t buffered=0;
+    if(network_wifi_mode()&&uart_get_buffered_data_len(PORT,&buffered)==ESP_OK)
+        wifi_diag_max(WD_RING_HIGH_BYTES,buffered); // Sampled readable ring, not ISR/FIFO/stash occupancy.
     uart_event_t event;
     ud_event_depth();
     for(unsigned i=0;i<32&&xQueueReceive(events,&event,0)==pdTRUE;i++){
         if(event.type==UART_DATA){ud_add(UD_DATA_EVENTS,1);ud_add(UD_DATA_EVENT_BYTES,event.size);}
-        if(event.type==UART_FIFO_OVF)ud_add(UD_FIFO_OVF,1);
-        if(event.type==UART_BUFFER_FULL)ud_add(UD_BUFFER_FULL,1);
+        if(event.type==UART_FIFO_OVF){ud_add(UD_FIFO_OVF,1);wifi_diag_add(WD_FIFO_OVERRUN_EVENTS,1,WD_NOW_SEQUENCE);}
+        if(event.type==UART_BUFFER_FULL){ud_add(UD_BUFFER_FULL,1);wifi_diag_add(WD_RING_FULL_EVENTS,1,WD_NOW_SEQUENCE);}
         if(event.type==UART_FRAME_ERR)ud_add(UD_FRAME_ERR,1);
         if(event.type==UART_PARITY_ERR)ud_add(UD_PARITY_ERR,1);
         if(event.type==UART_FIFO_OVF || event.type==UART_BUFFER_FULL || event.type==UART_FRAME_ERR || event.type==UART_PARITY_ERR){
@@ -113,16 +122,18 @@ static void step(void) {
     for(unsigned i=0;i<64;i++){
         int n=uart_read_bytes(PORT,data,dual?sizeof(data):UART_WIRE_BYTES,0);
         ud_add(UD_READ_CALLS,1);
-        if(n<=0){ud_add(UD_READ_ERRORS,n<0);break;}
+        if(n<=0){ud_add(UD_READ_ERRORS,n<0);if(n<0)wifi_diag_add(WD_UART_READ_ERRORS,1,WD_NOW_SEQUENCE);break;}
         ud_add(UD_READ_BYTES,n);
         atomic_fetch_add(&rx_total,n);
-        if(!connected){ud_add(UD_DISCONNECTED_BYTES,n);atomic_fetch_add(&drop_total,n);continue;}
-        if(dual){ud_add(UD_DUAL_BYTES,n);if(!dual_link_uart_rx(data,n))atomic_fetch_add(&drop_total,n);}
+        wifi_diag_add(WD_UART_RX_BYTES,n,WD_NOW_SEQUENCE);
+        if(!connected){ud_add(UD_DISCONNECTED_BYTES,n);count_drop(n,WD_DISCONNECTED_BYTES);continue;}
+        if(dual){ud_add(UD_DUAL_BYTES,n);if(!dual_link_uart_rx(data,n))count_drop(n,WD_FIELDS);}
         else {
             bridge_packet_t p={.bytes={1,UART_RX_EVENT,n,0}};
             memcpy(p.bytes+4,data,n);wire_put_u32(p.bytes+16,++rx_sequence);
+            wifi_diag_set(WD_UART_SEQUENCE,rx_sequence,rx_sequence);
             ud_add(UD_BLE_ATTEMPT_BYTES,n);
-            if(!ble_bridge_uart_publish(&p)){ud_add(UD_BLE_REJECT_BYTES,n);atomic_fetch_add(&drop_total,n);}
+            if(!ble_bridge_uart_publish(&p)){ud_add(UD_BLE_REJECT_BYTES,n);count_drop(n,WD_FIELDS);}
             else ud_add(UD_BLE_ACCEPT_BYTES,n);
         }
     }
@@ -132,7 +143,7 @@ static void step(void) {
         else {
             uart_command_t command;
             if(xQueueReceive(commands,&command,0)==pdTRUE){
-                if(command.generation!=epoch || command.config!=config){ud_add(UD_TX_DISCARD_BYTES,command.packet.bytes[2]);atomic_fetch_add(&drop_total,command.packet.bytes[2]);return;}
+                if(command.generation!=epoch || command.config!=config){ud_add(UD_TX_DISCARD_BYTES,command.packet.bytes[2]);count_drop(command.packet.bytes[2],WD_TX_DISCARD_BYTES);return;}
                 tx_command=command.packet;tx_size=command.packet.bytes[2];memcpy(tx_data,command.packet.bytes+4,tx_size);tx_app=true;
             }
         }
@@ -145,7 +156,7 @@ static void step(void) {
             int n=uart_tx_chars(PORT,(const char*)tx_data+tx_offset,tx_size-tx_offset);
             if(n<0){
                 ud_add(UD_TX_DISCARD_BYTES,tx_size-tx_offset);
-                atomic_fetch_add(&error_total,1);atomic_fetch_add(&drop_total,tx_size-tx_offset);
+                atomic_fetch_add(&error_total,1);count_drop(tx_size-tx_offset,WD_TX_DISCARD_BYTES);
                 if(tx_app)result(&tx_command,2);
                 tx_size=tx_offset=0;tx_app=false;return;
             }
@@ -191,6 +202,7 @@ void uart_bridge_drop_packet(const bridge_packet_t *p){
        p->bytes[2]<=UART_WIRE_BYTES && !p->bytes[3]){
         ud_add(UD_DOWNSTREAM_DROP_BYTES,p->bytes[2]);
         atomic_fetch_add(&drop_total,p->bytes[2]);
+        wifi_diag_drop(WD_UART_DROP_BYTES,p);
     }
 }
 void uart_bridge_stats(uart_bridge_stats_t *s){

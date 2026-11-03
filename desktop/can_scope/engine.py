@@ -52,9 +52,16 @@ class Channel:
         self.closed = False
         self.busy = False
         self.current = None
+        self.wifi_diagnostics = None
+
+    def enable_wifi_diagnostics(self, log, slot=1):
+        from .wifi_diagnostics import WifiDiagnostics
+        self.wifi_diagnostics = WifiDiagnostics(self, log, slot)
 
     def start(self):
         self.tasks = [asyncio.create_task(self.owner()), asyncio.create_task(self.flush()), asyncio.create_task(self.maintenance())]
+        if self.wifi_diagnostics:
+            self.tasks.append(asyncio.create_task(self.wifi_diagnostics.run()))
 
     def next_token(self):
         self.token = (self.token + 1) & 0x7fffffff
@@ -159,7 +166,9 @@ class Channel:
             self.waiters.pop((kind, key), None)
 
     async def handle(self, name, args):
-        if name == 'connectionMode':
+        if name == 'wifiDiagnostics' and self.wifi_diagnostics:
+            await self.wifi_diagnostics.poll()
+        elif name == 'connectionMode':
             if args[0] not in ('ble', 'wifi', 'usb'):
                 raise ValueError('无效连接方式')
             await self.disconnect('已切换连接方式')
@@ -416,6 +425,9 @@ class Channel:
         if len(p) != 20 or p[0] != 1:
             return
         kind = p[1]
+        if self.wifi_diagnostics and self.mode == 'wifi':
+            if self.wifi_diagnostics.receive(p):return
+        if kind == 26:return # Diagnostic extension never enters the GUI/data queues.
         waiter = self.waiters.get((kind, u32(p, 16)))
         if waiter and not waiter.done():
             waiter.set_result(p)
@@ -527,6 +539,8 @@ class Channel:
                     self.emit('manualResult', dict(token=token, status='等待超时；发送结果未知，不自动重发'))
 
     async def disconnect(self, message='已断开连接'):
+        if self.wifi_diagnostics and self.ready and self.mode == 'wifi':
+            self.wifi_diagnostics.disconnected()
         if self.uart_task and not self.uart_task.done():
             self.uart_task.cancel()
             await asyncio.gather(self.uart_task, return_exceptions=True)

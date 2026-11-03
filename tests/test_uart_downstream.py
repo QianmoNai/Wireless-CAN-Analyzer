@@ -31,6 +31,8 @@ PRELUDE = r'''
 #include "notify_resource.h"
 #include "ack_delivery.h"
 #include "ble_diagnostics.h"
+#include "wifi_uart_diag.h"
+#include <errno.h>
 #define BLE_EVENT_SCHEDULER_ENABLED 0
 struct queue {unsigned count,limit;size_t size;uint8_t *data;};
 static struct queue *allocated[8];static unsigned allocated_count;
@@ -81,17 +83,18 @@ static atomic_uint notify_generation,ble_generation;
 static void wake_notify(void){}
 
 static unsigned notify_failure;
-static QueueHandle_t notify_queue;
+static QueueHandle_t notify_queue,control_notify_queue;
 bool uart_bridge_selected(void){return true;}
 typedef int esp_tls_t;
 #define ESP_TLS_ERR_SSL_WANT_READ (-2)
 #define ESP_TLS_ERR_SSL_WANT_WRITE (-3)
-static int write_results[8];static unsigned write_at;
-int esp_tls_conn_write(esp_tls_t*t,const uint8_t*p,size_t n){(void)t;(void)p;int r=write_results[write_at++];return r==999?(int)n:r;}
+static int write_results[8],forced_write_rc;static unsigned write_at;
+int esp_tls_conn_write(esp_tls_t*t,const uint8_t*p,size_t n){(void)t;(void)p;if(forced_write_rc)return forced_write_rc;int r=write_results[write_at++];return r==999?(int)n:r;}
 '''
 
 TEST = r'''
 int main(void){
+ wifi_diag_boot(1);wifi_diag_mode(1);
  usb_link_init();uint8_t hello[20]={1,USB_HELLO};memcpy(hello+4,"CANUSB1",7);
  assert(incoming(123,hello));
  bridge_packet_t raw={.bytes={1,19,12}},rejected={.bytes={1,19,7}};
@@ -148,6 +151,21 @@ int main(void){
  QueueHandle_t lan=xQueueCreate(2,sizeof(bridge_packet_t));xQueueSend(lan,&raw,0);xQueueSend(lan,&ack,0);
  before=drop_total;discard_network_queue(lan);assert(drop_total==before+12);
  discard_network_queue(lan);assert(drop_total==before+12);
+ wifi_diag_snapshot_t d0,d1;wifi_diag_snapshot(&d0);
+ write_at=0;write_results[0]=ESP_TLS_ERR_SSL_WANT_WRITE;write_results[1]=ESP_TLS_ERR_SSL_WANT_READ;write_results[2]=999;
+ assert(tls_write_batch(NULL,batch,3));wifi_diag_snapshot(&d1);
+ assert(d1.records[WD_TLS_WANT_EVENTS].value-d0.records[WD_TLS_WANT_EVENTS].value==2);
+ assert(d1.records[WD_TLS_BLOCK_US_TOTAL].value-d0.records[WD_TLS_BLOCK_US_TOTAL].value==10000);
+ assert(d1.records[WD_TLS_BLOCK_US_MAX].value>=10000);
+ // Timed-out partial ownership is unchanged; diagnostic observations do not
+ // manufacture another drop, and clearing empty queues cannot recount it.
+ wifi_diag_snapshot(&d0);before=drop_total;forced_write_rc=ESP_TLS_ERR_SSL_WANT_WRITE;
+ assert(!tls_write_batch(NULL,batch,3));forced_write_rc=0;
+ wifi_diag_snapshot(&d1);
+ assert(d1.records[WD_TLS_SEND_TIMEOUTS].value==d0.records[WD_TLS_SEND_TIMEOUTS].value+1);
+ assert(d1.records[WD_TLS_SEND_FAILURES].value==d0.records[WD_TLS_SEND_FAILURES].value+1);
+ assert(d1.records[WD_DROP_TLS].value-d0.records[WD_DROP_TLS].value==19);
+ assert(drop_total==before+19);
  for(unsigned i=0;i<allocated_count;i++){free(allocated[i]->data);free(allocated[i]);}
  puts("PASS: UART downstream exact payload bytes, real USB queue saturation, no rejection/reset double count, BLE/LAN failure, ACK exclusion and LAN partial batch ownership.");
 }
@@ -158,14 +176,14 @@ with tempfile.TemporaryDirectory(prefix="can-uart-downstream-") as temporary:
     binary = Path(temporary) / "downstream"
     source = PRELUDE + function("uart_bridge.c", "void uart_bridge_drop_packet(")
     source += '#include "usb_link.c"\n' + PLATFORM
-    for marker in ("static uint32_t packet_generation(", "static bool enqueue_packet(", "static bool dequeue_item(", "static bool dequeue_packet(", "static bool packet_connected(", "static bool notify_connected(", "static bool notify_send(", "static void notify_delay(",
+    for marker in ("static uint32_t packet_generation(", "static void wifi_note_queue(", "static bool enqueue_packet(", "static bool dequeue_item(", "static bool dequeue_packet(", "static bool packet_connected(", "static bool notify_connected(", "static bool notify_send(", "static void notify_delay(",
                    "static void deliver_packet(", "static void discard_raw_queue(", "bool ble_bridge_uart_publish("):
         source += function("ble_bridge.c", marker)
-    for marker in ("static bool tls_write_count(", "static bool tls_write_all(",
+    for marker in ("static void tls_diagnostic_end(", "static bool tls_write_count(", "static bool tls_write_all(",
                    "static bool tls_write_batch(", "static void discard_network_queue("):
         source += function("network_link.c", marker)
     harness.write_text(source + TEST)
     subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter", "-I" + str(ROOT / "tests/usb_stubs"),
                     "-I" + str(ROOT / "firmware/main"), str(harness),
-                    str(ROOT / "firmware/main/ack_delivery.c"), "-o", str(binary)], check=True)
+                    str(ROOT / "firmware/main/ack_delivery.c"),str(ROOT / "firmware/main/wifi_uart_diag.c"), "-o", str(binary)], check=True)
     subprocess.run([str(binary)], check=True)

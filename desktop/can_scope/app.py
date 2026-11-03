@@ -30,6 +30,7 @@ class Runtime(QObject):
     def __init__(self, folder):
         super().__init__()
         self.folder = folder
+        self.diagnostic_log = None
         self.channels = {}
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(target=self.loop.run_forever, name='CAN transports', daemon=True)
@@ -45,6 +46,8 @@ class Runtime(QObject):
             save_connection(path, value)
         async def create():
             channel = Channel(lambda kind, data: self.message.emit(slot, kind, json.dumps(data, ensure_ascii=False)), saved, save)
+            if self.diagnostic_log is not None:
+                channel.enable_wifi_diagnostics(self.diagnostic_log, slot)
             self.channels[slot] = channel
             channel.start()
         asyncio.run_coroutine_threadsafe(create(), self.loop).result(3)
@@ -120,7 +123,7 @@ def script(name, source, point):
 
 
 class Window(QMainWindow):
-    def __init__(self, folder, smoke=False):
+    def __init__(self, folder, smoke=False, diagnostic_log=None):
         super().__init__()
         self.setWindowTitle(f'CAN Scope Desktop {__version__} · Linux / Windows')
         self.resize(1320, 920)
@@ -132,6 +135,7 @@ class Window(QMainWindow):
         self.profiles = []
         self.folder = folder
         self.runtime = Runtime(folder)
+        self.runtime.diagnostic_log = diagnostic_log
         self.runtime.message.connect(self.deliver)
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
@@ -255,6 +259,7 @@ def main():
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--smoke', type=Path, help='offline UI smoke test; writes PNG and report')
+    parser.add_argument('--wifi-diag-log', type=Path, help='Linux only: private numeric-only per-second UART/Wi-Fi diagnostics JSONL')
     options = parser.parse_args()
     if options.smoke and sys.stderr is not None:
         import faulthandler
@@ -268,7 +273,13 @@ def main():
     folder.mkdir(parents=True, exist_ok=True)
     if os.name != 'nt':
         folder.chmod(0o700)
-    window = Window(folder, bool(options.smoke))
+    diagnostic_log = None
+    if options.wifi_diag_log:
+        if sys.platform != 'linux' or options.smoke:
+            parser.error('--wifi-diag-log 仅用于 Linux 真实 Wi-Fi 会话')
+        from .wifi_diagnostics import NumericLog
+        diagnostic_log = NumericLog(options.wifi_diag_log)
+    window = Window(folder, bool(options.smoke), diagnostic_log)
     window.show()
     if options.smoke:
         options.smoke.parent.mkdir(parents=True, exist_ok=True)
@@ -287,4 +298,6 @@ def main():
             delete(profile)
     if temp:
         temp.cleanup()
+    if diagnostic_log:
+        diagnostic_log.close()
     return code
