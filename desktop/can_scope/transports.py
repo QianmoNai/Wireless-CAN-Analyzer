@@ -351,6 +351,9 @@ async def discover(identity, found, *, broadcast='255.255.255.255', timeout=3):
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         sock.bind(('', 0))
         await loop.sock_sendto(sock, b'CAN_SCOPE_DISCOVER_1', (ipv4(broadcast), PORT))
+        # Existing app images incorrectly require 19 bytes, omitting the final
+        # version digit. Keep the canonical request and probe that legacy form.
+        await loop.sock_sendto(sock, b'CAN_SCOPE_DISCOVER_', (ipv4(broadcast), PORT))
         deadline = loop.time() + timeout
         while loop.time() < deadline:
             try:

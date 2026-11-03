@@ -367,7 +367,10 @@ class ProvisionTests(unittest.IsolatedAsyncioTestCase):
              patch.object(loop, 'sock_recvfrom', new=AsyncMock(side_effect=responses)):
             rows = []
             await discover(cli.TARGET, rows.append, broadcast='192.168.1.255')
-            send.assert_awaited_once_with(sock, b'CAN_SCOPE_DISCOVER_1', ('192.168.1.255', 32323))
+            self.assertEqual(send.await_count, 2)
+            self.assertEqual([c.args for c in send.await_args_list], [
+                (sock, b'CAN_SCOPE_DISCOVER_1', ('192.168.1.255', 32323)),
+                (sock, b'CAN_SCOPE_DISCOVER_', ('192.168.1.255', 32323))])
             self.assertEqual([row['address'] for row in rows], ['wifi:192.168.1.42'])
             sock.bind.assert_called_once_with(('', 0))
 
