@@ -30,6 +30,7 @@ PRELUDE = r'''
 #include "uart_bridge.h"
 #include "notify_resource.h"
 #include "ack_delivery.h"
+#include "ble_diagnostics.h"
 struct queue {unsigned count,limit;size_t size;uint8_t *data;};
 static struct queue *allocated[8];static unsigned allocated_count;
 QueueHandle_t xQueueCreate(unsigned n,size_t size){struct queue*q=calloc(1,sizeof(*q));q->limit=n;q->size=size;q->data=calloc(n,size);allocated[allocated_count++]=q;return q;}
@@ -70,6 +71,9 @@ static unsigned notify_pool_free(void*c,void*b){(void)c;(void)b;return 0;}
 static void notify_release(void*c,void*b){(void)c;(void)b;}
 static bool notify_submit(void*c,void*b){(void)c;(void)b;return sink_success;}
 bool bridge_notify_with_reserve(const bridge_packet_t*p,const bridge_notify_resource_ops_t*o,void*c){(void)p;(void)o;(void)c;return sink_success;}
+typedef unsigned TickType_t;
+typedef struct {bridge_packet_t packet;} notify_item_t;
+static unsigned notify_failure;
 static QueueHandle_t notify_queue;
 bool uart_bridge_selected(void){return true;}
 typedef int esp_tls_t;
@@ -132,7 +136,7 @@ with tempfile.TemporaryDirectory(prefix="can-uart-downstream-") as temporary:
     binary = Path(temporary) / "downstream"
     source = PRELUDE + function("uart_bridge.c", "void uart_bridge_drop_packet(")
     source += '#include "usb_link.c"\n' + PLATFORM
-    for marker in ("static bool notify_connected(", "static bool notify_send(", "static void notify_delay(",
+    for marker in ("static bool enqueue_packet(", "static bool dequeue_packet(", "static bool notify_connected(", "static bool notify_send(", "static void notify_delay(",
                    "static void deliver_packet(", "static void discard_raw_queue(", "bool ble_bridge_uart_publish("):
         source += function("ble_bridge.c", marker)
     for marker in ("static bool tls_write_count(", "static bool tls_write_all(",

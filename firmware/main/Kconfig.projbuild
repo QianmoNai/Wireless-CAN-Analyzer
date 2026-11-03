@@ -1,3 +1,12 @@
+menu "BLE test instrumentation"
+config BLE_TEST_DIAGNOSTICS
+    bool "Read-only bounded BLE diagnostic characteristic (test builds only)"
+    default n
+    help
+        Adds c0de0005 and queue timestamps/counters. Does not change the
+        fixed 20-byte v1 protocol. Disable for normal production builds.
+endmenu
+
 menu "CAN analyzer status LED"
 config CAN_STATUS_LED
     bool "GPIO3 communication indicator (active high)"

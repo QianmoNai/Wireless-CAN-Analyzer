@@ -30,6 +30,13 @@ PRELUDE = r'''
 #include "home_status.h"
 #include "ack_delivery.h"
 #include "uart_protocol.h"
+#include "ble_diagnostics.h"
+typedef struct {
+ bridge_packet_t packet;
+#if CONFIG_BLE_TEST_DIAGNOSTICS
+ int64_t enqueued_us;
+#endif
+} notify_item_t;
 static bool selected_uart;
 bool uart_bridge_selected(void){return selected_uart;}
 void uart_bridge_drop_packet(const bridge_packet_t *p){(void)p;}
@@ -48,6 +55,7 @@ BaseType_t xQueueSend(QueueHandle_t q,const void *p,unsigned wait){
     if(q->count==q->limit)return pdFALSE;
     q->count++;q->last=*(const bridge_packet_t*)p;return pdTRUE;
 }
+unsigned uxQueueMessagesWaiting(QueueHandle_t q){return q->count;}
 static void reset(unsigned mode){
     memset(&home_status,0,sizeof(home_status));home_status.mode=mode;
     raw.count=control.count=acks.count=0;
@@ -113,6 +121,16 @@ int main(void){
     assert(control.count==1&&acks.count==1&&raw.count==2&&atomic_load(&dropped)==98);
     reset(0);atomic_store(&subscribed,false);wire_put_u32(query.bytes+16,0);
     ble_bridge_publish(&query);assert(raw.count==0&&atomic_load(&dropped)==0);
+#if CONFIG_BLE_TEST_DIAGNOSTICS
+    assert(atomic_load(&bd[bd_index(BD_RAW,BD_HIGH_WATER)])==4);
+    assert(atomic_load(&bd[bd_index(BD_RAW,BD_FULL_PACKETS)])==98);
+    reset(0);selected_uart=true;
+    for(unsigned i=0;i<3;i++)ble_bridge_publish(&serial);
+    assert(atomic_load(&bd[bd_index(BD_RAW,BD_FULL_BYTES)])==3);
+    assert(sizeof(notify_item_t)>sizeof(bridge_packet_t));
+#else
+    assert(sizeof(notify_item_t)==sizeof(bridge_packet_t));
+#endif
     puts("PASS: real BLE publisher/filter, tokenless query TX raw routing, mode0-only telemetry, preserved token-bearing control/management ACK routing and raw saturation isolation.");
 }
 '''
@@ -120,6 +138,7 @@ int main(void){
 with tempfile.TemporaryDirectory(prefix="can-query-filter-") as temporary:
     harness = Path(temporary) / "filter.c"
     binary = Path(temporary) / "filter"
-    harness.write_text(PRELUDE + function("static bool home_redundant(") + "\n" + function("void ble_bridge_publish(") + TEST)
-    subprocess.run(["cc", "-std=gnu11", "-O2", "-I" + str(ROOT / "tests/stubs"), "-I" + str(ROOT / "firmware/main"), str(harness), str(ROOT / "firmware/main/home_status.c"), str(ROOT / "firmware/main/ack_delivery.c"), "-o", str(binary)], check=True)
-    subprocess.run([str(binary)], check=True)
+    harness.write_text(PRELUDE + function("static unsigned packet_class(") + function("static unsigned packet_bytes(") + function("static bool enqueue_packet(") + function("static bool home_redundant(") + "\n" + function("void ble_bridge_publish(") + TEST)
+    for enabled in (0, 1):
+        subprocess.run(["cc", "-DCONFIG_BLE_TEST_DIAGNOSTICS="+str(enabled), "-std=gnu11", "-O2", "-I" + str(ROOT / "tests/stubs"), "-I" + str(ROOT / "firmware/main"), str(harness), str(ROOT / "firmware/main/home_status.c"), str(ROOT / "firmware/main/ack_delivery.c"), "-o", str(binary)], check=True)
+        subprocess.run([str(binary)], check=True)
