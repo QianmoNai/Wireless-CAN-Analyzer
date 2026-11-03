@@ -13,33 +13,60 @@ window.uartMode=false;
  window.uartRefreshControls=controls;
  function stop(message){run++;if(pending){clearTimeout(pending.timer);const reject=pending.reject;pending=null;reject(Error(message));}sending=false;controls();}
  function stats(){ $('uartStats').textContent=reported?`${baud} baud · 8N1 · RX ${totalRx} 字节 · TX ${totalTx} 字节`:'等待设备状态';$('uartLoss').textContent=`设备丢弃 ${deviceDrops} 字节 · App 检测到缺失 ${lost} 个数据包 · 接收区保留最近 64 KiB`; }
- // Keep small layout blocks: a single constantly replaced 192 KiB HEX
- // paragraph is expensive for WebEngine's layout and compositor.
- const hexBytes=Array.from({length:256},(_,i)=>i.toString(16).padStart(2,'0').toUpperCase());
- const log=$('uartLog');let rendered=[];
+ // Absolute byte blocks keep their DOM nodes when the 64 KiB window slides.
+ // Only the trimmed first block, unfinished last block and new blocks change.
+ const blockBytes=336,hexBytes=Array.from({length:256},(_,i)=>i.toString(16).padStart(2,'0').toUpperCase());
+ const log=$('uartLog');let rendered=new Map(),renderFormat=null,endOffset=0;
+ const textDecoder=new TextDecoder('utf-8',{ignoreBOM:true}),firstDecoder=new TextDecoder();
+ function resetLog(){endOffset=0;renderFormat=null;}
+ function byteAt(offset){return buffer[(head-count+offset-(endOffset-count)+buffer.length)%buffer.length];}
+ // Move an interior boundary before a valid, incomplete UTF-8 prefix. Invalid
+ // prefixes stay in this block, matching TextDecoder's replacement semantics.
+ function textBoundary(end,start){
+  for(let pos=end-1;pos>=Math.max(start,end-3);pos--){
+   const lead=byteAt(pos),length=lead>=0xc2&&lead<=0xdf?2:lead>=0xe0&&lead<=0xef?3:lead>=0xf0&&lead<=0xf4?4:0;
+   if(!length||pos+length<=end)continue;
+   let valid=true;
+   for(let i=pos+1;i<end;i++){
+    const b=byteAt(i);
+    if(b<0x80||b>0xbf||(i===pos+1&&((lead===0xe0&&b<0xa0)||(lead===0xed&&b>0x9f)||(lead===0xf0&&b<0x90)||(lead===0xf4&&b>0x8f)))){valid=false;break;}
+   }
+   if(valid)return pos;
+  }
+  return end;
+ }
  function render(){
   if(!changed||paused||panel.hidden||document.hidden)return;
   changed=false;stats();
-  const bytes=new Uint8Array(count),start=(head-count+buffer.length)%buffer.length;
-  const first=Math.min(count,buffer.length-start);
-  bytes.set(buffer.subarray(start,start+first));bytes.set(buffer.subarray(0,count-first),first);
-  let text='等待串口数据…';
-  if(count)text=$('uartDisplay').value==='text'?new TextDecoder().decode(bytes):Array.from(bytes,b=>hexBytes[b]).join(' ');
-  const parts=[];
-  for(let offset=0;offset<text.length;){
-   let end=Math.min(offset+1023,text.length);
-   // Do not split a UTF-16 surrogate pair between layout blocks.
-   if(end<text.length&&text.charCodeAt(end-1)>=0xd800&&text.charCodeAt(end-1)<=0xdbff)end--;
-   parts.push(text.slice(offset,end));offset=end;
+  const format=$('uartDisplay').value;
+  if(renderFormat!==format){log.replaceChildren();rendered.clear();renderFormat=format;}
+  if(!count){log.textContent='等待串口数据…';rendered.clear();return;}
+  if(!rendered.size)log.replaceChildren();
+  const start=endOffset-count,next=new Map();
+  for(let id=Math.floor(start/blockBytes);id*blockBytes<endOffset;id++){
+   const boundary=id*blockBytes,limit=Math.min((id+1)*blockBytes,endOffset);
+   const from=boundary<=start?start:format==='text'?textBoundary(boundary,start):boundary;
+   const to=format==='text'&&limit<endOffset?Math.max(from,textBoundary(limit,start)):limit;
+   if(to===from)continue;
+   const first=from===start;
+   let block=rendered.get(id);
+   if(!block){const node=document.createElement('span');node.style.cssText='display:block;contain:layout style';block={node};log.append(node);}
+   if(block.from!==from||block.to!==to||block.first!==first){
+    let text;
+    if(format==='text'){
+     const bytes=new Uint8Array(to-from);for(let i=from;i<to;i++)bytes[i-from]=byteAt(i);
+     text=(first?firstDecoder:textDecoder).decode(bytes);
+    }else{
+     const parts=[];for(let i=from;i<to;i++)parts.push(hexBytes[byteAt(i)]);
+     text=(first?'':' ')+parts.join(' ');
+    }
+    if(block.node.firstChild)block.node.firstChild.data=text;else block.node.append(document.createTextNode(text));
+    block.from=from;block.to=to;block.first=first;
+   }
+   next.set(id,block);
   }
-  if(!log.firstElementChild){log.replaceChildren();rendered=[];}
-  parts.forEach((part,i)=>{
-   let block=log.children[i];
-   if(!block){block=document.createElement('span');block.style.cssText='display:block;contain:layout style';log.append(block);}
-   if(rendered[i]!==part){if(block.firstChild)block.firstChild.data=part;else block.append(document.createTextNode(part));}
-  });
-  while(log.children.length>parts.length)log.lastChild.remove();
-  rendered=parts;log.scrollTop=log.scrollHeight;
+  for(const [id,block] of rendered)if(!next.has(id))block.node.remove();
+  rendered=next;log.scrollTop=log.scrollHeight;
  }
  function mode(enabled){const previous=window.uartMode;window.uartMode=enabled;
   document.querySelector('[data-tab="live"]').hidden=enabled;document.querySelector('[data-tab="motor"]').hidden=enabled;
@@ -53,6 +80,7 @@ window.uartMode=false;
   if(!window.uartMode)return;
   if(lastSequence!==null){const gap=(first-lastSequence-1)>>>0;if(gap<0x80000000)lost+=gap;}
   lastSequence=last;
+  endOffset+=bytes.length;
   if(bytes.length>=buffer.length){bytes=bytes.slice(-buffer.length);head=0;}
   const firstPart=Math.min(bytes.length,buffer.length-head);
   buffer.set(bytes.subarray(0,firstPart),head);buffer.set(bytes.subarray(firstPart),0);
@@ -68,7 +96,7 @@ window.uartMode=false;
  };
  function finish(){if(pending&&pending.acked&&pending.written){const resolve=pending.resolve;clearTimeout(pending.timer);pending=null;resolve();}}
  window.uartEvent=(type,d)=>{
-  if(type==='state'){reported=false;portReady=false;lastSequence=null;count=head=lost=0;changed=true;stop('连接状态改变，已停止发送');mode(false);stats();controls();}
+  if(type==='state'){reported=false;portReady=false;lastSequence=null;count=head=lost=0;resetLog();changed=true;stop('连接状态改变，已停止发送');mode(false);stats();controls();}
   if(type==='writeDone'&&pending){if(d.success){pending.written=true;finish();}else stop('通信写入失败，已停止后续发送');}
   if(type==='error'&&pending)stop(d.message||'通信错误');
  };
@@ -84,7 +112,7 @@ window.uartMode=false;
   finally{if(epoch===run){sending=false;controls();}}
  };
  $('uartCancel').onclick=()=>stop('已停止后续发送，已提交的字节可能仍在输出');
- $('uartClear').onclick=()=>{count=head=lost=0;lastSequence=null;changed=true;stats();render();};
+ $('uartClear').onclick=()=>{count=head=lost=0;resetLog();lastSequence=null;changed=true;stats();render();};
  $('uartPause').onclick=()=>{paused=!paused;$('uartPause').textContent=paused?'继续显示':'暂停显示';changed=true;render();};
  $('uartDisplay').onchange=()=>{changed=true;render();};
  $('uartFormat').onchange=()=>{$('uartInput').placeholder=$('uartFormat').value==='hex'?'HEX 示例：01 02 FF 00':'输入 UTF-8 文本';};
