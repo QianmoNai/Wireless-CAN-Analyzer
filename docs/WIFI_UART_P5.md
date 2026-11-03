@@ -47,3 +47,15 @@ UART115200/8N1、120 B随机块、相同种子、同一电脑页面和10.42/enp3
 | 早断 | 负载前连接超时，不能列作负载早断 | 未测 |
 
 不能据此确定TLS超时根因或推荐32/64。暂保留16帧作为后续恢复起点，不称其已通过P0-only稳定性验收或三者中表现最好；不在前置失败时继续烧新变量。最后USB独立QUERY正常，测试进程/TLS/串口已关闭，设备保留该16帧镜像与Wi-Fi/UART/115200。源码参数、32 quarter-dBm功率上限、队列/池/reserve及协议语义未改。本轮只追加结果文档，未推送。完整失败证据见 `~/grokbot/wifi-uart-p5-result.md` 和 `~/grokbot/wifi-uart-p5-hardware/b16/recovery-max/`。
+
+## 2026-11-04：旧P0-only可连接，最大供给被CH340错误阻塞
+
+用户批准回烧旧P0-only排除回归。仅将`wifi-uart-ab-p0-0a1f3c1-app.bin`（1129472 B，SHA256 `c533b413e031e2d92321763eb4f9549ca203ae9fb4a1672e04c4cc825fc1b66a`）写入app@0x10000，写后hash校验通过，不擦NVS。设备仍是10.42.0.226经enp3s0/src10.42.0.1，USB QUERY前后均为Wi-Fi/UART/115200。
+
+同一Qt/Channel/LanTransport测量程序完成了旧版TLS认证与QUERY，并连续收到54份P0快照，NODELAY=0。但打开唯一CH340供给口时SerialException/EIO(5)，内核ch341-uart报告failed to read modem status: -32；无同步标记或负载供给，因此没有最大供给60秒结果。供给口设备文件和用户uucp权限仍在，无其他占用。没有sudo或重置USB/驱动；已请用户保持板子独立供电及原生USB连接，重新插拔CH340后继续。
+
+测试程序在port.open失败后，其flush清理又出现PortNotOpenError；已结束自己的测试进程并关闭TLS，保留数字日志。外部测量副本补充失败前安全结果保存及is_open清理保护，不改生产代码、采样频率或串口负载。
+
+新旧network_link.c的差异是宏化批次/抽取收集器及未定义NODELAY时的回退默认值；两份实际构建均明确定义NODELAY=0，收集器在认证后执行。目前尚不能从这些差异定位前置TLS超时因果；没有盲改或交付未经证明的固件修复。旧版空载连接成功不是负载稳定性验收，也不能单独排除时变链路问题。
+
+当前设备保留旧P0-only，两个串口/TLS已关闭。最大连续供给验证和回归修复仍待供给口恢复，32/64未烧录，未推送。完整过程追加于`~/grokbot/wifi-uart-p5-result.md`；证据位于`~/grokbot/wifi-uart-p5-hardware/oldp0-reference/max/`和`wifi-uart-p5-oldp0-*`。
