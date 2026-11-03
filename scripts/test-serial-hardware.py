@@ -167,6 +167,35 @@ class Probe:
         return got[:-len(marker)].hex()
 
 
+def save_report(report, output):
+    """Atomic checkpoint, also used between long stress cases."""
+    output = Path(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_name(output.name + '.tmp')
+    temporary.write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n')
+    temporary.replace(output)
+
+
+def finish_report(report, output, probe, record):
+    """Attempt both cleanup operations and persist even when either fails.
+
+    Return errors so the caller can preserve a primary test exception or fail
+    an otherwise successful run. A failed BYE must never skip close/report.
+    """
+    errors = []
+    if probe:
+        for name, operation in [('cleanup_BYE', lambda: probe.send(BYE) if probe.active else None),
+                                ('cleanup_close', probe.port.close)]:
+            try:
+                operation()
+            except BaseException as exc:
+                errors.append(repr(exc))
+                record(name, 'FAIL', error=repr(exc))
+    report['finished'] = time.strftime('%Y-%m-%d %H:%M:%S')
+    save_report(report, output)
+    return errors
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--usb', default='/dev/ttyACM0')
@@ -192,6 +221,8 @@ def main():
                 if time.monotonic() >= ready_deadline:
                     raise
                 time.sleep(.2)
+        report['initial_settings'] = dict(network=initial[3], data=initial[4], baud=u32(initial, 8))
+        save_report(report, args.output)
         record('query_without_HELLO', response=initial.hex())
         if args.check_only:
             assert (initial[3], initial[4], u32(initial, 8)) == (4, 1, 115200), initial.hex()
@@ -295,13 +326,18 @@ def main():
         record('exception', 'FAIL', error=repr(e))
         raise
     finally:
-        if probe:
-            if probe.active:
-                probe.send(BYE)
-            probe.port.close()
-        report['finished'] = time.strftime('%Y-%m-%d %H:%M:%S')
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n')
+        # Restore the requested bench state on failure as well as success.
+        primary_error = sys.exc_info()[0] is not None
+        if probe and not args.check_only:
+            try:
+                probe.settings(7, network=4, data=1, baud=115200, expected=1)
+                probe.settled(4, 1, 115200)
+                record('restore_USB_UART_115200')
+            except BaseException as exc:
+                record('restore_USB_UART_115200', 'FAIL', error=repr(exc))
+        errors = finish_report(report, args.output, probe, record)
+        if not primary_error and (errors or any(t['status'] == 'FAIL' for t in report['tests'])):
+            raise RuntimeError('Test/cleanup failed; see saved report')
 
 
 if __name__ == '__main__':
