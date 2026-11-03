@@ -387,8 +387,9 @@ class ProvisionTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(cli.StopProvision):
                 await cli.select_device(scanner, '00:00:00:00:00:00')
 
-    async def exercise(self, identity=cli.TARGET, fail_apply=False, lose_mode_ack=False, reuse=False, bonded=True):
+    async def exercise(self, identity=cli.TARGET, fail_apply=False, lose_fence_ack=False, reuse=False, bonded=True, join_error=False):
         events, clients, buffers = [], [], []
+        join_started = []
         address = '11:22:33:44:55:66'  # Deliberately different from STA ID.
         other = 'AA:BB:CC:DD:EE:FF'
         device = SimpleNamespace(address=address)
@@ -401,6 +402,7 @@ class ProvisionTests(unittest.IsolatedAsyncioTestCase):
                 self.services = SimpleNamespace(get_service=lambda uuid: object() if uuid == SERVICE else None)
                 self.applied = False
                 self.mode = 0
+                self.on_disconnect = _['disconnected_callback']
                 clients.append(self)
             async def connect(self):
                 self.is_connected = True
@@ -425,13 +427,19 @@ class ProvisionTests(unittest.IsolatedAsyncioTestCase):
                         self.applied = True
                         if fail_apply:
                             raise ValueError('SYNTHETIC-PRIVATE-PAYLOAD')
+                        join_started.append(True)
+                        events.append('apply-ack')
+                    elif data[0] == 1 and self.applied:
+                        events.append('receipt-fence')
+                        self.is_connected = False
+                        self.on_disconnect(self)
+                        events.append('ble-disconnected')
+                        if lose_fence_ack:
+                            raise TimeoutError('synthetic lost STATUS reply')
                 elif uuid == WRITE:
                     test.assertEqual(data[1], 0x19)
                     if data[2]:
-                        events.append('mode')
-                        self.mode = data[4]
-                        if lose_mode_ack:
-                            raise TimeoutError('synthetic lost reply')
+                        raise AssertionError('BLE mode mutation forbidden after APPLY')
                     self.notify(None, packet(22, a=int(bool(data[2])), b=self.mode, x=1,
                                              y=115200, token=u32(data, 16)))
             async def read_gatt_char(self, _):
@@ -439,7 +447,7 @@ class ProvisionTests(unittest.IsolatedAsyncioTestCase):
                 # A previous failed join must not prevent authenticated status
                 # reading and a fresh, explicitly requested provisioning attempt.
                 return json.dumps(dict(id=identity, fp='11' * 32, token='22' * 32,
-                                       state=2 if self.applied else 4, error=0 if self.applied else 2,
+                                       state=4, error=4 if join_started and join_error else 2, reason=2,
                                        busy=False, ip='192.168.1.42' if self.applied else '')).encode()
 
         class Lan:
@@ -462,6 +470,8 @@ class ProvisionTests(unittest.IsolatedAsyncioTestCase):
         async def discover(identity, found, *, broadcast):
             events.append('discover')
             test.assertEqual((identity, broadcast), (cli.TARGET, '192.168.1.255'))
+            if join_error:
+                return
             found(dict(address='wifi:10.42.0.42'))  # Ignore replies outside requested subnet.
             found(dict(address='wifi:192.168.1.42'))
 
@@ -490,7 +500,7 @@ class ProvisionTests(unittest.IsolatedAsyncioTestCase):
                  redirect_stdout(io.StringIO()) as output, redirect_stderr(output):
                 options = SimpleNamespace(reuse_bond=True, target=address, ssid=None,
                                           password_file=None, subnet=cli.SUBNET) if reuse else None
-                if identity != cli.TARGET or fail_apply or not bonded:
+                if identity != cli.TARGET or fail_apply or not bonded or join_error:
                     with self.assertRaises(Exception):
                         await cli.provision(options)
                     self.assertEqual(load_connection(path), dict(unrelated=True))
@@ -504,7 +514,7 @@ class ProvisionTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(path.stat().st_mode & 0o777, 0o600)
                 text = output.getvalue()
                 self.assertTrue('FixturePassword' not in text and '11' * 32 not in text and '22' * 32 not in text)
-        self.assertEqual(len(clients), 1)
+        self.assertEqual(len(clients), 2 if join_error else 1)
         self.assertEqual(events.count('pair'), 0 if reuse else 1)
         self.assertFalse(clients[0].is_connected)
         # Mutable protocol buffers must be wiped on success and failure.
@@ -517,8 +527,10 @@ class ProvisionTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(events.index('register-agent'), events.index('pair'))
         self.assertLess(events.index('unregister-agent'), events.index('credentials'))
         self.assertLess(events.index('status'), events.index('credentials'))
-        self.assertLess(events.index('apply'), events.index('mode'))
-        self.assertLess(events.index('mode'), events.index('discover'))
+        self.assertLess(events.index('apply-ack'), events.index('receipt-fence'))
+        self.assertLess(events.index('receipt-fence'), events.index('ble-disconnected'))
+        self.assertLess(events.index('ble-disconnected'), events.index('discover'))
+        self.assertNotIn('mode', events)
         self.assertEqual([event for event in events if event in ('tls', 'query')], ['tls', 'query'])
 
     async def test_reuse_bond_never_pairs_or_registers_agent(self):
@@ -545,11 +557,20 @@ class ProvisionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('mode', events)
         self.assertEqual(events.count('apply'), 1)
 
-    async def test_unknown_mode_ack_not_replayed_tls_query_proves_mode(self):
-        events = await self.exercise(lose_mode_ack=True)
-        self.assertEqual(events.count('mode'), 1)
+    async def test_status_fence_ack_lost_on_expected_disconnect_is_not_replayed(self):
+        events = await self.exercise(lose_fence_ack=True)
+        self.assertEqual(events.count('receipt-fence'), 1)
+        self.assertEqual(events.count('apply'), 1)
         self.assertEqual(events.count('tls'), 1)
         self.assertEqual(events.count('query'), 1)
+
+    async def test_discovery_timeout_reconnects_same_bond_for_status_only(self):
+        events = await self.exercise(reuse=True, join_error=True)
+        self.assertEqual(events.count('apply'), 1)
+        self.assertEqual(events.count('credentials'), 1)
+        self.assertEqual(events.count('status'), 2)
+        self.assertNotIn('pair', events)
+        self.assertNotIn('tls', events)
 
     async def test_pair_false_requires_authentication_on_same_connection(self):
         transport = BleTransport(lambda _: None, lambda _: None)

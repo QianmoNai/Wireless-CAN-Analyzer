@@ -15,6 +15,9 @@ uint32_t ble_bridge_dropped(void);
 bool ble_bridge_connected(void);
 /* Actual negotiated GAP interval, in 1.25 ms units; 0 = no connection. */
 uint16_t ble_bridge_connection_interval(void);
+/* Called by the Wi-Fi manager, never from the NimBLE host/access callback. */
+bool ble_bridge_wifi_pause(void);
+void ble_bridge_wifi_resume(void);
 bool ble_bridge_take_stop(void);
 void ble_bridge_set_motor_busy(bool busy);
 static inline uint32_t wire_u32(const uint8_t *p) {

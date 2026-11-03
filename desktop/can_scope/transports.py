@@ -208,6 +208,9 @@ class BleTransport:
         self.client = None
         self.closed = False
         self.provision_authenticated = False
+        self.wifi_apply_acked = False
+        self.wifi_handoff_expected = False
+        self.wifi_disconnected = asyncio.Event()
 
     async def connect(self, device):
         from bleak import BleakClient
@@ -224,7 +227,8 @@ class BleTransport:
 
     def lost(self):
         self.provision_authenticated = False
-        if not self.closed:
+        self.wifi_disconnected.set()
+        if not self.closed and not self.wifi_handoff_expected:
             self.disconnected('蓝牙连接已断开')
 
     async def write(self, p):
@@ -253,11 +257,16 @@ class BleTransport:
                 raise ConnectionError('当前目标没有已确认的蓝牙绑定；不会自动配对')
         self.provision_authenticated = True
 
-    async def provision(self, operation, ssid, password, status, networks, *, pair=True):
+    async def provision(self, operation, ssid, password, status, networks, *, pair=True, handoff=False):
         """Use pair=False only to reuse authentication on this same connection."""
         commands = []
         p = None
         try:
+            if handoff and operation != 5:
+                raise ValueError('只有 APPLY 支持 BLE/Wi-Fi 交接')
+            if operation == 5:
+                self.wifi_apply_acked = False
+                self.wifi_disconnected.clear()
             # Pairing is delegated to the OS agent; PIN is shown on the ESP32.
             if pair:
                 if await asyncio.wait_for(self.client.pair(), 65) is False:
@@ -271,6 +280,20 @@ class BleTransport:
             for p in commands:
                 await self.client.write_gatt_char(NETWORK, p, response=True)
                 p[:] = bytes(len(p))
+            if operation == 5:
+                self.wifi_apply_acked = True
+            if handoff:
+                # APPLY's ATT write response has arrived. The existing STATUS
+                # request is a receipt fence, not a retry or a new wire opcode.
+                self.wifi_handoff_expected = True
+                try:
+                    await self.client.write_gatt_char(NETWORK, bytes([1])+bytes(19), response=True)
+                except Exception:
+                    if self.client.is_connected and not self.wifi_disconnected.is_set():
+                        raise
+                if self.client.is_connected:
+                    await asyncio.wait_for(self.wifi_disconnected.wait(), 5)
+                return
             for _ in range(50):
                 value = json.loads(bytes(await self.client.read_gatt_char(NETWORK)).decode('utf8'))
                 status(value)

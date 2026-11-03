@@ -232,7 +232,7 @@ async def select_device(scan, target=None):
 
 
 async def find_ip(discover, subnet=SUBNET):
-    print(f'[6/7] 在 {subnet} 发送 UDP 32323 发现，最长约 30 秒。')
+    print(f'[5/7] 在 {subnet} 发送 UDP 32323 发现，最长约 30 秒。')
     for _ in range(10):
         found = set()
 
@@ -316,6 +316,33 @@ async def diagnose(options=None):
         await ble.close()
 
 
+async def handoff_diagnostics(device):
+    """One reconnect to the exact target, existing bond, STATUS only; no scan/APPLY."""
+    import json
+    from can_scope.transports import BleTransport, network_status_fields, network_diagnostics_text
+    latest = {}
+    ble = BleTransport(lambda _: None, lambda _: None)
+
+    def status(value):
+        if value.get('id') != TARGET:
+            raise StopProvision('重连后的设备 ID 不符，停止读取诊断。')
+        latest.update(network_status_fields(value))
+
+    print('交接未完成；仅用已有 bond 重连原目标读取冻结诊断，不配对、不重发 APPLY。')
+    try:
+        await ble.connect(device)
+        await ble.use_existing_bond()
+        await asyncio.wait_for(ble.provision(1, '', '', status, lambda _: None, pair=False), 40)
+        print('失败后安全状态：' + json.dumps(latest, ensure_ascii=False))
+        print('接入诊断：' + network_diagnostics_text(latest))
+    except Exception as exc:
+        report_failure(exc, '交接失败后/已有 bond 读取诊断')
+        print('未能读取诊断；请稍后用 --diagnose 重试，不要重新配网或配对。')
+    finally:
+        await ble.close()
+    return latest
+
+
 async def provision(options=None):
     if options and options.password_file is not None:
         step('启动/密码文件检查')
@@ -323,7 +350,7 @@ async def provision(options=None):
     from can_scope.connection_store import connection_folder, load_connection, save_connection
     from can_scope.engine import Channel
     from can_scope.protocol import secret
-    from can_scope.transports import BleTransport, LanTransport, discover, scan_ble
+    from can_scope.transports import BleTransport, LanTransport, WifiProvisionError, discover, scan_ble
 
     # Suppress arbitrary backend exception messages in asyncio diagnostics too.
     asyncio.get_running_loop().set_exception_handler(
@@ -341,10 +368,7 @@ async def provision(options=None):
                 future.set_exception(ConnectionError('连接已断开'))
 
     trusted = {}
-    completed = False
-
     def status(value):
-        nonlocal completed
         # No arbitrary JSON, SSID, token, fingerprint or error repr goes to stdout.
         if value.get('id') != TARGET:
             raise StopProvision('认证后的设备 ID 与目标不符，已停止；不会发送 Wi-Fi 凭据或覆盖信任缓存。')
@@ -353,7 +377,6 @@ async def provision(options=None):
         trusted.update({key: value[key] for key in ('id', 'fp', 'token')})
         if value.get('ip'):
             trusted['ip'] = str(ipaddress.IPv4Address(value['ip']))
-        completed = value.get('state') == 2 and value.get('busy') is False and not value.get('error')
 
     ble = BleTransport(channel.receive, disconnected)
     try:
@@ -385,43 +408,38 @@ async def provision(options=None):
         try:
             step('[3/7] 终端凭据输入')
             ssid, password = read_credentials(options.ssid, options.password_file) if options else read_credentials()
-            print('[3/7] 发送 Wi-Fi 配置并等待设备接入；复用当前认证，不再次配对。')
-            pending = ble.provision(5, ssid, password, status, lambda _: None, pair=False)
+            print('[3/7] 发送一次 APPLY，确认写响应后释放 BLE；复用当前认证，不再次配对。')
+            pending = ble.provision(5, ssid, password, status, lambda _: None, pair=False, handoff=True)
             ssid = password = ''
             step('[3/7] 配网发送/接入')
             await asyncio.wait_for(pending, 105)
-            if not completed:
-                raise StopProvision('设备未确认 Wi-Fi 已接入并保存。')
         finally:
             ssid = password = ''
-        print('设备已报告配网成功。')
-        print('[4/7] 仅发送一次 Wi-Fi 模式设置；回执不确定时不重发，以最终 QUERY 为准。')
-        step('[4/7] 设置 Wi-Fi 模式')
-        try:
-            result = await channel.handle('deviceSettings', [dict(network=1)])
-            if result['status'] != 1 or result['network'] != 1:
-                raise StopProvision('Wi-Fi 模式设置未确认。')
-        except Exception as exc:
-            # Mode switching may reset notification routing before its ACK arrives.
-            # Never replay the mutation; a successful TLS QUERY must prove mode=1.
-            report_failure(exc)
-            print('Wi-Fi 模式回执未确认，结果未知；继续发现并核验，不重发设置。')
-        step('[5/7] 保存信任缓存')
-        channel.mode, channel.address = 'wifi', address
-        channel.network_status(trusted)  # Desktop validation, whitelist and persistence.
-        print('[5/7] 已按桌面端方式原子保存 connection-1.json（权限 0600）；不显示令牌或指纹。')
+        print('[4/7] APPLY 写响应已确认，BLE 已断开；设备正在无 BLE 连接/广播时加入 Wi-Fi。')
+        print('此时尚未判定接入成功；成功后固件自动保存 Wi-Fi 模式，不再通过 BLE 改模式。')
+    except Exception:
+        channel.ready = False
+        await ble.close()
+        if ble.wifi_apply_acked:
+            latest = await handoff_diagnostics(device)
+            if latest.get('error'):
+                raise WifiProvisionError(latest) from None
+        raise
     finally:
         channel.ready = False
         await ble.close()
 
-    step('[6/7] UDP 发现')
-    ip = await find_ip(discover, options.subnet) if options else await find_ip(discover)
-    print('设备 IP：' + ip)
-    channel.saved['ip'] = ip
-    step('[6/7] 保存发现的 IP')
-    channel.persist()
-    lan = LanTransport(channel.receive, disconnected)
+    lan = None
     try:
+        step('[5/7] UDP 发现')
+        ip = await find_ip(discover, options.subnet) if options else await find_ip(discover)
+        print('设备 IP：' + ip)
+        step('[6/7] 保存信任缓存与发现的 IP')
+        channel.mode, channel.address = 'wifi', address
+        trusted['ip'] = ip
+        channel.network_status(trusted)  # Existing desktop validation/persistence.
+        print('[6/7] 已原子保存 connection-1.json（权限 0600）；不显示令牌或指纹。')
+        lan = LanTransport(channel.receive, disconnected)
         print('[7/7] 尝试一次 TLS 1.2 连接：先校验证书指纹，再发送认证令牌；随后只发送一次 QUERY。')
         step('[7/7] TLS 连接/认证')
         await lan.connect(ip, trusted['fp'], trusted['token'])
@@ -431,9 +449,18 @@ async def provision(options=None):
         if result['status'] != 0 or result['network'] != 1:
             raise StopProvision('TLS QUERY 未确认 Wi-Fi 模式。')
         print(f"成功：TLS 认证通过；QUERY result=0 network=1 data={result['data']} baud={result['baud']}；IP={ip}")
+    except Exception:
+        channel.ready = False
+        if lan is not None:
+            await lan.close()
+        latest = await handoff_diagnostics(device)
+        if latest.get('error'):
+            raise WifiProvisionError(latest) from None
+        raise
     finally:
         channel.ready = False
-        await lan.close()
+        if lan is not None:
+            await lan.close()
         trusted.clear()
         channel.saved.clear()
         saved.clear()
@@ -463,7 +490,7 @@ def dry_run():
                for item in interface.methods):
         raise StopProvision('BlueZ 配对代理接口自检失败。')
     print('DRY-RUN PASS：依赖及无凭据协议自检通过；未扫描、未配对、未打开网络/串口、未读取或写入缓存。')
-    print('真实运行将依次：确认地址 → 一次 BLE 认证并核对 ID → 隐藏输入密码 → 配网 → Wi-Fi 模式 → 私有缓存 → UDP 发现 → 一次 TLS + QUERY。')
+    print('真实运行将依次：确认地址 → BLE 认证/核对 ID → 隐藏读取凭据 → APPLY 写响应 → BLE 断开 → UDP 发现 → 私有缓存 → 一次 TLS + QUERY；失败仅用 bond 重连读诊断。')
     print('配对代理接口自检通过；真实配对时仅在本终端的“ESP32 六位配对码”提示处输入，不依赖系统配对代理。')
 
 

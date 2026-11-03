@@ -5,6 +5,7 @@
 #include "network_protocol.h"
 #include "network_diagnostics.h"
 #include "network_identity.h"
+#include "device_settings.h"
 #include "ack_delivery.h"
 #include "esp_wifi.h"
 #include "esp_netif.h"
@@ -25,6 +26,7 @@
 #define SCAN_MAX 12
 static atomic_uint transport_mode;
 static atomic_bool linked, online, identity_ready, started, radio_on;
+static atomic_bool apply_pending, apply_acknowledged;
 static atomic_uint pairing=UINT32_MAX,pairing_until,station_ip,disconnect_reason,network_epoch,disconnect_events;
 static SemaphoreHandle_t lock;
 static QueueHandle_t requests,raw_out,control_out;
@@ -54,7 +56,7 @@ bool network_dual_mode(void){unsigned mode=atomic_load(&transport_mode);return m
 bool network_connected(void){return network_wifi_mode()&&atomic_load(&linked)&&atomic_load(&online);}
 void network_set_mode(unsigned mode){
  if(mode>4)return;
- if(atomic_exchange(&transport_mode,mode)!=mode){usb_link_reset();dual_link_request_mode(mode);atomic_fetch_add(&network_epoch,1);ble_bridge_reset_session();}
+ if(atomic_exchange(&transport_mode,mode)!=mode){usb_link_reset();dual_link_request_mode(mode);atomic_fetch_add(&network_epoch,1);ble_bridge_reset_session();if(mode==0)ble_bridge_wifi_resume();}
 }
 bool network_send(const bridge_packet_t *p){return network_connected()&&xQueueSend(bridge_packet_is_raw(p)?raw_out:control_out,p,0)==pdTRUE;}
 static void wifi_event(void *arg,esp_event_base_t base,int32_t id,void *data){
@@ -88,6 +90,11 @@ static esp_err_t save_credentials(const network_credentials_t *c){nvs_handle_t h
 static void station_api(bool capture,uint8_t stage,esp_err_t err){
  if(capture){xSemaphoreTake(lock,portMAX_DELAY);network_diagnostics_api(&diagnostics,stage,err);xSemaphoreGive(lock);}
 }
+static bool release_ble_for_wifi(void){
+ uint32_t until=millis()+2000;
+ while(!atomic_load(&apply_acknowledged)&&(int32_t)(until-millis())>0)vTaskDelay(pdMS_TO_TICKS(10));
+ return atomic_load(&apply_acknowledged)&&ble_bridge_wifi_pause();
+}
 static bool begin_station(const network_credentials_t *c,bool capture){
  unsigned before=atomic_load(&disconnect_events);
  esp_err_t disconnected=esp_wifi_disconnect();
@@ -95,6 +102,14 @@ static bool begin_station(const network_credentials_t *c,bool capture){
  if(disconnected==ESP_OK){uint32_t until=millis()+1000;while(before==atomic_load(&disconnect_events)&&(int32_t)(until-millis())>0)vTaskDelay(pdMS_TO_TICKS(10));}
  atomic_store(&online,false);atomic_store(&station_ip,0);atomic_store(&disconnect_reason,0);
  if(capture){xSemaphoreTake(lock,portMAX_DELAY);network_diagnostics_begin(&diagnostics,(uint64_t)(esp_timer_get_time()/1000));xSemaphoreGive(lock);}
+ if(capture){
+  // A subsequent protected STATUS request proves the central received APPLY's
+  // ATT write response. Do not guess ACK delivery from a fixed delay.
+  station_api(true,NET_STAGE_CONNECT,ESP_OK);
+  if(!release_ble_for_wifi()){
+   station_api(true,NET_STAGE_CONNECT,ESP_ERR_TIMEOUT);return false;
+  }
+ }
  wifi_config_t cfg={0};memcpy(cfg.sta.ssid,c->ssid,c->ssid_len);memcpy(cfg.sta.password,c->password,c->password_len);cfg.sta.pmf_cfg.capable=true;
  station_api(capture,NET_STAGE_SET_CONFIG,ESP_OK);
  esp_err_t err=esp_wifi_set_config(WIFI_IF_STA,&cfg);memset(&cfg,0,sizeof(cfg));station_api(capture,NET_STAGE_SET_CONFIG,err);if(err!=ESP_OK)return false;
@@ -112,11 +127,11 @@ int network_config_write(const uint8_t p[20]){
  if(!atomic_load(&started)||!atomic_load(&identity_ready))return 14;
  request_t r={.op=p[0]};int result=0;
  xSemaphoreTake(lock,portMAX_DELAY);
- if(p[0]==NET_STATUS){scan_reply=false;}
+ if(p[0]==NET_STATUS){scan_reply=false;if(atomic_load(&apply_pending))atomic_store(&apply_acknowledged,true);}
  else if(p[0]==NET_SCAN_PAGE){scan_reply=true;scan_page=p[2]<SCAN_MAX?p[2]:0;}
  else if(busy){result=17;}
  else if(p[0]==NET_BEGIN||p[0]==NET_DATA){if(!network_assembly_packet(&assembly,p,millis(),&r.credentials))result=19;}
- else if(p[0]==NET_APPLY){if(!network_assembly_packet(&assembly,p,millis(),&r.credentials))result=19;else if(xQueueSend(requests,&r,0)!=pdTRUE)result=17;else{busy=true;scan_reply=false;state=1;error_code=0;}}
+ else if(p[0]==NET_APPLY){if(!network_assembly_packet(&assembly,p,millis(),&r.credentials))result=19;else if(xQueueSend(requests,&r,0)!=pdTRUE)result=17;else{atomic_store(&apply_acknowledged,false);atomic_store(&apply_pending,true);busy=true;scan_reply=false;state=1;error_code=0;}}
  else if(p[0]==NET_SCAN||p[0]==NET_CLEAR){if(xQueueSend(requests,&r,0)!=pdTRUE)result=17;else{busy=true;scan_reply=false;error_code=0;}}
  else result=19;
  xSemaphoreGive(lock);memset(&r,0,sizeof(r));return result;
@@ -126,6 +141,7 @@ size_t network_config_read(char *out,size_t size){
  if(size<NETWORK_STATUS_JSON_LIMIT)return 0;
  if(!lock)return snprintf(out,size,"{\"state\":4,\"error\":9}");
  xSemaphoreTake(lock,portMAX_DELAY);
+ if(atomic_load(&apply_pending))atomic_store(&apply_acknowledged,true);
  int n=0;
  if(scan_reply){
   unsigned end=scan_page+3;if(end>scan_count)end=scan_count;
@@ -248,14 +264,22 @@ static void manager_task(void *arg){
     while(begun&&!network_dual_mode()&&!network_usb_mode()&&!atomic_load(&online)&&(int32_t)(until-millis())>0){if(atomic_load(&disconnect_reason))break;vTaskDelay(pdMS_TO_TICKS(100));}
     bool success=false,save_failed=false;
     if(begun&&!network_dual_mode()&&!network_usb_mode()&&atomic_load(&online)){
-     station_api(true,NET_STAGE_SAVE,ESP_OK);esp_err_t err=save_credentials(&r.credentials);station_api(true,NET_STAGE_SAVE,err);
+     station_api(true,NET_STAGE_SAVE,ESP_OK);esp_err_t err=save_credentials(&r.credentials);
+     if(err==ESP_OK){
+      // Reuse the settings owner: only network changes; UART/baud remain intact.
+      uint8_t p[20]={1,SETTINGS_COMMAND,1,SETTINGS_NETWORK,1};bridge_packet_t reply;
+      wire_put_u32(p+16,1);
+      if(device_settings_command(p,&reply)||reply.bytes[2]!=1)err=ESP_FAIL;
+     }
+     station_api(true,NET_STAGE_SAVE,err);
      success=err==ESP_OK;save_failed=!success;
     }
     // Sample before cleanup, then freeze; STATUS/scans never refresh this snapshot.
     capture_radio();
     xSemaphoreTake(lock,portMAX_DELAY);network_diagnostics_finish(&diagnostics);int32_t reason=diagnostics.reason;xSemaphoreGive(lock);
-    if(success){xSemaphoreTake(lock,portMAX_DELAY);saved=r.credentials;xSemaphoreGive(lock);credentials_ok=true;keep_until=millis()+60000;set_status(2,0);}
-    else{set_status(4,save_failed?5:reason==WIFI_REASON_AUTH_FAIL||reason==WIFI_REASON_HANDSHAKE_TIMEOUT?2:reason==WIFI_REASON_NO_AP_FOUND?3:4);esp_wifi_disconnect();atomic_store(&online,false);atomic_store(&station_ip,0);retry=millis()+10000;}
+    atomic_store(&apply_pending,false);
+    if(success){xSemaphoreTake(lock,portMAX_DELAY);saved=r.credentials;xSemaphoreGive(lock);credentials_ok=true;keep_until=millis()+60000;network_set_mode(1);set_status(2,0);}
+    else{set_status(4,save_failed?5:reason==WIFI_REASON_AUTH_FAIL||reason==WIFI_REASON_HANDSHAKE_TIMEOUT?2:reason==WIFI_REASON_NO_AP_FOUND?3:4);esp_wifi_disconnect();if(atomic_load(&radio_on))esp_wifi_stop();atomic_store(&radio_on,false);atomic_store(&online,false);atomic_store(&station_ip,0);retry=millis()+10000;ble_bridge_wifi_resume();}
    }
    memset(&r,0,sizeof(r));xSemaphoreTake(lock,portMAX_DELAY);busy=false;xSemaphoreGive(lock);
   }

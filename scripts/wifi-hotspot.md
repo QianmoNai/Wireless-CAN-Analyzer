@@ -42,6 +42,10 @@ desktop/.venv/bin/python scripts/wifi-provision.py \
 
 按提示输入目标 ID `90da7273722c`，再输入扫描列表中已确认的完整 BLE 地址。只复用 Paired=true 且 Bonded=true 的目标；没有绑定就停止，不重新配对，不要求六位配对码。可选 `--target '90da7273722c@完整BLE地址'` 跳过交互确认；仍须扫描到该地址并在受保护状态里核对 ID，不能把 STA MAC 当作 BLE MAC。
 
+BLE-off 固件收到 APPLY 后先返回原有 ATT 写响应，主机确认返回后发送现有 STATUS 作为收讫屏障。固件收到屏障后在 NimBLE host 队列停止广播、请求断开，并限时等待断开事件完成，随后才尝试 Wi-Fi；没有屏障或不能释放 BLE 就停止，绝不盲重发 APPLY。成功后复用设置 owner 只保存 Wi-Fi 模式，UART/波特率不变；主机经 UDP 发现后使用此前在加密 MITM BLE 上核对的 TLS 信任信息，进行一次 TLS+QUERY。失败时先冻结诊断、停 Wi-Fi，再恢复 BLE 广播；主机发现超时后只用现有 bond 对原目标重连一次并读取 STATUS，不重新配对、不重发凭据。失败后仍可独立运行 `--diagnose --ssid CANScope-Test --target 90da7273722c@90:DA:72:73:72:2E` 读取冻结快照并扫描；成功后保持 Wi-Fi 模式，不能直接用 BLE 诊断。
+
+配网命令需要 TTY。无人值守确认必须同时显式提供 `--reuse-bond`、`--target`、`--ssid` 和 `--password-file`；可以由用户用 `script -qec "desktop/.venv/bin/python scripts/wifi-provision.py --ssid CANScope-Test --password-file /home/qianmo/grokbot/secret/canscope-test.password --subnet 10.77.0.0/24 --reuse-bond --target 90da7273722c@90:DA:72:73:72:2E" /home/qianmo/grokbot/wifi-bleoff-provision.log < /dev/null` 提供伪终端。此日志只记录脚本安全输出，不启用输入录制、不读出或回显密码。
+
 带 `--password-file` 时，在任何 BLE 扫描/连接前先只检查文件存在、归属和 0600 权限，不提前读密码；实际读取前再次校验。文件不存在时会明确提示“密码文件不存在，请先运行 test-hotspot.py up 并确认 status 正常”。热点失败回滚会删除密码，因此只有 status 显示接口存在、NM managed=no/state=10、hostapd/dhcp/monitor/rollback.timer 全部 active 后才运行配网。
 
 另一个终端取证（只输出白名单事件，丢弃原始 daemon 正文和客户端主机名）：

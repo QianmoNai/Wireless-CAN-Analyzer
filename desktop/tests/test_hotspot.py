@@ -241,6 +241,7 @@ class HotspotTests(unittest.TestCase):
             if args[:3] == ('iw', 'reg', 'get'): return 'country 00:'
             return ''
         with patch.object(hotspot, 'snapshot', return_value=dict(BASE)), \
+             patch.object(Path, 'exists', return_value=False), patch.object(Path, 'is_symlink', return_value=False), \
              patch.object(hotspot, 'run', side_effect=read), patch.object(hotspot, 'data', return_value=[]), \
              patch.object(hotspot, 'active', return_value=False) as active, \
              patch.object(hotspot.shutil, 'which', return_value='/usr/bin/fixture'), \

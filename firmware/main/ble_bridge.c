@@ -73,6 +73,8 @@ static void reset_home(void){portENTER_CRITICAL(&home_lock);memset(&home_status,
 static uint8_t address_type;
 static atomic_int connection = BLE_HS_CONN_HANDLE_NONE;
 static atomic_bool subscribed;
+static atomic_bool wifi_paused, wifi_pause_ready;
+static struct ble_npl_event wifi_radio_event;
 static atomic_uint dropped;
 static atomic_bool motor_busy, stop_requested;
 static void advertise(void);
@@ -403,7 +405,7 @@ static int gap_event(struct ble_gap_event *event, void *arg)
 
 static void advertise(void)
 {
-    if(network_dual_mode()||network_usb_mode())return;
+    if(atomic_load(&wifi_paused)||network_wifi_mode()||network_dual_mode()||network_usb_mode())return;
     struct ble_hs_adv_fields fields = {
         .flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP,
         .uuids128 = (ble_uuid128_t *)&service_uuid,
@@ -682,6 +684,32 @@ uint16_t ble_bridge_connection_interval(void) {
     int handle=atomic_load(&connection);
     return handle!=BLE_HS_CONN_HANDLE_NONE&&!ble_gap_conn_find(handle,&desc)?desc.conn_itvl:0;
 }
+static void wifi_radio_change(struct ble_npl_event *event) {
+    (void)event;
+    if(atomic_load(&wifi_paused)) {
+#if CONFIG_BLE_CONNECTION_POLICY
+        ble_npl_callout_stop(&parameter_timer);
+#endif
+        if(ble_gap_adv_active()&&ble_gap_adv_stop())return;
+        int handle=atomic_load(&connection);
+        if(handle!=BLE_HS_CONN_HANDLE_NONE&&ble_gap_terminate(handle,BLE_ERR_REM_USER_CONN_TERM))return;
+        atomic_store(&wifi_pause_ready,true);
+    } else if(atomic_load(&connection)==BLE_HS_CONN_HANDLE_NONE&&!ble_gap_adv_active())advertise();
+}
+bool ble_bridge_wifi_pause(void) {
+    atomic_store(&wifi_pause_ready,false);atomic_store(&wifi_paused,true);
+    ble_npl_eventq_put(nimble_port_get_dflt_eventq(),&wifi_radio_event);
+    // The disconnect callback must have run, not just accepted terminate().
+    for(unsigned i=0;i<200;i++) {
+        if(atomic_load(&wifi_pause_ready)&&atomic_load(&connection)==BLE_HS_CONN_HANDLE_NONE)return true;
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    return false;
+}
+void ble_bridge_wifi_resume(void) {
+    atomic_store(&wifi_paused,false);
+    ble_npl_eventq_put(nimble_port_get_dflt_eventq(),&wifi_radio_event);
+}
 bool ble_bridge_connected(void) { if(network_dual_mode())return false;return network_usb_mode()?usb_link_connected():network_wifi_mode()?network_connected():atomic_load(&subscribed); }
 bool ble_bridge_take_stop(void) { return atomic_exchange(&stop_requested, false); }
 void ble_bridge_set_motor_busy(bool busy) { atomic_store(&motor_busy, busy); }
@@ -703,6 +731,7 @@ void ble_bridge_init(QueueHandle_t commands, QueueHandle_t queries)
     ESP_ERROR_CHECK(err);
     bridge_name_load(saved_name);
     ESP_ERROR_CHECK(nimble_port_init());
+    ble_npl_event_init(&wifi_radio_event,wifi_radio_change,NULL);
     ble_hs_cfg.sm_io_cap=BLE_HS_IO_DISPLAY_ONLY;
     ble_hs_cfg.sm_bonding=1;ble_hs_cfg.sm_mitm=1;ble_hs_cfg.sm_sc=1;
     ble_hs_cfg.sm_our_key_dist=BLE_SM_PAIR_KEY_DIST_ENC|BLE_SM_PAIR_KEY_DIST_ID;

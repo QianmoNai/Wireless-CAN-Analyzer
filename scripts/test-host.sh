@@ -55,6 +55,7 @@ python3 tests/test_panel_dma.py
 python3 tests/test_serial_hardware.py
 python3 tests/test_ble_stress.py
 python3 tests/test_ble_connection_glue.py
+python3 tests/test_wifi_handoff.py
 node tests/test_imu.js
 node tests/test_motor_catalog.js
 node tests/test_history.js
