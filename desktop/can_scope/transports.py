@@ -10,6 +10,27 @@ import time
 from .protocol import SERVICE, WRITE, NOTIFY, NETWORK, PORT, ipv4, secret, wifi_commands
 
 
+def network_status_fields(value):
+    """Only public, bounded diagnostic fields; never retain the original JSON."""
+    result = {key: value[key] for key in ('state', 'error', 'mode')
+              if type(value.get(key)) is int and 0 <= value[key] <= 255}
+    if type(value.get('busy')) is bool:
+        result['busy'] = value['busy']
+    return result
+
+
+class WifiProvisionError(ValueError):
+    """Structured public status, with no SSID, credential or backend text."""
+    def __init__(self, value):
+        self.status = network_status_fields(value)
+        self.code = self.status.get('error')
+        reason = value.get('reason')
+        self.reason = reason if type(reason) is int and 0 <= reason <= 65535 else None
+        text = '设备配网失败，错误码：' + (str(self.code) if self.code is not None else '未知')
+        text += '；reason=' + (str(self.reason) if self.reason is not None else '固件未提供')
+        super().__init__(text)
+
+
 class LanTransport:
     def __init__(self, received, disconnected):
         self.received, self.disconnected = received, disconnected
@@ -114,6 +135,26 @@ class BleTransport:
             raise ConnectionError('蓝牙未连接')
         await asyncio.wait_for(self.client.write_gatt_char(WRITE, p, response=True), 5)
 
+    async def use_existing_bond(self):
+        """Reuse a BlueZ bond without Pair or agent registration.
+
+        The protected GATT characteristic still enforces encryption and MITM;
+        Paired=True alone does not bypass those checks.
+        """
+        from dbus_fast import Message, MessageType
+        self.provision_authenticated = False
+        backend = getattr(self.client, '_backend', None)
+        bus, path = getattr(backend, '_bus', None), getattr(backend, '_device_path', None)
+        if self.closed or not self.client or not self.client.is_connected or bus is None or not path:
+            raise ConnectionError('无法检查当前目标的已有蓝牙绑定；不会自动配对')
+        reply = await asyncio.wait_for(bus.call(Message(
+            destination='org.bluez', path=path, interface='org.freedesktop.DBus.Properties',
+            member='Get', signature='ss', body=['org.bluez.Device1', 'Paired'])), 5)
+        if (reply.message_type != MessageType.METHOD_RETURN or len(reply.body) != 1
+                or reply.body[0].value is not True):
+            raise ConnectionError('当前目标没有已确认的蓝牙绑定；不会自动配对')
+        self.provision_authenticated = True
+
     async def provision(self, operation, ssid, password, status, networks, *, pair=True):
         """Use pair=False only to reuse authentication on this same connection."""
         commands = []
@@ -142,7 +183,7 @@ class BleTransport:
             else:
                 raise TimeoutError('Wi-Fi 配置超时')
             if value.get('error') and operation != 1:
-                raise ValueError('设备配网失败，错误码：' + str(value['error']))
+                raise WifiProvisionError(value)
             if operation == 2:
                 rows = []
                 for _ in range(16):

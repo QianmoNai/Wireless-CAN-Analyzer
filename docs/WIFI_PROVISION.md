@@ -39,6 +39,18 @@ desktop/.venv/bin/python scripts/wifi-provision.py
 
 信任缓存位于桌面端相同的 Qt `AppLocalDataLocation`；通常为 `~/.local/share/Qianmo/CAN Scope Desktop/connection-1.json`（遵循系统 XDG 设置）。通过认证的 `id/fp/token/ip` 按桌面端方式保存，保留其他字段，目录 `0700`、原子替换后的文件 `0600`。已有缓存损坏时在配对前停止。不要粘贴或打印缓存内容。
 
+## 已绑定设备的无密码诊断
+
+```bash
+desktop/.venv/bin/python scripts/wifi-provision.py --diagnose
+```
+
+确认目标 ID 和 BLE 地址后，脚本只复用现有 BlueZ 绑定；未绑定时停止，不注册代理、不调用 Pair、不重建绑定。先读取并仅显示 `state/error/busy/mode`，再输入待匹配的 SSID 并调用固件既有 operation 2 扫描；不读密码、不发 BEGIN/DATA/APPLY/CLEAR、不改模式或桌面缓存。只输出目标是否出现及其 RSSI/authmode/可用信道，其他网络名称和认证材料不输出。
+
+当前固件的扫描项只有 `[SSID十六进制, RSSI, authmode]`，所以信道显示“未提供”，不能用电脑上的 AP 信道代替设备回报；最多返回 12 条记录，未出现也不能单独证明 AP 不存在。扫描会清零当前 `error`，因此必须保留**扫描前**状态，扫描后 `error=0` 不代表接入成功。
+
+配网失败现在使用只保留安全数值字段的结构化异常，显示汇总错误码和固件实际提供的 `reason`；旧固件未提供时明确标为未知。错误码 4 也可能掩盖握手/认证错误；错误码 5 表示凭据持久化失败，不是“接入后断开”的专用码。获得原始 reason/驱动阶段以及设备扫描信道需要固件新增诊断字段；本次主机端修改不改变或烧录固件。
+
 ## 故障排查
 
 - 扫不到：检查设备屏幕是否为蓝牙模式、是否被手机/桌面端占用、系统蓝牙是否可用。脚本不重启 hci0；不可随意删除其他设备的绑定。

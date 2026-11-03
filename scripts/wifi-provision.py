@@ -5,6 +5,7 @@
 先关闭桌面端/手机 App，在设备屏幕手动选择蓝牙模式。
 仅支持目标设备 90da7273722c；不操作串口或电脑网络连接。
 Linux 内置临时配对代理；仅在出现“ESP32 六位配对码”提示时，在本终端输入六位码。
+--diagnose 仅复用已有绑定读取状态并扫描，不配对、不读取密码、不尝试接入或改模式。
 """
 import argparse
 import asyncio
@@ -41,6 +42,7 @@ def report_failure(exc, where=None):
     from bleak.exc import BleakDBusError, BleakGATTProtocolError
     from dbus_fast import DBusError
     from can_scope.bluez_agent import AgentSetupError
+    from can_scope.transports import WifiProvisionError
     category = '未分类错误'
     message = '请检查当前步骤；敏感错误正文未输出。'
     if isinstance(exc, (StopProvision, AgentSetupError)):
@@ -74,17 +76,19 @@ def report_failure(exc, where=None):
         category, message = known.get(name, ('BlueZ/D-Bus 失败', '后端错误正文未输出；请检查目标设备、模式与当前连接。'))
     elif type(exc).__name__ == 'JSONDecodeError':
         category, message = '设备状态解析失败', '设备返回的状态不是有效 JSON；请先 QUERY 设备状态。'
-    elif type(exc) is ValueError and str(exc).startswith('设备配网失败，错误码：'):
-        # The text is our own literal plus a numeric firmware status code only.
-        code = str(exc).rsplit('：', 1)[-1]
+    elif isinstance(exc, WifiProvisionError):
+        code = exc.code
         reasons = {
-            '2': 'Wi-Fi 密码错误或握手超时；请核对 2.4 GHz 网络的密码。',
-            '3': '找不到该 Wi-Fi；请核对 SSID（区分大小写），并确认是 2.4 GHz、信号可达。',
-            '4': '设备未能接入该 Wi-Fi（其他原因）；请检查路由器的 2.4 GHz 设置、MAC 过滤和 DHCP。',
-            '5': '设备曾接入，随后断开；请检查信号和路由器设置。',
+            2: '认证失败或握手超时；不能仅据此断言密码错误。',
+            3: '未找到 AP；请核对名称、2.4 GHz 和可见性。',
+            4: '接入失败的汇总码；可能包括关联、未单列的认证失败、DHCP 超时或驱动调用失败。',
+            5: '凭据保存失败；请检查固件 NVS 持久化，不能据此解释为接入后断开。',
+            6: '设备 Wi-Fi 扫描失败。',
         }
-        category = '设备配网失败（错误码 ' + (code if code.isdigit() else '?') + '）'
+        category = '设备配网失败（错误码 ' + (str(code) if code is not None else '?') + '）'
         message = reasons.get(code, '设备返回了未知错误码；请先 QUERY 设备状态。')
+        reason = str(exc.reason) if exc.reason is not None else '未提供（当前固件需要增加诊断字段）'
+        message += ' reason=' + reason + '；安全状态=' + str(exc.status)
     elif isinstance(exc, TimeoutError):
         category, message = '等待超时', '当前步骤未按时完成；配对码只在本终端明确提示后输入，结果未知时先查询。'
     elif isinstance(exc, (EOFError, KeyboardInterrupt)):
@@ -176,6 +180,71 @@ async def find_ip(discover):
         if found:
             return found.pop()
     raise StopProvision('未发现目标 IP；请检查 2.4 GHz、同网段、DHCP、客户端隔离和 UDP 32323。')
+
+
+def matching_scan_rows(rows, ssid):
+    """No neighboring SSIDs; absent firmware channel stays unknown."""
+    name = ssid.encode('utf8').hex()
+    matches = []
+    for row in rows:
+        if not isinstance(row, list) or len(row) < 3 or row[0] != name:
+            continue
+        if not (type(row[1]) is int and -127 <= row[1] <= 0
+                and type(row[2]) is int and 0 <= row[2] <= 255):
+            continue
+        channel = row[3] if len(row) > 3 and type(row[3]) is int and 1 <= row[3] <= 14 else None
+        matches.append(dict(channel=channel, rssi=row[1], authmode=row[2]))
+    return matches
+
+
+async def diagnose():
+    """Existing authenticated bond only. Never touch the connection cache."""
+    import json
+    from can_scope.engine import Channel
+    from can_scope.transports import BleTransport, network_status_fields, scan_ble
+    step('诊断/BLE 扫描选择')
+    address, device = await select_device(scan_ble)
+    channel = Channel(lambda *_: None)
+    ble = BleTransport(channel.receive, lambda _: None)
+    latest = {}
+
+    def status(value):
+        if value.get('id') != TARGET:
+            raise StopProvision('设备 ID 不符，诊断已停止；不发送 Wi-Fi 扫描。')
+        latest.clear()
+        latest.update(network_status_fields(value))
+
+    try:
+        step('诊断/BLE 连接和 QUERY')
+        await ble.connect(device)
+        channel.transport, channel.ready = ble, True
+        current = await channel.handle('deviceSettings', [{}])
+        if current['status'] != 0 or current['network'] != 0:
+            raise StopProvision('诊断需要设备保持蓝牙模式（network=0）；不会自动改模式。')
+        step('诊断/确认已有绑定')
+        await ble.use_existing_bond()  # No agent, Pair, trust update or bond removal.
+        step('诊断/读取扫描前状态')
+        await asyncio.wait_for(ble.provision(1, '', '', status, lambda _: None, pair=False), 45)
+        print('扫描前状态：' + json.dumps(latest, ensure_ascii=False))
+        ssid = input('待诊断的 2.4 GHz SSID（只作匹配，不列出其他网络）：')
+        if not 1 <= len(ssid.encode('utf8')) <= 32 or '\0' in ssid:
+            raise StopProvision('待诊断名称须为 1–32 UTF-8 字节且不能包含空字符。')
+        matches = []
+        step('诊断/设备 Wi-Fi 扫描')
+        await asyncio.wait_for(ble.provision(2, '', '', status,
+                               lambda rows: matches.extend(matching_scan_rows(rows, ssid)), pair=False), 45)
+        ssid = ''
+        print('目标 SSID 是否出现：' + ('是' if matches else '否（本次最多返回 12 条记录，不能据此断言 AP 不存在）'))
+        for row in matches:
+            channel_text = str(row['channel']) if row['channel'] is not None else '未提供（现有固件不返回信道）'
+            print(f"信道={channel_text} RSSI={row['rssi']} dBm authmode={row['authmode']}")
+        step('诊断/读取扫描后状态')
+        await asyncio.wait_for(ble.provision(1, '', '', status, lambda _: None, pair=False), 45)
+        print('扫描后状态：' + json.dumps(latest, ensure_ascii=False))
+        print('注意：扫描会清零固件 error，扫描后 error=0 不代表接入成功；本次未尝试接入。')
+    finally:
+        channel.ready = False
+        await ble.close()
 
 
 async def provision():
@@ -320,12 +389,14 @@ def dry_run():
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
                                      epilog='恢复 USB直连+UART+115200（先关闭所有占用串口的程序，在仓库根目录依次运行）：\n' + recovery_commands())
-    parser.add_argument('--dry-run', action='store_true', help='离线无凭据自检；不扫描、不配对、不写缓存、不操作硬件')
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--dry-run', action='store_true', help='离线无凭据自检；不扫描、不配对、不写缓存、不操作硬件')
+    mode.add_argument('--diagnose', action='store_true', help='仅用现有绑定读取安全状态并扫描目标 Wi-Fi；不配对、不读密码、不改模式/缓存')
     args = parser.parse_args()
     protect_process()
     step('启动/参数检查')
     try:
-        print(NOTICE)
+        print('诊断模式：只复用现有绑定读取状态并扫描，不配对、不读密码、不尝试接入或改模式。' if args.diagnose else NOTICE)
         if args.dry_run:
             dry_run()
             return 0
@@ -334,9 +405,10 @@ def main():
         if not sys.stdin.isatty() or not sys.stdout.isatty():
             raise StopProvision('必须由用户在交互式终端运行；不接受重定向或管道输入。')
         print('请关闭桌面端和手机 App，在设备屏幕选择蓝牙模式；电脑保持现有网络连接。')
-        if input('确认仅配对并配置目标 ' + TARGET + '，请输入该 ID（回车取消）：').strip() != TARGET:
+        action = '诊断' if args.diagnose else '配对并配置'
+        if input('确认仅' + action + '目标 ' + TARGET + '，请输入该 ID（回车取消）：').strip() != TARGET:
             raise StopProvision('用户未确认，已停止。')
-        asyncio.run(provision())
+        asyncio.run(diagnose() if args.diagnose else provision())
         return 0
     except (KeyboardInterrupt, EOFError) as exc:
         report_failure(exc)

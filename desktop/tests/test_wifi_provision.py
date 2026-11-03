@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'desktop'))
 from can_scope.connection_store import load_connection, save_connection
 from can_scope.protocol import NETWORK, SERVICE, WRITE, packet, u32
-from can_scope.transports import BleTransport, discover
+from can_scope.transports import BleTransport, WifiProvisionError, discover, network_status_fields
 
 spec = importlib.util.spec_from_file_location('wifi_provision', ROOT / 'scripts/wifi-provision.py')
 cli = importlib.util.module_from_spec(spec)
@@ -40,6 +40,37 @@ class CacheTests(unittest.TestCase):
 
 
 class OfflineCliTests(unittest.TestCase):
+    def test_wifi_error_uses_structured_fields_and_correct_save_failure(self):
+        value = dict(state=4, error=5, busy=False, mode=0, reason=15,
+                     ssid='SYNTHETIC-PRIVATE', fp='SYNTHETIC-PRIVATE', token='SYNTHETIC-PRIVATE')
+        error = WifiProvisionError(value)
+        self.assertIsInstance(error, ValueError)
+        self.assertEqual(error.reason, 15)
+        with redirect_stderr(io.StringIO()) as output:
+            cli.report_failure(error, '[3/7] 配网发送/接入')
+            cli.report_failure(WifiProvisionError(dict(state=4, error=4, busy=False, mode=0)))
+            cli.report_failure(ValueError('设备配网失败，错误码：SYNTHETIC-PRIVATE'))
+        text = output.getvalue()
+        self.assertNotIn('SYNTHETIC-PRIVATE', text + repr(error))
+        self.assertIn('凭据保存失败', text)
+        self.assertIn('reason=15', text)
+        self.assertIn('reason=未提供', text)
+        self.assertIn('错误码 4', text)
+
+    def test_unsafe_status_fields_and_neighbor_ssids_are_not_retained(self):
+        bad = WifiProvisionError(dict(error='SYNTHETIC-PRIVATE', reason='SYNTHETIC-PRIVATE',
+                                      state=True, mode=-1, busy='SYNTHETIC-PRIVATE'))
+        self.assertEqual(bad.status, {})
+        self.assertIsNone(bad.code)
+        self.assertIsNone(bad.reason)
+        self.assertNotIn('SYNTHETIC-PRIVATE', repr(bad))
+        rows = [['Fixture'.encode().hex(), -54, 3], ['Neighbor'.encode().hex(), -20, 0]]
+        self.assertEqual(cli.matching_scan_rows(rows, 'Fixture'), [dict(channel=None, rssi=-54, authmode=3)])
+        rows[0].append(2)
+        self.assertEqual(cli.matching_scan_rows(rows, 'Fixture')[0]['channel'], 2)
+        self.assertEqual(network_status_fields(dict(state=4, error=4, busy=False, mode=0, reason=15,
+                                                   ssid='SYNTHETIC-PRIVATE')), dict(state=4, error=4, mode=0, busy=False))
+
     def test_structured_errors_are_classified_without_backend_payloads(self):
         from bleak.exc import BleakDBusError, BleakGATTProtocolError
         from dbus_fast import DBusError
@@ -104,6 +135,71 @@ class OfflineCliTests(unittest.TestCase):
 
 
 class ProvisionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_existing_bond_checks_paired_without_pair_or_trust_update(self):
+        from dbus_fast import MessageType, Variant
+        bus = SimpleNamespace(call=AsyncMock(return_value=SimpleNamespace(
+            message_type=MessageType.METHOD_RETURN, body=[Variant('b', True)])))
+        client = SimpleNamespace(is_connected=True, pair=AsyncMock(side_effect=AssertionError('Pair forbidden')),
+                                 _backend=SimpleNamespace(_bus=bus, _device_path='/org/bluez/hci0/dev_11_22_33_44_55_66'))
+        link = BleTransport(lambda _: None, lambda _: None)
+        link.client = client
+        await link.use_existing_bond()
+        message = bus.call.await_args.args[0]
+        self.assertEqual((message.member, message.body), ('Get', ['org.bluez.Device1', 'Paired']))
+        self.assertTrue(link.provision_authenticated)
+        client.pair.assert_not_awaited()
+        bus.call.return_value.body = [Variant('b', False)]
+        with self.assertRaises(ConnectionError):
+            await link.use_existing_bond()
+        self.assertFalse(link.provision_authenticated)
+
+    async def test_transport_preserves_numeric_failure_without_raw_json(self):
+        link = BleTransport(lambda _: None, lambda _: None)
+        link.provision_authenticated = True
+        value = dict(state=4, error=4, busy=False, mode=0, reason=23, ssid='SYNTHETIC-PRIVATE')
+        link.client = SimpleNamespace(is_connected=True, write_gatt_char=AsyncMock(),
+                                      read_gatt_char=AsyncMock(return_value=json.dumps(value).encode()))
+        with self.assertRaises(WifiProvisionError) as caught:
+            await link.provision(2, '', '', lambda _: None, lambda _: None, pair=False)
+        self.assertEqual((caught.exception.code, caught.exception.reason), (4, 23))
+        self.assertNotIn('SYNTHETIC-PRIVATE', repr(caught.exception))
+
+    async def test_diagnose_only_uses_existing_bond_status_and_scan(self):
+        events = []
+        address, ssid = '11:22:33:44:55:66', 'Fixture'
+        test = self
+        class Link:
+            def __init__(self, receive, _): self.receive = receive
+            async def connect(self, _): events.append('connect')
+            async def use_existing_bond(self): events.append('existing-bond')
+            async def write(self, command):
+                test.assertEqual(command[2:16], bytes(14))
+                self.receive(packet(22, b=0, x=1, y=115200, token=u32(command, 16)))
+            async def provision(self, operation, name, password, status, networks, *, pair):
+                test.assertFalse(pair)
+                test.assertEqual((name, password), ('', ''))
+                events.append(operation)
+                status(dict(id=cli.TARGET, state=4, error=4 if len(events) < 4 else 0,
+                            busy=False, mode=0, ssid='SYNTHETIC-PRIVATE', fp='SYNTHETIC-PRIVATE', token='SYNTHETIC-PRIVATE'))
+                if operation == 2:
+                    networks([[ssid.encode().hex(), -54, 3], ['Neighbor'.encode().hex(), -20, 0]])
+            async def close(self): events.append('close')
+        with patch('can_scope.transports.scan_ble', AsyncMock(return_value={address: object()})), \
+             patch('can_scope.transports.BleTransport', Link), patch('builtins.input', side_effect=[address, ssid]), \
+             patch.object(cli, 'pairing_agent', side_effect=AssertionError('agent forbidden')), \
+             patch('getpass.getpass', side_effect=AssertionError('password forbidden')), \
+             patch('can_scope.connection_store.load_connection', side_effect=AssertionError('cache forbidden')), \
+             patch('can_scope.connection_store.save_connection', side_effect=AssertionError('cache forbidden')), \
+             redirect_stdout(io.StringIO()) as output:
+            await cli.diagnose()
+        self.assertEqual(events, ['connect', 'existing-bond', 1, 2, 1, 'close'])
+        text = output.getvalue()
+        self.assertIn('目标 SSID 是否出现：是', text)
+        self.assertIn('RSSI=-54 dBm authmode=3', text)
+        self.assertIn('现有固件不返回信道', text)
+        self.assertNotIn('SYNTHETIC-PRIVATE', text)
+        self.assertNotIn('Neighbor', text)
+
     async def test_discovery_uses_subnet_broadcast_and_filters_identity(self):
         loop = asyncio.get_running_loop()
         sock = MagicMock()
