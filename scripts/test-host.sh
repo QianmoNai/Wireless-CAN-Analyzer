@@ -29,6 +29,7 @@ compile_run test_usb_protocol -Wall -Wextra -Werror
 cc -std=c11 -Wall -Wextra -Werror -Itests/settings_stubs -Itests/usb_stubs -Ifirmware/main tests/test_device_settings.c firmware/main/board_ui_model.c -o "$test_build_dir/test_device_settings"
 "$test_build_dir/test_device_settings"
 compile_run test_network_protocol firmware/main/network_protocol.c
+compile_run test_network_diagnostics -Wall -Wextra -Werror firmware/main/network_diagnostics.c
 cc -std=c11 -Wall -Wextra -Werror -Ifirmware/main tests/test_dual_protocol.c tests/dual_crypto_host.c firmware/main/dual_protocol.c firmware/main/dual_session.c -lcrypto -o "$test_build_dir/test_dual_protocol"
 "$test_build_dir/test_dual_protocol"
 cc -std=c11 -Wall -Wextra -Werror -Itests/dual_stubs -Ifirmware/main tests/test_dual_runtime.c tests/dual_runtime_a.c tests/dual_runtime_b.c tests/dual_crypto_host.c firmware/main/dual_protocol.c firmware/main/dual_session.c -lcrypto -o "$test_build_dir/test_dual_runtime"

@@ -16,7 +16,46 @@ def network_status_fields(value):
               if type(value.get(key)) is int and 0 <= value[key] <= 255}
     if type(value.get('busy')) is bool:
         result['busy'] = value['busy']
+    for key, low, high in (('reason', -1, 65535), ('stage', 0, 5),
+                           ('api_err', -(2**31), 2**31-1), ('got_ip', 0, 1)):
+        if type(value.get(key)) is int and low <= value[key] <= high:
+            result[key] = value[key]
     return result
+
+
+# ESP-IDF wifi_err_reason_t, not the separate provisioning error_code enum.
+_WIFI_REASONS = {
+    -1: '未收到断开事件（stage=0 表示启动后尚无 APPLY）',
+    1: '未指定原因', 2: '认证过期', 3: '认证后离开', 4: '因不活跃被断开',
+    5: 'AP 关联数已满', 6: '未认证站点发送 Class 2 帧',
+    7: '未关联站点发送 Class 3 帧', 8: '主动离开关联', 9: '关联时尚未认证',
+    10: '功率能力不符合要求', 11: '支持信道不符合要求', 12: 'BSS 切换断开',
+    13: '信息元素无效', 14: 'MIC 校验失败', 15: '四次握手超时',
+    16: '组密钥更新超时', 17: '四次握手信息元素不一致',
+    18: '组加密算法无效', 19: '单播加密算法无效', 20: 'AKMP 无效',
+    21: 'RSN 信息元素版本不支持', 22: 'RSN 能力无效', 23: '802.1X 认证失败',
+    24: '加密套件被拒绝', 29: '加密算法或 AKM 不符合要求',
+    34: '缺少 ACK', 39: '超时', 46: '对端发起断开', 47: 'AP 发起断开',
+    49: 'PMKID 无效', 200: 'Beacon 超时', 201: '未找到 AP',
+    202: '认证失败', 203: '关联失败', 204: '握手超时', 205: '连接失败',
+    206: 'AP TSF 重置', 207: '漫游', 208: '关联重试等待时间过长',
+    209: 'SA Query 超时', 210: '未找到安全配置兼容的 AP',
+    211: '未找到符合认证模式阈值的 AP', 212: '未找到符合 RSSI 阈值的 AP',
+}
+_WIFI_STAGES = {0: '尚无 APPLY', 1: 'set_config/设置配置', 2: 'start/启动',
+                3: 'connect/发起连接', 4: 'wait_ip/等待 IP', 5: 'save/保存'}
+
+
+def network_diagnostics_text(value):
+    """Format only whitelisted integers; no backend messages or arbitrary JSON."""
+    safe = network_status_fields(value)
+    reason, stage, err = (safe.get(key) for key in ('reason', 'stage', 'api_err'))
+    reason_text = ('未提供（当前固件需要增加诊断字段）' if reason is None else
+                   str(reason) + '（' + _WIFI_REASONS.get(reason, '未知断开原因') + '）')
+    stage_text = '未提供' if stage is None else str(stage) + '（' + _WIFI_STAGES[stage] + '）'
+    err_text = '未提供' if err is None else str(err) + '（0x' + format(err & 0xffffffff, '08x') + '）'
+    return ('reason=' + reason_text + '；stage=' + stage_text + '；api_err=' + err_text
+            + '；got_ip=' + str(safe.get('got_ip', '未提供')))
 
 
 class WifiProvisionError(ValueError):
@@ -24,10 +63,9 @@ class WifiProvisionError(ValueError):
     def __init__(self, value):
         self.status = network_status_fields(value)
         self.code = self.status.get('error')
-        reason = value.get('reason')
-        self.reason = reason if type(reason) is int and 0 <= reason <= 65535 else None
+        self.reason = self.status.get('reason')
         text = '设备配网失败，错误码：' + (str(self.code) if self.code is not None else '未知')
-        text += '；reason=' + (str(self.reason) if self.reason is not None else '固件未提供')
+        text += '；' + network_diagnostics_text(self.status)
         super().__init__(text)
 
 

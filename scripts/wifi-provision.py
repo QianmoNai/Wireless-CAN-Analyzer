@@ -42,7 +42,7 @@ def report_failure(exc, where=None):
     from bleak.exc import BleakDBusError, BleakGATTProtocolError
     from dbus_fast import DBusError
     from can_scope.bluez_agent import AgentSetupError
-    from can_scope.transports import WifiProvisionError
+    from can_scope.transports import WifiProvisionError, network_diagnostics_text
     category = '未分类错误'
     message = '请检查当前步骤；敏感错误正文未输出。'
     if isinstance(exc, (StopProvision, AgentSetupError)):
@@ -87,8 +87,7 @@ def report_failure(exc, where=None):
         }
         category = '设备配网失败（错误码 ' + (str(code) if code is not None else '?') + '）'
         message = reasons.get(code, '设备返回了未知错误码；请先 QUERY 设备状态。')
-        reason = str(exc.reason) if exc.reason is not None else '未提供（当前固件需要增加诊断字段）'
-        message += ' reason=' + reason + '；安全状态=' + str(exc.status)
+        message += ' ' + network_diagnostics_text(exc.status) + '；安全状态=' + str(exc.status)
     elif isinstance(exc, TimeoutError):
         category, message = '等待超时', '当前步骤未按时完成；配对码只在本终端明确提示后输入，结果未知时先查询。'
     elif isinstance(exc, (EOFError, KeyboardInterrupt)):
@@ -201,7 +200,7 @@ async def diagnose():
     """Existing authenticated bond only. Never touch the connection cache."""
     import json
     from can_scope.engine import Channel
-    from can_scope.transports import BleTransport, network_status_fields, scan_ble
+    from can_scope.transports import BleTransport, network_diagnostics_text, network_status_fields, scan_ble
     step('诊断/BLE 扫描选择')
     address, device = await select_device(scan_ble)
     channel = Channel(lambda *_: None)
@@ -226,6 +225,7 @@ async def diagnose():
         step('诊断/读取扫描前状态')
         await asyncio.wait_for(ble.provision(1, '', '', status, lambda _: None, pair=False), 45)
         print('扫描前状态：' + json.dumps(latest, ensure_ascii=False))
+        print('接入诊断：' + network_diagnostics_text(latest))
         ssid = input('待诊断的 2.4 GHz SSID（只作匹配，不列出其他网络）：')
         if not 1 <= len(ssid.encode('utf8')) <= 32 or '\0' in ssid:
             raise StopProvision('待诊断名称须为 1–32 UTF-8 字节且不能包含空字符。')
@@ -241,7 +241,8 @@ async def diagnose():
         step('诊断/读取扫描后状态')
         await asyncio.wait_for(ble.provision(1, '', '', status, lambda _: None, pair=False), 45)
         print('扫描后状态：' + json.dumps(latest, ensure_ascii=False))
-        print('注意：扫描会清零固件 error，扫描后 error=0 不代表接入成功；本次未尝试接入。')
+        print('接入诊断：' + network_diagnostics_text(latest))
+        print('注意：扫描后 error=0 不代表接入成功；新固件保留上次 APPLY 诊断直到下一次 APPLY 或重启。本次未尝试接入。')
     finally:
         channel.ready = False
         await ble.close()

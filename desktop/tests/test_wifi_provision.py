@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'desktop'))
 from can_scope.connection_store import load_connection, save_connection
 from can_scope.protocol import NETWORK, SERVICE, WRITE, packet, u32
-from can_scope.transports import BleTransport, WifiProvisionError, discover, network_status_fields
+from can_scope.transports import BleTransport, WifiProvisionError, discover, network_diagnostics_text, network_status_fields
 
 spec = importlib.util.spec_from_file_location('wifi_provision', ROOT / 'scripts/wifi-provision.py')
 cli = importlib.util.module_from_spec(spec)
@@ -57,6 +57,42 @@ class OfflineCliTests(unittest.TestCase):
         self.assertIn('reason=未提供', text)
         self.assertIn('错误码 4', text)
 
+    def test_diagnostic_fields_are_bounded_and_no_arbitrary_text_is_retained(self):
+        safe = dict(state=4, error=4, mode=0, busy=False, reason=-1,
+                    stage=4, api_err=-1, got_ip=0)
+        value = dict(safe, ssid='SYNTHETIC-PRIVATE', fp='SYNTHETIC-PRIVATE',
+                     token='SYNTHETIC-PRIVATE', detail='SYNTHETIC-PRIVATE')
+        self.assertEqual(network_status_fields(value), safe)
+        error = WifiProvisionError(value)
+        self.assertEqual(error.reason, -1)
+        text = network_diagnostics_text(value)
+        self.assertIn('未收到断开事件', text)
+        self.assertIn('stage=4（wait_ip', text)
+        self.assertIn('api_err=-1（0xffffffff）', text)
+        self.assertNotIn('SYNTHETIC-PRIVATE', text + repr(error))
+        for key, invalid in (('reason', -2), ('reason', 65536), ('stage', 6),
+                             ('api_err', 2**31), ('api_err', -(2**31)-1),
+                             ('got_ip', 2)):
+            self.assertNotIn(key, network_status_fields({key: invalid}))
+        for key in ('reason', 'stage', 'api_err', 'got_ip'):
+            for invalid in (True, None, 'SYNTHETIC-PRIVATE', {'x': 'SYNTHETIC-PRIVATE'}):
+                self.assertNotIn(key, network_status_fields({key: invalid}))
+        self.assertIn('reason=未提供', network_diagnostics_text({}))
+
+    def test_reason_and_stage_names_match_idf_numeric_codes(self):
+        meanings = {2: '认证过期', 15: '四次握手超时', 23: '802.1X 认证失败',
+                    201: '未找到 AP', 202: '认证失败', 203: '关联失败',
+                    204: '握手超时', 205: '连接失败', 206: 'AP TSF 重置',
+                    207: '漫游', 208: '关联重试等待时间过长', 209: 'SA Query 超时',
+                    210: '安全配置兼容', 211: '认证模式阈值', 212: 'RSSI 阈值'}
+        for reason, meaning in meanings.items():
+            text = network_diagnostics_text(dict(reason=reason))
+            self.assertIn('reason=' + str(reason), text)
+            self.assertIn(meaning, text)
+        for stage, meaning in enumerate(('尚无 APPLY', 'set_config', 'start', 'connect', 'wait_ip', 'save')):
+            self.assertIn(meaning, network_diagnostics_text(dict(stage=stage)))
+        self.assertIn('未知断开原因', network_diagnostics_text(dict(reason=65535)))
+
     def test_unsafe_status_fields_and_neighbor_ssids_are_not_retained(self):
         bad = WifiProvisionError(dict(error='SYNTHETIC-PRIVATE', reason='SYNTHETIC-PRIVATE',
                                       state=True, mode=-1, busy='SYNTHETIC-PRIVATE'))
@@ -69,7 +105,7 @@ class OfflineCliTests(unittest.TestCase):
         rows[0].append(2)
         self.assertEqual(cli.matching_scan_rows(rows, 'Fixture')[0]['channel'], 2)
         self.assertEqual(network_status_fields(dict(state=4, error=4, busy=False, mode=0, reason=15,
-                                                   ssid='SYNTHETIC-PRIVATE')), dict(state=4, error=4, mode=0, busy=False))
+                                                   ssid='SYNTHETIC-PRIVATE')), dict(state=4, error=4, mode=0, busy=False, reason=15))
 
     def test_structured_errors_are_classified_without_backend_payloads(self):
         from bleak.exc import BleakDBusError, BleakGATTProtocolError
@@ -180,9 +216,10 @@ class ProvisionTests(unittest.IsolatedAsyncioTestCase):
                 test.assertEqual((name, password), ('', ''))
                 events.append(operation)
                 status(dict(id=cli.TARGET, state=4, error=4 if len(events) < 4 else 0,
-                            busy=False, mode=0, ssid='SYNTHETIC-PRIVATE', fp='SYNTHETIC-PRIVATE', token='SYNTHETIC-PRIVATE'))
+                            busy=False, mode=0, reason=203, stage=4, api_err=0, got_ip=0,
+                            ssid='SYNTHETIC-PRIVATE', fp='SYNTHETIC-PRIVATE', token='SYNTHETIC-PRIVATE'))
                 if operation == 2:
-                    networks([[ssid.encode().hex(), -54, 3], ['Neighbor'.encode().hex(), -20, 0]])
+                    networks([[ssid.encode().hex(), -54, 3, 2], ['Neighbor'.encode().hex(), -20, 0]])
             async def close(self): events.append('close')
         with patch('can_scope.transports.scan_ble', AsyncMock(return_value={address: object()})), \
              patch('can_scope.transports.BleTransport', Link), patch('builtins.input', side_effect=[address, ssid]), \
@@ -196,7 +233,10 @@ class ProvisionTests(unittest.IsolatedAsyncioTestCase):
         text = output.getvalue()
         self.assertIn('目标 SSID 是否出现：是', text)
         self.assertIn('RSSI=-54 dBm authmode=3', text)
-        self.assertIn('现有固件不返回信道', text)
+        self.assertIn('信道=2', text)
+        self.assertEqual(text.count('reason=203（关联失败）'), 2)
+        self.assertEqual(text.count('stage=4（wait_ip/等待 IP）'), 2)
+        self.assertIn('api_err=0（0x00000000）', text)
         self.assertNotIn('SYNTHETIC-PRIVATE', text)
         self.assertNotIn('Neighbor', text)
 
