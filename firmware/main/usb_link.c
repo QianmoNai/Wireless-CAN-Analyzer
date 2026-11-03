@@ -7,13 +7,21 @@
 #include "sdkconfig.h"
 #if CONFIG_IDF_TARGET_ESP32S3
 #include "driver/usb_serial_jtag.h"
+#include "driver/usb_serial_jtag_select.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "esp_timer.h"
 #include <stdatomic.h>
 
 typedef struct {uint32_t session;bridge_packet_t packet;} queued_t;
 static QueueHandle_t raw_out,control_out;
 static SemaphoreHandle_t guard;
+static TaskHandle_t worker_task;
+enum { TX_BATCH_FRAMES=64, TX_BATCH_US=2000,
+       WORKER_BUSY_US=10000, WORKER_REST_US=2000 };
+static void input_ready(usj_select_notif_t event,int *task_woken){
+    if(event==USJ_SELECT_READ_NOTIF)vTaskNotifyGiveFromISR(worker_task,task_woken);
+}
 static atomic_uint session_id,last_ping;
 static usb_decoder_t decoder;
 static uint32_t millis(void){return (uint32_t)(esp_timer_get_time()/1000);}
@@ -35,7 +43,9 @@ void usb_link_reset(void){
 bool usb_link_send(const bridge_packet_t *p){
     if(!usb_link_connected())return false;
     queued_t q={.session=atomic_load(&session_id),.packet=*p};
-    return xQueueSend(bridge_packet_is_raw(p)?raw_out:control_out,&q,0)==pdTRUE;
+    if(xQueueSend(bridge_packet_is_raw(p)?raw_out:control_out,&q,0)!=pdTRUE)return false;
+    if(worker_task)xTaskNotifyGive(worker_task);
+    return true;
 }
 static bool send_packet(uint32_t session,const uint8_t payload[20]){
     uint8_t frame[32];usb_encode(frame,session,payload);
@@ -82,7 +92,9 @@ static void service(const uint8_t *bytes,int n){
             if(usb_decode(&decoder,bytes[i],&session,payload))ok=incoming(session,payload);
         }
         queued_t q;
-        for(unsigned count=0;ok&&count<32&&usb_link_connected()&&
+        int64_t started=esp_timer_get_time();
+        for(unsigned count=0;ok&&count<TX_BATCH_FRAMES&&
+            esp_timer_get_time()-started<TX_BATCH_US&&usb_link_connected()&&
             (xQueueReceive(control_out,&q,0)==pdTRUE||xQueueReceive(raw_out,&q,0)==pdTRUE);count++)
         {
             if(q.session==atomic_load(&session_id))ok=send_packet(q.session,q.packet.bytes);
@@ -94,20 +106,41 @@ static void service(const uint8_t *bytes,int n){
     }
     xSemaphoreGive(guard);
 }
+static void worker_step(int64_t *busy_us){
+    int64_t started=esp_timer_get_time();
+    // Input never holds up queued output. Poll it again between bounded batches.
+    uint8_t bytes[256];int n=usb_serial_jtag_read_bytes(bytes,sizeof(bytes),0);
+    service(bytes,n);
+    *busy_us+=esp_timer_get_time()-started;
+    if(*busy_us>=WORKER_BUSY_US){
+        // A real blocked tick lets lower-priority/idle tasks run even under
+        // continuous input/output. taskYIELD alone cannot prevent starvation.
+        vTaskDelay(1);
+        *busy_us=0;
+    }else if(n<=0&&!uxQueueMessagesWaiting(control_out)&&!uxQueueMessagesWaiting(raw_out)){
+        // Both USB RX interrupts and queue producers wake us immediately.
+        // The timeout also services disconnects/expiry without traffic. A
+        // notification arriving after the empty check is not lost.
+        // A long wait already gives other tasks time to run. Do not follow it
+        // with an unnecessary forced tick; immediate notifications keep the
+        // busy budget so a steady producer still cannot starve idle tasks.
+        int64_t waiting=esp_timer_get_time();
+        unsigned notified=ulTaskNotifyTake(pdTRUE,1);
+        if(!notified||esp_timer_get_time()-waiting>=WORKER_REST_US)*busy_us=0;
+    }
+}
 static void worker(void *arg){
     (void)arg;
-    for(;;){
-        uint8_t bytes[256];int n=usb_serial_jtag_read_bytes(bytes,sizeof(bytes),pdMS_TO_TICKS(10));
-        service(bytes,n);
-        vTaskDelay(pdMS_TO_TICKS(1));
-    }
+    int64_t busy_us=0;
+    for(;;)worker_step(&busy_us);
 }
 void usb_link_init(void){
     guard=xSemaphoreCreateMutex();raw_out=xQueueCreate(128,sizeof(queued_t));control_out=xQueueCreate(32,sizeof(queued_t));
     ESP_ERROR_CHECK(guard&&raw_out&&control_out?ESP_OK:ESP_ERR_NO_MEM);
     usb_serial_jtag_driver_config_t cfg={.rx_buffer_size=4096,.tx_buffer_size=8192};
     ESP_ERROR_CHECK(usb_serial_jtag_driver_install(&cfg));
-    ESP_ERROR_CHECK(xTaskCreate(worker,"usb_bridge",4096,NULL,4,NULL)==pdPASS?ESP_OK:ESP_ERR_NO_MEM);
+    ESP_ERROR_CHECK(xTaskCreate(worker,"usb_bridge",4096,NULL,4,&worker_task)==pdPASS?ESP_OK:ESP_ERR_NO_MEM);
+    usb_serial_jtag_set_select_notif_callback(input_ready);
 }
 #else
 void usb_link_init(void){}

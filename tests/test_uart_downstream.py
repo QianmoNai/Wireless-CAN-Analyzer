@@ -36,12 +36,17 @@ QueueHandle_t xQueueCreate(unsigned n,size_t size){struct queue*q=calloc(1,sizeo
 int xQueueSend(QueueHandle_t q,const void*p,unsigned w){(void)w;if(q->count==q->limit)return 0;memcpy(q->data+q->size*q->count++,p,q->size);return 1;}
 int xQueueReceive(QueueHandle_t q,void*p,unsigned w){(void)w;if(!q->count)return 0;memcpy(p,q->data,q->size);memmove(q->data,q->data+q->size,--q->count*q->size);return 1;}
 void xQueueReset(QueueHandle_t q){q->count=0;}
+unsigned uxQueueMessagesWaiting(QueueHandle_t q){return q->count;}
 SemaphoreHandle_t xSemaphoreCreateMutex(void){return (void*)1;}
 int xSemaphoreTake(SemaphoreHandle_t q,unsigned w){(void)q;(void)w;return 1;}
 int xSemaphoreGive(SemaphoreHandle_t q){(void)q;return 1;}
 int xTaskCreate(void(*f)(void*),const char*n,unsigned s,void*a,unsigned p,void*h){(void)f;(void)n;(void)s;(void)a;(void)p;(void)h;return 1;}
 static uint32_t now=10;static unsigned mode=4,delays,resets;static bool online=true,sink_success;
 void vTaskDelay(unsigned t){now+=t;delays++;}
+void xTaskNotifyGive(TaskHandle_t task){(void)task;}
+void vTaskNotifyGiveFromISR(TaskHandle_t task,int*woken){(void)task;(void)woken;}
+unsigned ulTaskNotifyTake(int clear,unsigned ticks){(void)clear;(void)ticks;return 0;}
+void usb_serial_jtag_set_select_notif_callback(usj_select_notif_callback_t callback){(void)callback;}
 int64_t esp_timer_get_time(void){return (int64_t)now*1000;}
 bool network_usb_mode(void){return mode==4;}
 bool network_wifi_mode(void){return mode==1;}
