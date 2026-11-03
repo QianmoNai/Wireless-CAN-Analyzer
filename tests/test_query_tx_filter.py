@@ -33,10 +33,14 @@ PRELUDE = r'''
 #include "ble_diagnostics.h"
 typedef struct {
  bridge_packet_t packet;
+ uint32_t generation;
 #if CONFIG_BLE_TEST_DIAGNOSTICS
  int64_t enqueued_us;
 #endif
 } notify_item_t;
+static atomic_uint notify_generation,ble_generation;
+static unsigned wakes;
+static void wake_notify(void){wakes++;}
 static bool selected_uart;
 bool uart_bridge_selected(void){return selected_uart;}
 void uart_bridge_drop_packet(const bridge_packet_t *p){(void)p;}
@@ -129,7 +133,7 @@ int main(void){
     assert(atomic_load(&bd[bd_index(BD_RAW,BD_FULL_BYTES)])==3);
     assert(sizeof(notify_item_t)>sizeof(bridge_packet_t));
 #else
-    assert(sizeof(notify_item_t)==sizeof(bridge_packet_t));
+    assert(sizeof(notify_item_t)==sizeof(bridge_packet_t)+sizeof(uint32_t));
 #endif
     puts("PASS: real BLE publisher/filter, tokenless query TX raw routing, mode0-only telemetry, preserved token-bearing control/management ACK routing and raw saturation isolation.");
 }
@@ -138,7 +142,7 @@ int main(void){
 with tempfile.TemporaryDirectory(prefix="can-query-filter-") as temporary:
     harness = Path(temporary) / "filter.c"
     binary = Path(temporary) / "filter"
-    harness.write_text(PRELUDE + function("static unsigned packet_class(") + function("static unsigned packet_bytes(") + function("static bool enqueue_packet(") + function("static bool home_redundant(") + "\n" + function("void ble_bridge_publish(") + TEST)
+    harness.write_text(PRELUDE + function("static uint32_t packet_generation(") + function("static unsigned packet_class(") + function("static unsigned packet_bytes(") + function("static bool enqueue_packet(") + function("static bool home_redundant(") + "\n" + function("void ble_bridge_publish(") + TEST)
     for enabled in (0, 1):
         subprocess.run(["cc", "-DCONFIG_BLE_TEST_DIAGNOSTICS="+str(enabled), "-std=gnu11", "-O2", "-I" + str(ROOT / "tests/stubs"), "-I" + str(ROOT / "firmware/main"), str(harness), str(ROOT / "firmware/main/home_status.c"), str(ROOT / "firmware/main/ack_delivery.c"), "-o", str(binary)], check=True)
         subprocess.run([str(binary)], check=True)

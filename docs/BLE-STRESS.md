@@ -47,7 +47,7 @@ recover with the two `serial-settings.py` commands in the approved bench plan.
 `CONFIG_BLE_TEST_DIAGNOSTICS` defaults off. Enabling it adds read-only UUID
 `c0de0005-1212-efde-1523-785feabcd123`; the existing v1 characteristics and
 20-byte messages are unchanged. Instrumented queue entries carry timestamps;
-normal builds keep 20-byte queue entries. No diagnostic logs enter UART/CUSB.
+normal builds keep 24-byte queue entries (20-byte packet plus local generation). No diagnostic logs enter UART/CUSB.
 Compare diagnostics-on/off builds before interpreting small performance changes.
 Use `--require-diagnostics` for instrumented runs to fail before supply when the
 new characteristic is hidden by a stale GATT cache.
@@ -88,3 +88,38 @@ check that other Device1 object paths are unchanged. This clears that unpaired
 device's cache only; do not pair, delete another device, restart hci0, or remove
 system-wide BlueZ storage. Stop rather than applying these steps to a paired
 analyzer without an explicit device-specific plan.
+
+## Notify scheduling
+
+`CONFIG_BLE_EVENT_SCHEDULER` is an opt-in **test-only** candidate, depends on
+BLE_TEST_DIAGNOSTICS and defaults off. The 12/24/36 pool experiments failed the
+full overload control/ledger gate, so production retains the previous scheduler
+and default pools. The description below applies to this experimental option.
+The type17 resource-protection fix is retained in both paths.
+
+Periodic type17 uses the control queue and the same selected-pool reserve as
+ACK/control/raw. It remains one-attempt best effort and explicitly routes to
+BLE even while LAN is the primary data link. ACK → control → raw is checked
+again after every packet. A probe of the payload's own pool leaves raw queued
+while fewer than payload + header + six management blocks are available.
+The probe is a hint; the actual submission still performs its own reserve check
+and consumes its mbuf on both success and error. No raw payload is replayed.
+
+Producers, connect/disconnect/subscribe and current-connection local notify
+attempt hints wake the worker. ESP-IDF 6.0.2 emits NOTIFY_TX from notify_custom's
+attempt path, **not** a controller credit completion; it is never treated as a
+receipt or permission to submit blindly. An interruptible ten-millisecond
+checkpoint rechecks actual pool capacity when no suitable public credit-return
+hook is available. This replaces BLE's mandatory failure sleep and empty-raw
+queue wait; resources/events can resume work sooner. ACK keeps at most eight
+attempts and seven bounded resource waits; ordinary control keeps three attempts.
+Existing non-BLE failure retry delays remain unchanged.
+
+A batch contains at most eight deliveries or two milliseconds between deliveries;
+a separately bounded ACK/control retry can exceed that per-batch time. After
+four milliseconds of cumulative active work, a real blocked tick serves host and
+idle tasks. Interrupted waits retain the busy budget, preventing producer hints
+from causing an endless spin. Normal blocked waits reset it. Generation tags
+reject packets popped before reset and recheck across ACK retries; stale hints
+only wake the worker and cannot authorize old data or complete a new token.
+Pool counts and queue capacities are independent test variables.

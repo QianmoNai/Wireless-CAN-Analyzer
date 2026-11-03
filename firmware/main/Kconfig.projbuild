@@ -5,6 +5,13 @@ config BLE_TEST_DIAGNOSTICS
     help
         Adds c0de0005 and queue timestamps/counters. Does not change the
         fixed 20-byte v1 protocol. Disable for normal production builds.
+config BLE_EVENT_SCHEDULER
+    bool "Experimental event/resource notify scheduler"
+    depends on BLE_TEST_DIAGNOSTICS
+    default n
+    help
+        Bench A/B only. The 12/24/36 pool candidates still failed overloaded
+        control deadlines; keep the previous scheduler as the normal fallback.
 endmenu
 
 menu "CAN analyzer status LED"

@@ -5,10 +5,10 @@
 
 typedef struct {
     bool online;
-    unsigned sends, delays, failures, disconnect_after_delays;
+    unsigned sends, delays, failures, disconnect_after_delays, generation, expected_generation, change_after_delays;
     bridge_packet_t expected;
 } delivery_t;
-static bool connected(void *context) { return ((delivery_t *)context)->online; }
+static bool connected(void *context) { delivery_t *d=context;return d->online&&d->generation==d->expected_generation; }
 static bool send(void *context, const bridge_packet_t *packet)
 {
     delivery_t *d = context;
@@ -20,6 +20,7 @@ static void delay(void *context, unsigned milliseconds)
     delivery_t *d = context;
     assert(milliseconds == 10);
     if (++d->delays == d->disconnect_after_delays) d->online = false;
+    if(d->delays==d->change_after_delays)d->generation++;
 }
 int main(void)
 {
@@ -61,6 +62,11 @@ int main(void)
     d = (delivery_t){.online = true, .failures = 100, .disconnect_after_delays = 2, .expected = packet};
     assert(!bridge_deliver_ack(&packet, connected, send, delay, &d));
     assert(d.sends == 2 && d.delays == 2);
+    // A reset can invalidate a captured packet even when a new connection is
+    // already online. Its old ACK must stop before any further attempt.
+    d = (delivery_t){.online=true,.failures=100,.expected=packet,.change_after_delays=2};
+    assert(!bridge_deliver_ack(&packet,connected,send,delay,&d));
+    assert(d.sends==2&&d.delays==2&&d.online);
     d = (delivery_t){.expected = packet};
     assert(!bridge_deliver_ack(&packet, connected, send, delay, &d));
     assert(d.sends == 0 && d.delays == 0);

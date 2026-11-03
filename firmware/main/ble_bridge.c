@@ -8,7 +8,13 @@ void ble_store_config_init(void);
 #include "home_status.h"
 #include "ack_delivery.h"
 #include "notify_resource.h"
+#include "notify_schedule.h"
 #include "sdkconfig.h"
+#if CONFIG_BLE_EVENT_SCHEDULER
+#define BLE_EVENT_SCHEDULER_ENABLED 1
+#else
+#define BLE_EVENT_SCHEDULER_ENABLED 0
+#endif
 #include "ble_diagnostics.h"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
@@ -71,10 +77,17 @@ static atomic_bool motor_busy, stop_requested;
 static void advertise(void);
 typedef struct {
     bridge_packet_t packet;
+    uint32_t generation;
 #if CONFIG_BLE_TEST_DIAGNOSTICS
     int64_t enqueued_us;
 #endif
 } notify_item_t;
+static atomic_uint notify_generation,ble_generation;
+static TaskHandle_t notify_worker;
+static void wake_notify(void){if(notify_worker)xTaskNotifyGive(notify_worker);}
+static uint32_t packet_generation(const bridge_packet_t *p){
+    return atomic_load(p->bytes[1]==17?&ble_generation:&notify_generation);
+}
 #if CONFIG_BLE_TEST_DIAGNOSTICS
 static unsigned packet_class(const bridge_packet_t *p){
     return bridge_packet_is_ack(p)?BD_ACK:bridge_packet_is_raw(p)?BD_RAW:BD_CONTROL;
@@ -82,7 +95,7 @@ static unsigned packet_class(const bridge_packet_t *p){
 static unsigned packet_bytes(const bridge_packet_t *p){return p->bytes[1]==19?p->bytes[2]:0;}
 #endif
 static bool enqueue_packet(QueueHandle_t queue,const bridge_packet_t *p){
-    notify_item_t item={.packet=*p};
+    notify_item_t item={.packet=*p,.generation=packet_generation(p)};
 #if CONFIG_BLE_TEST_DIAGNOSTICS
     item.enqueued_us=esp_timer_get_time();
     unsigned cls=packet_class(p);
@@ -90,13 +103,18 @@ static bool enqueue_packet(QueueHandle_t queue,const bridge_packet_t *p){
     bool ok=xQueueSend(queue,&item,0)==pdTRUE;
     if(ok){bd_add(bd_index(cls,BD_ENQUEUED),1);bd_max(bd_index(cls,BD_HIGH_WATER),uxQueueMessagesWaiting(queue));}
     else{bd_add(bd_index(cls,BD_FULL_PACKETS),1);bd_add(bd_index(cls,BD_FULL_BYTES),packet_bytes(p));}
+    if(ok)wake_notify();
     return ok;
+}
+static bool dequeue_item(QueueHandle_t queue,notify_item_t *item,TickType_t wait){
+    if(xQueueReceive(queue,item,wait)!=pdTRUE)return false;
+    bd_max(bd_index(packet_class(&item->packet),BD_MAX_AGE_MS),(esp_timer_get_time()-item->enqueued_us)/1000);
+    return true;
 }
 static bool dequeue_packet(QueueHandle_t queue,bridge_packet_t *p,TickType_t wait){
     notify_item_t item;
-    if(xQueueReceive(queue,&item,wait)!=pdTRUE)return false;
+    if(!dequeue_item(queue,&item,wait))return false;
     *p=item.packet;
-    bd_max(bd_index(packet_class(p),BD_MAX_AGE_MS),(esp_timer_get_time()-item.enqueued_us)/1000);
     return true;
 }
 static void discard_raw_queue(void){
@@ -230,6 +248,7 @@ int ble_bridge_command(const uint8_t bytes[20])
 }
 
 void ble_bridge_reset_session(void){
+    atomic_fetch_add(&notify_generation,1);wake_notify();
     reset_home();uart_bridge_disconnect();atomic_store(&stop_requested,true);
     if(notify_queue)discard_raw_queue();
     if(control_notify_queue)xQueueReset(control_notify_queue);
@@ -274,6 +293,7 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         if (event->connect.status == 0) {
             if(!network_wifi_mode()&&!network_usb_mode())reset_home();
             atomic_store(&connection, event->connect.conn_handle);
+            atomic_fetch_add(&ble_generation,1);wake_notify();
             bd_add(BD_GENERATION,1);bd_add(BD_CONNECTS,1);
 #if CONFIG_BLE_TEST_DIAGNOSTICS
             observe_connection(event->connect.conn_handle);
@@ -282,6 +302,7 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         } else advertise();
         break;
     case BLE_GAP_EVENT_DISCONNECT:
+        atomic_fetch_add(&ble_generation,1);wake_notify();
         bd_add(BD_DISCONNECTS,1);bd_set(BD_DISCONNECT_REASON,event->disconnect.reason);
         atomic_store(&subscribed, false);
         if(!network_wifi_mode()&&!network_usb_mode())ble_bridge_reset_session();
@@ -292,7 +313,7 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         break;
     case BLE_GAP_EVENT_SUBSCRIBE:
         if (event->subscribe.attr_handle == notify_handle) {
-            atomic_store(&subscribed, event->subscribe.cur_notify != 0);
+            atomic_store(&subscribed, event->subscribe.cur_notify != 0);wake_notify();
             if(event->subscribe.cur_notify){bridge_packet_t features={.bytes={1,15,1,0}};ble_bridge_publish(&features);bridge_packet_t name=name_status(0);ble_bridge_publish(&name);}
             ESP_LOGI(TAG, "CAN notifications %s", event->subscribe.cur_notify ? "enabled" : "disabled");
         }
@@ -313,6 +334,7 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         break;
     case BLE_GAP_EVENT_NOTIFY_TX:
         if(event->notify_tx.conn_handle==atomic_load(&connection)&&event->notify_tx.attr_handle==notify_handle){
+            wake_notify(); // Local attempt hint only; never a remote ACK/credit.
             bd_add(BD_NOTIFY_EVENTS,1);
             if(event->notify_tx.status)bd_add(BD_NOTIFY_ERRORS,1);
         }
@@ -369,6 +391,7 @@ static void on_sync(void)
 }
 static void on_reset(int reason)
 {
+    atomic_fetch_add(&ble_generation,1);wake_notify();
     if(!network_wifi_mode()&&!network_usb_mode())ble_bridge_reset_session();
     network_config_disconnect();
     atomic_store(&subscribed, false);
@@ -380,9 +403,12 @@ static void host_task(void *arg)
     nimble_port_run();
     nimble_port_freertos_deinit();
 }
+static bool packet_connected(const bridge_packet_t *packet){
+    return packet->bytes[1]==17?atomic_load(&subscribed):ble_bridge_connected();
+}
 static bool notify_connected(void *context)
 {
-    return ble_bridge_connected();
+    return (!context||*(uint32_t *)context==atomic_load(&notify_generation))&&ble_bridge_connected();
 }
 static unsigned notify_failure;
 static void *notify_allocate(void *context, const bridge_packet_t *packet)
@@ -427,52 +453,118 @@ static bool notify_submit(void *context, void *buffer)
 static bool notify_send(void *context, const bridge_packet_t *packet)
 {
     notify_failure=BD_OTHER_BYTES;
-    if(network_usb_mode())return usb_link_send(packet);
-    if(network_wifi_mode())return network_send(packet);
+    if(context&&*(uint32_t *)context!=packet_generation(packet))return false;
+    // type17 describes the BLE provisioning link even while LAN is primary.
+    if(packet->bytes[1]!=17){
+        if(network_usb_mode())return usb_link_send(packet);
+        if(network_wifi_mode())return network_send(packet);
+    }
     static const bridge_notify_resource_ops_t ops = {
         .allocate = notify_allocate, .pool_free = notify_pool_free,
         .release = notify_release, .submit = notify_submit,
     };
     return bridge_notify_with_reserve(packet, &ops, (void *)packet);
 }
+#if CONFIG_BLE_EVENT_SCHEDULER
+static bool ble_resource_ready(void){
+    // Probe the same selected payload pool as notify_send; never sum pools.
+    uint8_t bytes[20]={0};
+    struct os_mbuf *om=ble_hs_mbuf_from_flat(bytes,sizeof(bytes));
+    if(!om){bd_min(BD_POOL_MIN,0);return false;}
+    os_sr_t critical;OS_ENTER_CRITICAL(critical);
+    unsigned free_blocks=om->om_omp->omp_pool->mp_num_free;
+    OS_EXIT_CRITICAL(critical);
+    bd_min(BD_POOL_MIN,free_blocks);
+    os_mbuf_free_chain(om);
+    return free_blocks>=BRIDGE_NOTIFY_ATT_RESERVE+BRIDGE_NOTIFY_HEADER_BLOCKS;
+}
+#endif
 static void notify_delay(void *context, unsigned milliseconds)
 {
+#if CONFIG_BLE_EVENT_SCHEDULER
+    if(network_usb_mode()||network_wifi_mode()){
+        vTaskDelay(pdMS_TO_TICKS(milliseconds));return; // Existing non-BLE retry policy.
+    }
+    int64_t deadline=esp_timer_get_time()+(int64_t)milliseconds*1000;
+    while(notify_connected(context)){
+        int64_t remaining=deadline-esp_timer_get_time();
+        if(remaining<=0)break;
+        TickType_t ticks=pdMS_TO_TICKS((remaining+999)/1000);
+        ulTaskNotifyTake(pdTRUE,ticks?ticks:1);
+        if(ble_resource_ready())break;
+    }
+#else
     vTaskDelay(pdMS_TO_TICKS(milliseconds));
+#endif
 }
 // A false USB/LAN enqueue or failed BLE submission leaves this packet here.
 // Their queues account for later failures only after accepting ownership.
-static void deliver_packet(const bridge_packet_t *packet,bool ack,bool control)
+static void deliver_packet(const bridge_packet_t *packet,bool ack,bool control,uint32_t generation)
 {
-    if(!ble_bridge_connected() || suppress_packet(packet)){
+    if(generation!=packet_generation(packet)||!packet_connected(packet) || suppress_packet(packet)){
         bd_add(bd_index(packet_class(packet),BD_OTHER_BYTES),packet_bytes(packet));
         uart_bridge_drop_packet(packet);
         return;
     }
     if(ack){
-        if(!bridge_deliver_ack(packet,notify_connected,notify_send,notify_delay,NULL)){
+        if(!bridge_deliver_ack(packet,notify_connected,notify_send,notify_delay,&generation)){
             bd_add(bd_index(BD_ACK,BD_FAILED_PACKETS),1);
             atomic_fetch_add(&dropped,1);
         }
         return;
     }
     bool delivered=false;
-    for(unsigned attempt=0;attempt<(control?3:1);attempt++){
-        if(!ble_bridge_connected())break;
-        if(notify_send(NULL,packet)){delivered=true;break;}
-        if(control)vTaskDelay(pdMS_TO_TICKS(10));
+    bool retry_control=control&&packet->bytes[1]!=17; // Periodic type17 stays best effort.
+    for(unsigned attempt=0;attempt<(retry_control?3:1);attempt++){
+        if(generation!=packet_generation(packet)||!packet_connected(packet))break;
+        if(notify_send(&generation,packet)){delivered=true;break;}
+        if(retry_control)notify_delay(&generation,10);
     }
     if(!delivered){
         bd_add(bd_index(packet_class(packet),notify_failure),packet_bytes(packet));
         bd_add(bd_index(packet_class(packet),BD_FAILED_PACKETS),1);
         atomic_fetch_add(&dropped,1);
         uart_bridge_drop_packet(packet);
-        // Keep the existing failure backoff and queue scheduling unchanged.
-        if(!control)vTaskDelay(pdMS_TO_TICKS(10));
+        // Experimental BLE failures skip the old mandatory failure sleep.
+        if(!control&&(!BLE_EVENT_SCHEDULER_ENABLED||network_usb_mode()||network_wifi_mode()))vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
+#if CONFIG_BLE_EVENT_SCHEDULER
+static int64_t schedule_now(void *context){return esp_timer_get_time();}
+static bool schedule_pending(void *context){return uxQueueMessagesWaiting(notify_queue)!=0;}
+static bool schedule_ready(void *context){
+    if(network_usb_mode()||network_wifi_mode())return true;
+    bool ready=ble_resource_ready();
+    if(!ready)bd_add(BD_RESOURCE_WAITS,1);
+    return ready;
+}
+static bool schedule_take(void *context,unsigned lane,bridge_notify_work_t *work){
+    QueueHandle_t queues[]={notify_queue,control_notify_queue,ack_notify_queue};
+    notify_item_t item;
+    if(!dequeue_item(queues[lane],&item,0))return false;
+    work->packet=item.packet;work->generation=item.generation;
+    return true; // deliver rechecks generation, including across ACK retries.
+}
+static void schedule_deliver(void *context,const bridge_notify_work_t *work,unsigned lane){
+    deliver_packet(&work->packet,lane==BRIDGE_NOTIFY_ACK,lane==BRIDGE_NOTIFY_CONTROL,work->generation);
+}
+static void schedule_wait(void *context,unsigned milliseconds){
+    TickType_t ticks=pdMS_TO_TICKS(milliseconds);
+    ulTaskNotifyTake(pdTRUE,ticks?ticks:1);
+}
+static void schedule_rest(void *context){vTaskDelay(1);}
+static const bridge_notify_schedule_ops_t schedule_ops={
+    .now_us=schedule_now,.pending_raw=schedule_pending,.raw_ready=schedule_ready,
+    .take=schedule_take,.deliver=schedule_deliver,.wait_event=schedule_wait,.rest=schedule_rest,
+};
+#endif
 static void notify_task(void *arg)
 {
-    bridge_packet_t packet;
+#if CONFIG_BLE_EVENT_SCHEDULER
+    bridge_notify_schedule_t scheduler={0};
+#else
+    notify_item_t item;
+#endif
     TickType_t last_name = 0,last_home=0,last_network=0;
     bool dual_paused=false;
     for (;;) {
@@ -488,9 +580,7 @@ static void notify_task(void *arg)
         if(!network_usb_mode()&&dual_paused&&ble_hs_synced()){dual_paused=false;advertise();}
         if(atomic_load(&subscribed)&&now-last_network>=pdMS_TO_TICKS(1000)){
             bridge_packet_t mode={.bytes={1,17,network_wifi_mode(),0}};
-            bd_add(BD_TYPE17_BYPASS,1);
-            struct os_mbuf *om=ble_hs_mbuf_from_flat(mode.bytes,20);
-            if(om)ble_gatts_notify_custom(atomic_load(&connection),notify_handle,om);
+            if(!enqueue_packet(control_notify_queue,&mode))atomic_fetch_add(&dropped,1);
             last_network=now;
         }
         if (ble_bridge_connected() && now - last_name >= pdMS_TO_TICKS(1000)) {
@@ -513,10 +603,14 @@ static void notify_task(void *arg)
         }
         bridge_packet_t sample;portENTER_CRITICAL(&home_lock);bool have_sample=!home_status.sample_hz&&home_detail(&home_status,&sample,esp_timer_get_time()/1000);portEXIT_CRITICAL(&home_lock);
         if(have_sample)ble_bridge_publish(&sample);
-        bool ack = dequeue_packet(ack_notify_queue, &packet, 0);
-        bool control = !ack && dequeue_packet(control_notify_queue, &packet, 0);
-        if (!ack && !control && !dequeue_packet(notify_queue, &packet, pdMS_TO_TICKS(10))) continue;
-        deliver_packet(&packet,ack,control);
+#if CONFIG_BLE_EVENT_SCHEDULER
+        bridge_notify_schedule_step(&scheduler,&schedule_ops,NULL);
+#else
+        bool ack=dequeue_item(ack_notify_queue,&item,0);
+        bool control=!ack&&dequeue_item(control_notify_queue,&item,0);
+        if(!ack&&!control&&!dequeue_item(notify_queue,&item,pdMS_TO_TICKS(10)))continue;
+        deliver_packet(&item.packet,ack,control,item.generation);
+#endif
     }
 }
 void ble_bridge_publish(const bridge_packet_t *packet)
@@ -572,7 +666,7 @@ void ble_bridge_init(QueueHandle_t commands, QueueHandle_t queries)
     ESP_ERROR_CHECK(ble_gatts_count_cfg(services));
     ESP_ERROR_CHECK(ble_gatts_add_svcs(services));
     ESP_ERROR_CHECK(ble_svc_gap_device_name_set(saved_name));
-    ESP_ERROR_CHECK(xTaskCreate(notify_task, "ble_notify", 4096, NULL, 4, NULL) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
+    ESP_ERROR_CHECK(xTaskCreate(notify_task, "ble_notify", 4096, NULL, 4, &notify_worker) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
     nimble_port_freertos_init(host_task);
 }
 

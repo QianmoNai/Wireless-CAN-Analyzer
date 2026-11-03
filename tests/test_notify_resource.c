@@ -120,8 +120,20 @@ int main(void)
     drain(&r);
     assert(r.small.free == 12 && send(&r, &r.expected));
 
+    // Single-pool candidate sizes retain exactly the same six-block reserve;
+    // a larger unrelated pool never changes the admissible backlog.
+    for(unsigned count=12;count<=36;count+=12){
+        r=fixture(count);r.small.total=count;
+        unsigned capacity=(count-BRIDGE_NOTIFY_ATT_RESERVE)/2;
+        for(unsigned i=0;i<capacity;i++)assert(send(&r,&r.expected));
+        assert(!send(&r,&r.expected));
+        assert(r.small.free==BRIDGE_NOTIFY_ATT_RESERVE);
+        assert(r.large.free==24&&r.submissions==capacity&&r.releases==1);
+        drain(&r);assert(r.small.free==count);
+    }
+
     // Raw, periodic control, and explicit ACKs all use the same reserve.
-    for (unsigned type = 1; type <= 13; type++) {
+    for (unsigned type = 1; type <= 22; type++) {
         r = fixture(7);
         r.expected.bytes[1] = type;
         wire_put_u32(r.expected.bytes + 16, 123);

@@ -31,6 +31,7 @@ PRELUDE = r'''
 #include "notify_resource.h"
 #include "ack_delivery.h"
 #include "ble_diagnostics.h"
+#define BLE_EVENT_SCHEDULER_ENABLED 0
 struct queue {unsigned count,limit;size_t size;uint8_t *data;};
 static struct queue *allocated[8];static unsigned allocated_count;
 QueueHandle_t xQueueCreate(unsigned n,size_t size){struct queue*q=calloc(1,sizeof(*q));q->limit=n;q->size=size;q->data=calloc(n,size);allocated[allocated_count++]=q;return q;}
@@ -46,7 +47,7 @@ static uint32_t now=10;static unsigned mode=4,delays,resets;static bool online=t
 void vTaskDelay(unsigned t){now+=t;delays++;}
 void xTaskNotifyGive(TaskHandle_t task){(void)task;}
 void vTaskNotifyGiveFromISR(TaskHandle_t task,int*woken){(void)task;(void)woken;}
-unsigned ulTaskNotifyTake(int clear,unsigned ticks){(void)clear;(void)ticks;return 0;}
+unsigned ulTaskNotifyTake(int clear,unsigned ticks){(void)clear;now+=ticks;return 0;}
 void usb_serial_jtag_set_select_notif_callback(usj_select_notif_callback_t callback){(void)callback;}
 int64_t esp_timer_get_time(void){return (int64_t)now*1000;}
 bool network_usb_mode(void){return mode==4;}
@@ -62,17 +63,22 @@ static atomic_uint drop_total,dropped;
 '''
 
 PLATFORM = r'''
-static bool suppressed;
+static bool suppressed,force_ble_failure;
+static atomic_bool subscribed;
+static unsigned ble_calls,lan_calls;
 bool ble_bridge_connected(void){return mode==4?usb_link_connected():online;}
 static bool suppress_packet(const bridge_packet_t*p){(void)p;return suppressed;}
-bool network_send(const bridge_packet_t*p){(void)p;return sink_success;}
+bool network_send(const bridge_packet_t*p){(void)p;lan_calls++;return sink_success;}
 static void *notify_allocate(void*c,const bridge_packet_t*p){(void)c;(void)p;return NULL;}
 static unsigned notify_pool_free(void*c,void*b){(void)c;(void)b;return 0;}
 static void notify_release(void*c,void*b){(void)c;(void)b;}
 static bool notify_submit(void*c,void*b){(void)c;(void)b;return sink_success;}
-bool bridge_notify_with_reserve(const bridge_packet_t*p,const bridge_notify_resource_ops_t*o,void*c){(void)p;(void)o;(void)c;return sink_success;}
+bool bridge_notify_with_reserve(const bridge_packet_t*p,const bridge_notify_resource_ops_t*o,void*c){(void)p;(void)o;(void)c;ble_calls++;return !force_ble_failure&&sink_success;}
 typedef unsigned TickType_t;
-typedef struct {bridge_packet_t packet;} notify_item_t;
+typedef struct {bridge_packet_t packet;uint32_t generation;} notify_item_t;
+static atomic_uint notify_generation,ble_generation;
+static void wake_notify(void){}
+
 static unsigned notify_failure;
 static QueueHandle_t notify_queue;
 bool uart_bridge_selected(void){return true;}
@@ -89,28 +95,43 @@ int main(void){
  assert(incoming(123,hello));
  bridge_packet_t raw={.bytes={1,19,12}},rejected={.bytes={1,19,7}};
  for(unsigned i=0;i<128;i++)assert(usb_link_send(&raw));
- deliver_packet(&rejected,false,false);
+ deliver_packet(&rejected,false,false,0);
  assert(drop_total==7&&dropped==1); // Actual full USB queue rejected seven payload bytes.
  clear_session();assert(drop_total==7+128*12);
  clear_session();assert(drop_total==7+128*12); // Reset cannot count the same queue twice.
  // Successful downstream ownership transfers leave UART counts untouched.
  assert(incoming(124,hello));unsigned before=drop_total;
- deliver_packet(&rejected,false,false);assert(drop_total==before&&raw_out->count==1);
+ deliver_packet(&rejected,false,false,0);assert(drop_total==before&&raw_out->count==1);
  service(NULL,0);assert(drop_total==before&&raw_out->count==0);
  // One BLE/LAN raw rejection, irrespective of transport, counts exact bytes.
  for(unsigned transport=0;transport<=1;transport++){
   mode=transport;sink_success=false;before=drop_total;
-  deliver_packet(&rejected,false,false);assert(drop_total==before+7);
-  sink_success=true;before=drop_total;deliver_packet(&rejected,false,false);assert(drop_total==before);
+  deliver_packet(&rejected,false,false,0);assert(drop_total==before+7);
+  sink_success=true;before=drop_total;deliver_packet(&rejected,false,false,0);assert(drop_total==before);
  }
+ // Periodic type17 must still reach BLE when LAN is primary; no retries,
+ // no LAN routing, and no UART payload/drop side effect.
+ mode=1;atomic_store(&subscribed,true);sink_success=true;force_ble_failure=true;
+ bridge_packet_t periodic={.bytes={1,17,1}};
+ before=drop_total;unsigned b=ble_calls,l=lan_calls,d=delays;
+ deliver_packet(&periodic,false,true,0);
+ assert(ble_calls==b+1&&lan_calls==l&&drop_total==before&&delays==d);
+ force_ble_failure=false;deliver_packet(&periodic,false,true,0);assert(ble_calls==b+2&&lan_calls==l);
+ atomic_store(&subscribed,false);deliver_packet(&periodic,false,true,0);assert(ble_calls==b+2);
  // Lost ACKs never imply lost physical UART output, including all eight retries.
  bridge_packet_t ack={.bytes={1,20,0,7}};wire_put_u32(ack.bytes+16,19);
- sink_success=false;before=drop_total;deliver_packet(&ack,true,false);assert(drop_total==before);
- online=false;deliver_packet(&rejected,false,false);assert(drop_total==before+7);online=true;
- suppressed=true;before=drop_total;deliver_packet(&rejected,false,false);assert(drop_total==before+7);suppressed=false;
+ sink_success=false;before=drop_total;deliver_packet(&ack,true,false,0);assert(drop_total==before);
+ online=false;deliver_packet(&rejected,false,false,0);assert(drop_total==before+7);online=true;
+ suppressed=true;before=drop_total;deliver_packet(&rejected,false,false,0);assert(drop_total==before+7);suppressed=false;
+ // Captured old generations cannot submit data or ACKs on a new session.
+ mode=0;online=true;sink_success=true;atomic_store(&notify_generation,1);
+ before=drop_total;b=ble_calls;
+ deliver_packet(&rejected,false,false,0);deliver_packet(&ack,true,false,0);
+ assert(drop_total==before+7&&ble_calls==b);
+ atomic_store(&notify_generation,0);
  // First-hop rejection belongs to UART worker, not the publisher; later reset
  // of an accepted packet is downstream loss, exactly once.
- notify_queue=xQueueCreate(1,sizeof(bridge_packet_t));
+ notify_queue=xQueueCreate(1,sizeof(notify_item_t));
  assert(ble_bridge_uart_publish(&raw));before=drop_total;
  assert(!ble_bridge_uart_publish(&rejected));assert(drop_total==before);
  discard_raw_queue();assert(drop_total==before+12);discard_raw_queue();assert(drop_total==before+12);
@@ -136,7 +157,7 @@ with tempfile.TemporaryDirectory(prefix="can-uart-downstream-") as temporary:
     binary = Path(temporary) / "downstream"
     source = PRELUDE + function("uart_bridge.c", "void uart_bridge_drop_packet(")
     source += '#include "usb_link.c"\n' + PLATFORM
-    for marker in ("static bool enqueue_packet(", "static bool dequeue_packet(", "static bool notify_connected(", "static bool notify_send(", "static void notify_delay(",
+    for marker in ("static uint32_t packet_generation(", "static bool enqueue_packet(", "static bool dequeue_item(", "static bool dequeue_packet(", "static bool packet_connected(", "static bool notify_connected(", "static bool notify_send(", "static void notify_delay(",
                    "static void deliver_packet(", "static void discard_raw_queue(", "bool ble_bridge_uart_publish("):
         source += function("ble_bridge.c", marker)
     for marker in ("static bool tls_write_count(", "static bool tls_write_all(",
