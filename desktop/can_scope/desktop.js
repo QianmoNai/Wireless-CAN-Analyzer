@@ -23,8 +23,34 @@
  $('view-live').append(panel);
  $('sendKind').onchange=()=>{$('sendData').disabled=$('sendKind').value==='rtr'};
  $('sendOnce').onclick=()=>{try{if(!connected)throw Error('请先连接设备');if(window.uartMode)throw Error('请先在设备屏幕切回 CAN');const id=$('sendId').value.trim().replace(/^0x/i,''),raw=$('sendData').value.trim(),remote=$('sendKind').value==='rtr',dlc=Number($('sendDlc').value);if(!/^[0-9a-f]{1,8}$/i.test(id))throw Error('请输入十六进制 CAN ID');if(!remote&&raw&&!/^[0-9a-f]{2}(\s+[0-9a-f]{2})*$/i.test(raw))throw Error('数据须为两位十六进制字节，以空格分隔');const data=remote?[]:raw?raw.split(/\s+/).map(x=>parseInt(x,16)):[];if(!Number.isInteger(dlc)||dlc<0||dlc>8||(!remote&&data.length!==dlc))throw Error('DLC 与数据长度不一致');invoke('manual',{identifier:parseInt(id,16),data,extended:$('sendFormat').value==='ext',remote,dlc})}catch(e){toast(e.message)}};
+ // Desktop UART owns the complete transfer in Python, one physical ACK at a time.
+ let uartRequest=0,uartActive=null;
+ function uartControls(){if(uartActive){$('uartSend').disabled=true;$('uartCancel').hidden=false;}}
+ $('uartSend').onclick=()=>{
+  if($('uartSend').disabled||uartActive)return;
+  try{
+   const value=$('uartInput').value,hex=value.replace(/\s/g,'');let data;
+   if($('uartFormat').value==='hex'){
+    if(!hex||hex.length%2||!/^[0-9a-f]+$/i.test(hex))throw Error('请输入完整的十六进制字节，例如 01 02 FF');
+    data=Uint8Array.from(hex.match(/../g),v=>parseInt(v,16));
+   }else data=new TextEncoder().encode(value);
+   const ending=$('uartEnding').value,tail=ending==='lf'?[10]:ending==='crlf'?[13,10]:[];
+   data=Uint8Array.from([...data,...tail]);
+   if(!data.length||data.length>4096)throw Error('发送长度须为 1–4096 字节');
+   uartRequest=uartRequest%0x7fffffff+1;uartActive=uartRequest;
+   $('uartResult').textContent='正在发送…';uartControls();invoke('uartSend',uartActive,hexOf(data));
+  }catch(e){$('uartResult').textContent=e.message;}
+ };
+ $('uartCancel').onclick=()=>{if(uartActive){invoke('uartCancel',uartActive);$('uartResult').textContent='正在停止后续发送，等待已提交分段的结果…';}};
  const original=window.onNative;
- window.onNative=(type,d)=>{if(type==='manualResult'){const line=document.createElement('div');line.textContent=new Date().toLocaleTimeString()+' #'+d.token+' '+d.status;$('sendResult').prepend(line);while($('sendResult').children.length>40)$('sendResult').lastChild.remove()}else original(type,d);$('desktopCsv').disabled=!!window.uartMode;$('desktopCsv').title=window.uartMode?'CSV 导出适用于 CAN 帧记录':''};
+ window.onNative=(type,d)=>{
+  if(type==='state'){if(uartActive)$('uartResult').textContent='连接状态改变；已提交分段结果未知，未自动重发';uartActive=null;}
+  if(type==='manualResult'){const line=document.createElement('div');line.textContent=new Date().toLocaleTimeString()+' #'+d.token+' '+d.status;$('sendResult').prepend(line);while($('sendResult').children.length>40)$('sendResult').lastChild.remove()}else original(type,d);
+  if(d.uartTx&&d.uartTx.id===uartActive){const t=d.uartTx;
+   $('uartResult').textContent=t.message?`已确认 ${t.confirmed} 字节；${t.message}。外部单片机是否处理成功需由其协议确认。`:`已确认输出 ${t.confirmed} / ${t.total} 字节`;
+   if(t.done){uartActive=null;uartRefreshControls();}
+  }
+  uartControls();$('desktopCsv').disabled=!!window.uartMode;$('desktopCsv').title=window.uartMode?'CSV 导出适用于 CAN 帧记录':''};
  // App lifecycle copy differs on desktop: minimizing does not disconnect.
  document.querySelectorAll('.protocol').forEach(p=>{p.textContent='CAN Scope Desktop 1.2.4 · 本地运行 · 关闭窗口断开连接；最小化继续监控。'});
  document.querySelectorAll('p').forEach(p=>{if(p.textContent.includes('在手机输入设备屏幕'))p.textContent=p.textContent.replace('在手机输入设备屏幕','在系统蓝牙配对窗口输入设备屏幕')});

@@ -3,6 +3,7 @@
 Run as the desktop user, with both ports free. Persists USB + UART / 115200 on
 this device, uses temporary application data, and writes JSON + screenshots.
 """
+import hashlib
 import argparse
 import asyncio
 import json
@@ -118,7 +119,7 @@ def main():
         poll()
     def wait_peer(expected, done):
         actual = bytearray()
-        deadline = time.monotonic()+5
+        deadline = time.monotonic()+30
         def poll():
             if finished:return
             actual.extend(peer.read(peer.in_waiting))
@@ -179,21 +180,31 @@ def main():
     def text_received(value):
         checks['rx_utf8'] = value
         QTimer.singleShot(250,lambda:(capture('rx-utf8'),send_hex()))
+    tx_hex = bytes(range(256))*16
+    tx_text = '串口🙂'*409+'abcdef'  # exactly 4096 UTF-8 bytes
+    transfer_started = 0
+    def transfer(name, value, expected, done):
+        nonlocal transfer_started
+        peer.reset_input_buffer()
+        transfer_started = time.monotonic()
+        code = "$('uartFormat').value=FORMAT;$('uartInput').value=VALUE;$('uartSend').click();true"
+        code = code.replace('FORMAT',json.dumps('hex' if name=='hex' else 'text')).replace('VALUE',json.dumps(value))
+        def received(actual):
+            peer_elapsed = time.monotonic()-transfer_started
+            def confirmed(result):
+                elapsed=time.monotonic()-transfer_started
+                checks['tx_4096_'+name] = dict(bytes=len(actual), strict_equal=actual==expected,
+                    sha256=hashlib.sha256(actual).hexdigest(), peer_complete_ms=round(peer_elapsed*1000,3),
+                    complete_ms=round(elapsed*1000,3), Bps=round(len(actual)/elapsed,2), result=result)
+                done(result)
+            wait_js("$('uartResult').textContent",lambda x:f'已确认输出 {len(expected)} / {len(expected)}' in x,
+                    confirmed,name+' send ACK missing',timeout=30)
+        js(code,lambda _:wait_peer(expected,received))
     def send_hex():
-        peer.reset_input_buffer()
-        js("$('uartFormat').value='hex';$('uartInput').value='00 FF 41 7F 10';$('uartSend').click();true",lambda _:wait_peer(bytes.fromhex('00ff417f10'),hex_sent))
-    def hex_sent(value):
-        checks['tx_hex_peer'] = value.hex()
-        wait_js("$('uartResult').textContent",lambda x:'已确认输出 5 / 5' in x,lambda x:send_text(),'HEX send ACK missing')
-    tx_text='桌面串口 UTF-8 🙂\n'
+        transfer('hex',tx_hex.hex(),tx_hex,lambda _:send_text())
     def send_text():
-        peer.reset_input_buffer()
-        code="$('uartFormat').value='text';$('uartInput').value=TEXT;$('uartSend').click();true".replace('TEXT',json.dumps(tx_text))
-        js(code,lambda _:wait_peer(tx_text.encode(),text_sent))
-    def text_sent(value):
-        checks['tx_utf8_peer'] = value.decode()
-        size=len(tx_text.encode())
-        wait_js("$('uartResult').textContent",lambda x:f'已确认输出 {size} / {size}' in x,send_confirmed,'UTF-8 segmented ACK missing')
+        assert len(tx_text.encode())==4096
+        transfer('utf8',tx_text,tx_text.encode(),send_confirmed)
     def send_confirmed(value):
         checks['tx_utf8_ack'] = value
         js("$('uartResult').scrollIntoView({block:'center'});true",lambda _:QTimer.singleShot(250,tx_captured))
@@ -215,7 +226,7 @@ def main():
     def reconnected(_):
         checks['reconnected_uart'] = True
         js("$('view-uart').scrollIntoView();true",lambda _:QTimer.singleShot(250,lambda:(capture('reconnected'),finish())))
-    QTimer.singleShot(70000,lambda:finish('overall GUI hardware timeout'))
+    QTimer.singleShot(120000,lambda:finish('overall GUI hardware timeout'))
     QTimer.singleShot(100,start)
     result=app.exec()
     # Match app.main(): destroy pages before their profiles release storage.

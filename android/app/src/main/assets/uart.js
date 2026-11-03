@@ -10,6 +10,7 @@ window.uartMode=false;
  const buffer=new Uint8Array(65536);let count=0,head=0,changed=false,paused=false,lastSequence=null,lost=0;
  let reported=false,portReady=false,baud=0,totalRx=0,totalTx=0,deviceDrops=0,token=0x71000000,pending=null,sending=false,run=0,lastStatusAt=0;
  function controls(){ $('uartSend').disabled=!connected||!reported||!window.uartMode||!portReady||sending;$('uartCancel').hidden=!sending; }
+ window.uartRefreshControls=controls;
  function stop(message){run++;if(pending){clearTimeout(pending.timer);const reject=pending.reject;pending=null;reject(Error(message));}sending=false;controls();}
  function stats(){ $('uartStats').textContent=reported?`${baud} baud · 8N1 · RX ${totalRx} 字节 · TX ${totalTx} 字节`:'等待设备状态';$('uartLoss').textContent=`设备丢弃 ${deviceDrops} 字节 · App 检测到缺失 ${lost} 个数据包 · 接收区保留最近 64 KiB`; }
  // Keep small layout blocks: a single constantly replaced 192 KiB HEX

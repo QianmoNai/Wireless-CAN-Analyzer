@@ -8,6 +8,9 @@ from .transports import BleTransport, LanTransport, scan_ble, discover
 from .usb_transport import UsbTransport, scan_usb
 
 
+UART_ACK_TIMEOUT = 3.0
+
+
 class Channel:
     def __init__(self, emit, saved=None, save=lambda x: None):
         self.emit, self.save = emit, save
@@ -27,6 +30,10 @@ class Channel:
         self.uart = False
         self.waiters = {}
         self.pending_tx = {}
+        self.uart_task = None
+        self.uart_job = None
+        self.uart_progress = None
+        self.uart_cancelled = deque(maxlen=32)
         self.token = 0x20000000
         self.revision = 1000
         self.detail = ''
@@ -60,6 +67,12 @@ class Channel:
 
     def submit(self, name, args):
         if self.closed:
+            return
+        if name == 'uartCancel':
+            if self.uart_job and args == [self.uart_job['id']]:
+                self.uart_job['stop'] = '已停止后续发送，已提交的字节可能仍在输出'
+            elif len(args) == 1 and type(args[0]) is int:
+                self.uart_cancelled.append(args[0])
             return
         if name == 'delivered':
             self.ui_pending = False
@@ -96,6 +109,8 @@ class Channel:
         try:
             self.commands.put_nowait((name, args, self.epoch))
         except asyncio.QueueFull:
+            if name == 'uartSend':
+                self.uart_progress = dict(id=args[0] if args else 0, confirmed=0, total=0, done=True, message='命令队列已满，未发送')
             self.emit('error', dict(message='命令队列已满，请等待当前操作完成'))
 
     async def owner(self):
@@ -110,6 +125,8 @@ class Channel:
                 if self.closed:
                     return
             except Exception as e:
+                if name == 'uartSend':
+                    self.uart_progress = dict(id=args[0] if args else 0, confirmed=0, total=0, done=True, message=str(e))
                 self.emit('error', dict(message=str(e) or type(e).__name__))
                 if name in ('connect', 'connectLan', 'scan'):
                     await self.disconnect('操作失败，请重新连接')
@@ -121,12 +138,12 @@ class Channel:
             raise ConnectionError('请先连接设备')
         await self.transport.write(p)
 
-    async def acknowledge(self, p, kind, key):
+    async def acknowledge(self, p, kind, key, timeout=2):
         future = asyncio.get_running_loop().create_future()
         self.waiters[(kind, key)] = future
         try:
             await self.write(p)
-            return await asyncio.wait_for(future, 2)
+            return await asyncio.wait_for(future, timeout)
         finally:
             self.waiters.pop((kind, key), None)
 
@@ -206,6 +223,27 @@ class Channel:
             if result['status'] not in (0, 1):
                 raise ValueError('设备未保存设置，状态码 '+str(result['status']))
             return result
+        elif name == 'uartSend':
+            if (len(args) != 2 or type(args[0]) is not int or not 0 < args[0] <= 0x7fffffff
+                    or not isinstance(args[1], str) or not 2 <= len(args[1]) <= 8192):
+                raise ValueError('UART 发送参数无效')
+            try:
+                data = bytes.fromhex(args[1])
+            except ValueError:
+                raise ValueError('UART 十六进制数据无效') from None
+            if not 1 <= len(data) <= 4096:
+                raise ValueError('发送长度须为 1–4096 字节')
+            if not self.ready or not self.uart:
+                raise ValueError('请先连接 UART 设备')
+            if self.uart_task and not self.uart_task.done():
+                raise ValueError('上一笔 UART 发送尚未结束')
+            job = dict(id=args[0], data=data, confirmed=0, stop='')
+            if args[0] in self.uart_cancelled:
+                self.uart_cancelled.remove(args[0])
+                self.uart_update(job, done=True, message='已停止，未发送')
+                return
+            self.uart_job = job
+            self.uart_task = asyncio.create_task(self.send_uart(job))
         elif name == 'send':
             self.polls.clear()
             command = setting_command(args[0])
@@ -213,6 +251,8 @@ class Channel:
                 raise ValueError('请先在设备屏幕选择 UART 数据')
             if command[1] == 0x12 and self.uart:
                 raise ValueError('UART 模式不支持设置 CAN 波特率')
+            if command[1] == 0x18 and self.uart_job:
+                raise ValueError('UART 批量发送进行中')
             await self.write(command)
             self.emit('writeDone', dict(success=True))
         elif name == 'manual':
@@ -288,6 +328,44 @@ class Channel:
                 self.busy = False
                 self.network_state()
 
+    def uart_update(self, job, done=False, message=''):
+        # Overwrite progress until the next UI batch; no per-segment UI trip.
+        self.uart_progress = dict(id=job['id'], confirmed=job['confirmed'],
+                                  total=len(job['data']), done=done, message=message)
+
+    async def send_uart(self, job):
+        message = ''
+        self.uart_update(job)
+        try:
+            for offset in range(0, len(job['data']), 12):
+                # The serialized control owner gets the next write opportunity.
+                while self.ready and not job['stop'] and (self.current or not self.commands.empty()):
+                    await asyncio.sleep(.001)
+                if job['stop'] or not self.ready or not self.uart:
+                    message = job['stop'] or '连接或数据类型已改变，已停止发送'
+                    break
+                data = job['data'][offset:offset+12]
+                token = self.next_token()
+                p = bytearray(packet(0x18, a=len(data), token=token))
+                p[4:4+len(data)] = data
+                ack = await self.acknowledge(p, 20, token, UART_ACK_TIMEOUT)
+                if ack[2] or ack[3] != len(data) or ack[4:4+len(data)] != data:
+                    raise ValueError('设备未完成串口输出或确认内容不符，结果未知；未自动重发')
+                job['confirmed'] += len(data)
+                self.uart_update(job)
+                await asyncio.sleep(0)
+            message = message or job['stop']
+        except asyncio.TimeoutError:
+            message = '确认超时，当前分段结果未知；未自动重发'
+        except asyncio.CancelledError:
+            message = '连接断开；已提交分段结果未知，未自动重发'
+        except Exception as exc:
+            message = str(exc) or '通信失败，结果未知；未自动重发'
+        finally:
+            self.uart_update(job, done=True, message=message)
+            if self.uart_job is job:
+                self.uart_job = None
+
     async def subscribe(self):
         if not self.ready or self.uart:
             return
@@ -338,6 +416,8 @@ class Channel:
                 self.polls.clear()
                 self.detail = ''
             elif previous_uart:
+                if self.uart_job:
+                    self.uart_job['stop'] = '数据类型已改变，已停止后续发送'
                 self.enqueue('subscribe', [])
         if kind == 5:
             old = self.capabilities
@@ -371,7 +451,7 @@ class Channel:
     async def flush(self):
         while True:
             await asyncio.sleep(.025)
-            if self.ui_pending or not self.ready or not (self.packets or self.controls):
+            if self.ui_pending or not self.ready or not (self.packets or self.controls or self.uart_progress):
                 continue
             now = time.monotonic()
             raw, samples = [], []
@@ -380,8 +460,9 @@ class Channel:
                     p, arrived = queue.popleft()
                     item = dict(hex=p.hex(), age=int((now-arrived)*1000))
                     (samples if p[1] == 11 else raw).append(item)
+            progress, self.uart_progress = self.uart_progress, None
             self.ui_pending = True
-            self.emit('motorSamples' if samples else 'packets', dict(items=samples or raw, packets=raw if samples else [], key=self.detail, dropped=self.dropped, sentAt=int(time.time()*1000)))
+            self.emit('motorSamples' if samples else 'packets', dict(items=samples or raw, packets=raw if samples else [], uartTx=progress, key=self.detail, dropped=self.dropped, sentAt=int(time.time()*1000)))
 
     async def maintenance(self):
         while True:
@@ -394,6 +475,12 @@ class Channel:
                     self.emit('manualResult', dict(token=token, status='等待超时；发送结果未知，不自动重发'))
 
     async def disconnect(self, message='已断开连接'):
+        if self.uart_task and not self.uart_task.done():
+            self.uart_task.cancel()
+            await asyncio.gather(self.uart_task, return_exceptions=True)
+        self.uart_job = None
+        self.uart_progress = None
+        self.uart_cancelled.clear()
         self.uart = False
         self.epoch += 1
         self.ready = False
