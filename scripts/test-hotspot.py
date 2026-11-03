@@ -30,6 +30,15 @@ PREFIX = 'canscope-test-'
 MAC = r'(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}'
 TOOLS = ('iw', 'ip', 'nmcli', 'hostapd', 'dnsmasq', 'systemd-run', 'systemctl')
 STEP = '参数检查'
+# Fixed paths/values only: diagnostics must never read arbitrary configuration.
+AP_ISOLATION = {
+    'ipv4/conf/csap0/forwarding': 0,
+    'ipv6/conf/csap0/forwarding': 0,
+    'ipv6/conf/csap0/disable_ipv6': 1,
+}
+GLOBAL_FORWARDING = ('ipv4/ip_forward', 'ipv4/conf/all/forwarding',
+                     'ipv4/conf/default/forwarding', 'ipv6/conf/all/forwarding',
+                     'ipv6/conf/default/forwarding')
 
 
 class HotspotError(Exception):
@@ -267,18 +276,83 @@ def service(name, *command):
         '--property=TimeoutStopSec=10', *command)
 
 
-def read_forwarding():
-    return Path('/proc/sys/net/ipv4/conf/csap0/forwarding').read_text().strip()
+class IsolationError(HotspotError):
+    """Safe, structured per-interface sysctl diagnostic, with no daemon payload."""
+
+
+def read_switch(relative):
+    try:
+        value = Path('/proc/sys/net', relative).read_text().strip()
+    except OSError:
+        return None
+    # Even a mocked/corrupt proc value cannot inject private text into errors.
+    if re.fullmatch(r'-?[0-9]{1,10}', value):
+        number = int(value)
+        if -(2**31) <= number < 2**31:
+            return number
+    return None
+
+
+def isolation_values():
+    return {key: read_switch(key) for key in AP_ISOLATION}
+
+
+def switch_text(value):
+    return str(value) if type(value) is int and -(2**31) <= value < 2**31 else '不可读/无效'
+
+
+def sysctl_name(relative):
+    return 'net.' + relative.replace('/', '.')
+
+
+def check_isolation(context, previous=None):
+    current = isolation_values()
+    wrong = [key for key, expected in AP_ISOLATION.items() if current[key] != expected]
+    if wrong:
+        changes = []
+        for key in wrong:
+            before = switch_text(previous[key]) if previous and key in previous else '未记录'
+            changes.append(f'{sysctl_name(key)}：上次={before} 当前={switch_text(current[key])} 期望={AP_ISOLATION[key]}')
+        globals_text = '，'.join(f'{sysctl_name(key)}={switch_text(read_switch(key))}' for key in GLOBAL_FORWARDING)
+        raise IsolationError(f'csap0 隔离检查失败（{context}）；' + '；'.join(changes) +
+                             '；全局只读参考：' + globals_text + '；停止测试，不修改全局值。')
+    return current
 
 
 def isolation():
     # Only this newly created interface. Never change all/default/global knobs.
-    for relative in ('ipv4/conf/csap0/forwarding', 'ipv4/conf/csap0/send_redirects',
-                     'ipv4/conf/csap0/accept_redirects', 'ipv6/conf/csap0/accept_ra'):
-        Path('/proc/sys/net', relative).write_text('0\n')
-    Path('/proc/sys/net/ipv6/conf/csap0/disable_ipv6').write_text('1\n')
-    if read_forwarding() != '0':
-        raise HotspotError('csap0 转发未关闭；停止热点。')
+    values = {**AP_ISOLATION, 'ipv4/conf/csap0/send_redirects': 0,
+              'ipv4/conf/csap0/accept_redirects': 0, 'ipv6/conf/csap0/accept_ra': 0}
+    for relative, value in values.items():
+        try:
+            Path('/proc/sys/net', relative).write_text(str(value) + '\n')
+        except OSError:
+            raise IsolationError('csap0 隔离写入失败：' + sysctl_name(relative) +
+                                 f'，期望={value} 当前={switch_text(read_switch(relative))}；停止测试。') from None
+    return check_isolation('写入后')
+
+
+def settle_isolation(context):
+    """Bounded startup settling after link/daemon transitions; no global writes.
+
+    The initial pre-link write is insufficient if IPv4 state is recreated or a
+    queued manager update restores the default. Runtime monitoring stays strict:
+    it checks and rolls back instead of fighting another writer indefinitely.
+    """
+    for _ in range(3):
+        try:
+            before = isolation_values()
+            previous = isolation()
+            time.sleep(0.2)
+            current = check_isolation(context, previous)
+            changes = [f'{sysctl_name(key)} {switch_text(before[key])} -> {current[key]}'
+                       for key in AP_ISOLATION if before[key] != current[key]]
+            if changes:
+                print(f'csap0 隔离已重新施加（{context}）：' + '；'.join(changes), flush=True)
+            return current
+        except IsolationError as exc:
+            failure = exc
+    raise failure
 
 
 def check_unchanged(baseline):
@@ -290,8 +364,7 @@ def check_unchanged(baseline):
 
 def check_ap(state, enabled=False):
     check_unchanged(state['baseline'])
-    if read_forwarding() != '0':
-        raise HotspotError('csap0 的转发状态变化；停止测试。')
+    check_isolation('运行检查', state.get('isolation'))
     if run('nmcli', '-g', 'GENERAL.NM-MANAGED', 'device', 'show', AP).strip() != 'no':
         raise HotspotError('NM 未放弃 csap0 管理；不修改 iwd 或 wlan0，停止测试。')
     ap = run('iw', 'dev', AP, 'info')
@@ -372,6 +445,9 @@ def up():
         isolation()  # Before link up, address assignment and hostapd.
         run('ip', 'address', 'add', '10.77.0.1/24', 'dev', AP)
         run('ip', 'link', 'set', 'dev', AP, 'up')
+        STEP = '接口启用后校验 csap0 隔离'
+        state['isolation'] = settle_isolation('接口启用后')
+        save_state(state)
         check_ap(state)
         STEP = '启动专用 hostapd/dnsmasq'
         service('hostapd', '/usr/bin/python', '-I', str(helper), '_serve', 'hostapd')
@@ -379,6 +455,9 @@ def up():
         time.sleep(2)
         if not all(active(PREFIX + name + '.service') for name in ('hostapd', 'dhcp')):
             raise HotspotError('专用 AP/DHCP 服务未启动；可能端口或管理权冲突，已安排回滚。')
+        STEP = '专用服务启动后校验 csap0 隔离'
+        state['isolation'] = settle_isolation('专用服务启动后')
+        save_state(state)
         check_ap(state, enabled=True)
         service('monitor', '/usr/bin/python', '-I', str(helper), '_monitor')
         print('热点启动：CANScope-Test；10.77.0.1/24；WPA2-CCMP；同信道 20 MHz；20 分钟自动停止。')
@@ -489,8 +568,9 @@ def monitor():
             check_ap(state, enabled=True)
             if not all(active(PREFIX + name + '.service') for name in ('hostapd', 'dhcp')):
                 raise HotspotError('专用服务退出。')
-        except Exception:
-            print('监控条件变化；停止测试热点，不重连 wlan0。', flush=True)
+        except Exception as exc:
+            detail = str(exc) if isinstance(exc, HotspotError) else '系统检查失败，后端正文已隐藏。'
+            print('监控条件变化；停止测试热点，不重连 wlan0。' + detail, flush=True)
             # Separate rollback service; stopping monitor must not abort cleanup.
             run('systemctl', 'start', '--no-block', PREFIX + 'rollback.service')
             return 1

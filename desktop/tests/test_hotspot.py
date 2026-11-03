@@ -71,11 +71,12 @@ class HotspotTests(unittest.TestCase):
     def test_isolation_writes_only_new_interface_knobs_before_up(self):
         writes = []
         with patch.object(Path, 'write_text', lambda path, value: writes.append((str(path), value))), \
-             patch.object(hotspot, 'read_forwarding', return_value='0'):
+             patch.object(hotspot, 'isolation_values', return_value=dict(hotspot.AP_ISOLATION)):
             hotspot.isolation()
         self.assertTrue(writes)
         self.assertTrue(all('/csap0/' in p for p, _ in writes))
         self.assertIn(('/proc/sys/net/ipv4/conf/csap0/forwarding', '0\n'), writes)
+        self.assertIn(('/proc/sys/net/ipv6/conf/csap0/forwarding', '0\n'), writes)
         self.assertIn(('/proc/sys/net/ipv6/conf/csap0/disable_ipv6', '1\n'), writes)
 
     def test_check_ap_refuses_vpn_route_or_changed_sta(self):
@@ -84,10 +85,68 @@ class HotspotTests(unittest.TestCase):
                 hotspot.check_unchanged(BASE)
         def read(*args, **_):
             return 'no' if args[0] == 'nmcli' else RADIO.replace('type managed', 'type AP')
-        with patch.object(hotspot, 'check_unchanged'), patch.object(hotspot, 'read_forwarding', return_value='0'), \
+        with patch.object(hotspot, 'check_unchanged'), patch.object(hotspot, 'check_isolation'), \
              patch.object(hotspot, 'run', side_effect=read), patch.object(hotspot, 'data', return_value=[dict(dev='Meta')]):
             with self.assertRaises(hotspot.HotspotError):
                 hotspot.check_ap(dict(baseline=BASE), enabled=True)
+
+    def test_global_forwarding_one_does_not_invalidate_isolated_ap(self):
+        values = dict(hotspot.AP_ISOLATION)
+        values.update({key: 1 for key in hotspot.GLOBAL_FORWARDING})
+        with patch.object(hotspot, 'read_switch', side_effect=lambda key: values[key]):
+            self.assertEqual(hotspot.check_isolation('fixture'), hotspot.AP_ISOLATION)
+
+    def test_forwarding_diagnostics_name_values_and_sanitize_proc_data(self):
+        for key, actual in (('ipv4/conf/csap0/forwarding', 1),
+                            ('ipv6/conf/csap0/forwarding', 1),
+                            ('ipv6/conf/csap0/disable_ipv6', 0)):
+            values = dict(hotspot.AP_ISOLATION)
+            values[key] = actual
+            with patch.object(hotspot, 'isolation_values', return_value=values), \
+                 patch.object(hotspot, 'read_switch', return_value=1):
+                with self.assertRaises(hotspot.IsolationError) as caught:
+                    hotspot.check_isolation('接口启用后', hotspot.AP_ISOLATION)
+            text = str(caught.exception)
+            self.assertIn(hotspot.sysctl_name(key), text)
+            self.assertIn('当前=' + str(actual), text)
+            self.assertIn('期望=' + str(hotspot.AP_ISOLATION[key]), text)
+            self.assertIn('上次=' + str(hotspot.AP_ISOLATION[key]), text)
+            self.assertIn('net.ipv4.conf.all.forwarding=1', text)
+        with patch.object(Path, 'read_text', return_value='SYNTHETIC_PRIVATE'):
+            self.assertIsNone(hotspot.read_switch('ipv4/conf/csap0/forwarding'))
+            with self.assertRaises(hotspot.IsolationError) as caught:
+                hotspot.check_isolation('fixture')
+        self.assertNotIn('SYNTHETIC_PRIVATE', str(caught.exception))
+        with patch.object(Path, 'read_text', side_effect=OSError('SYNTHETIC_PRIVATE')):
+            self.assertIsNone(hotspot.read_switch('ipv4/conf/csap0/forwarding'))
+        with patch.object(Path, 'read_text', return_value='2\n'):
+            self.assertEqual(hotspot.read_switch('ipv4/conf/csap0/forwarding'), 2)
+
+    def test_isolation_write_error_identifies_knob_without_exception_payload(self):
+        with patch.object(Path, 'write_text', side_effect=PermissionError('SYNTHETIC_PRIVATE')), \
+             patch.object(hotspot, 'read_switch', return_value=1):
+            with self.assertRaises(hotspot.IsolationError) as caught:
+                hotspot.isolation()
+        text = str(caught.exception)
+        self.assertIn('net.ipv4.conf.csap0.forwarding', text)
+        self.assertIn('期望=0 当前=1', text)
+        self.assertNotIn('SYNTHETIC_PRIVATE', text)
+
+    def test_settle_retries_transient_change_but_bounds_persistent_change(self):
+        error = hotspot.IsolationError('net.ipv4.conf.csap0.forwarding 当前=1 期望=0')
+        with patch.object(hotspot, 'isolation', return_value=dict(hotspot.AP_ISOLATION)) as write, \
+             patch.object(hotspot, 'isolation_values', return_value=dict(hotspot.AP_ISOLATION)), \
+             patch.object(hotspot, 'check_isolation', side_effect=[error, dict(hotspot.AP_ISOLATION)]), \
+             patch.object(hotspot.time, 'sleep'):
+            self.assertEqual(hotspot.settle_isolation('接口启用后'), hotspot.AP_ISOLATION)
+            self.assertEqual(write.call_count, 2)
+        with patch.object(hotspot, 'isolation', return_value=dict(hotspot.AP_ISOLATION)) as write, \
+             patch.object(hotspot, 'isolation_values', return_value=dict(hotspot.AP_ISOLATION)), \
+             patch.object(hotspot, 'check_isolation', side_effect=error), patch.object(hotspot.time, 'sleep'):
+            with self.assertRaises(hotspot.IsolationError) as caught:
+                hotspot.settle_isolation('接口启用后')
+            self.assertIs(caught.exception, error)
+            self.assertEqual(write.call_count, 3)
 
     def test_preflight_has_no_mutating_commands_no_randomness_or_private_files(self):
         commands = []
@@ -122,6 +181,12 @@ class HotspotTests(unittest.TestCase):
             secret.parent.mkdir(parents=True)
             owner = dict(uid=os.getuid(), gid=os.getgid(), home=str(root / 'home'))
             managed = ['yes']
+            proc = dict(hotspot.AP_ISOLATION)
+            proc.update({key: 1 for key in hotspot.GLOBAL_FORWARDING})
+            proc['ipv4/conf/csap0/forwarding'] = 1
+            proc['ipv6/conf/csap0/forwarding'] = 1
+            proc['ipv6/conf/csap0/disable_ipv6'] = 0
+            initial_globals = {key: proc[key] for key in hotspot.GLOBAL_FORWARDING}
             def command(*args, **kwargs):
                 events.append(args)
                 if args[0] == 'systemd-run':
@@ -129,6 +194,14 @@ class HotspotTests(unittest.TestCase):
                     if fail == 'timer' and name.endswith('rollback'):
                         raise hotspot.HotspotError('timer fixture failure')
                     units.add(name + ('.timer' if name.endswith('rollback') else '.service'))
+                    if name.endswith('hostapd'):
+                        # A daemon/link transition may restore inherited values.
+                        proc['ipv4/conf/csap0/forwarding'] = 1
+                        proc['ipv6/conf/csap0/disable_ipv6'] = 0
+                if args == ('ip', 'link', 'set', 'dev', 'csap0', 'up'):
+                    self.assertEqual(proc['ipv4/conf/csap0/forwarding'], 0)
+                    proc['ipv4/conf/csap0/forwarding'] = 1
+                    proc['ipv6/conf/csap0/forwarding'] = 1
                 if args[:2] == ('systemctl', 'stop'):
                     units.discard(args[2])
                 if args[:3] == ('nmcli', 'device', 'set'):
@@ -141,13 +214,25 @@ class HotspotTests(unittest.TestCase):
                 self.assertIn('canscope-test-rollback.timer', units)
                 events.append(('synthetic-password',))
                 return 'A'  # Never generate a real password, even inside tests.
-            original_read, original_exists = Path.read_text, Path.exists
+            original_read, original_exists, original_write = Path.read_text, Path.exists, Path.write_text
             def read(path, *args, **kwargs):
+                if str(path).startswith('/proc/sys/net/'):
+                    return str(proc[str(path).removeprefix('/proc/sys/net/')]) + '\n'
                 return '99' if str(path) == '/sys/class/net/csap0/ifindex' else original_read(path, *args, **kwargs)
+            def write(path, value, *args, **kwargs):
+                if str(path).startswith('/proc/sys/net/'):
+                    self.assertIn('/csap0/', str(path))
+                    proc[str(path).removeprefix('/proc/sys/net/')] = int(value)
+                    if (fail == 'forwarding' and str(path) == '/proc/sys/net/ipv4/conf/csap0/forwarding'
+                            and ('ip', 'link', 'set', 'dev', 'csap0', 'up') in events):
+                        proc['ipv4/conf/csap0/forwarding'] = 1  # Simulate a persistent competing writer.
+                    events.append(('sysctl', str(path)))
+                    return len(value)
+                return original_write(path, value, *args, **kwargs)
             def exists(path):
                 return True if str(path) == '/sys/class/net/csap0/ifindex' else original_exists(path)
             for name, replacement in [('RUNTIME', runtime), ('preflight', lambda: dict(BASE)), ('identity', lambda: owner),
-                                      ('run', command), ('active', lambda name: name in units), ('isolation', lambda: events.append(('isolate',))),
+                                      ('run', command), ('active', lambda name: name in units),
                                       ('check_ap', lambda *_, **kw: events.append(('check-ap', kw.get('enabled', False)))),
                                       ('check_unchanged', lambda _: events.append(('check-original',))),
                                       ('load_state', lambda: json.loads((runtime / 'state.json').read_text()) if runtime.exists() else None)]:
@@ -156,6 +241,7 @@ class HotspotTests(unittest.TestCase):
             stack.enter_context(patch.object(hotspot.secrets, 'choice', side_effect=choose))
             stack.enter_context(patch.object(hotspot.time, 'sleep'))
             stack.enter_context(patch.object(Path, 'read_text', read))
+            stack.enter_context(patch.object(Path, 'write_text', write))
             stack.enter_context(patch.object(Path, 'exists', exists))
             stack.enter_context(patch.object(hotspot.subprocess, 'run', side_effect=AssertionError('real process forbidden')))
             with redirect_stdout(io.StringIO()) as output:
@@ -164,6 +250,9 @@ class HotspotTests(unittest.TestCase):
                         hotspot.up()
                 else:
                     hotspot.up()
+                    self.assertEqual({key: proc[key] for key in hotspot.AP_ISOLATION}, hotspot.AP_ISOLATION)
+                    self.assertEqual({key: proc[key] for key in hotspot.GLOBAL_FORWARDING}, initial_globals)
+                    self.assertIn('net.ipv4.conf.csap0.forwarding 1 -> 0', output.getvalue())
                     for path in secret.iterdir():
                         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
                     self.assertEqual(secret.stat().st_mode & 0o777, 0o700)
@@ -188,9 +277,11 @@ class HotspotTests(unittest.TestCase):
         create = next(i for i, e in enumerate(events) if e[:2] == ('iw', 'phy'))
         first_password = events.index(('synthetic-password',))
         self.assertLess(first_password, create)
-        isolate = events.index(('isolate',))
+        writes = ('sysctl', '/proc/sys/net/ipv4/conf/csap0/forwarding')
+        isolate = events.index(writes)
         link_up = events.index(('ip', 'link', 'set', 'dev', 'csap0', 'up'))
         self.assertLess(isolate, link_up)
+        self.assertEqual(events.count(writes), 3)  # Pre-link, after link up, after hostapd.
         self.assertIn(('nmcli', 'device', 'set', 'csap0', 'managed', 'yes'), events)
         self.assertIn(('iw', 'dev', 'csap0', 'del'), events)
         self.assertIn(('check-original',), events)
@@ -202,6 +293,11 @@ class HotspotTests(unittest.TestCase):
     def test_partial_service_failure_also_removes_private_files_and_ap(self):
         events = self.exercise_lifecycle('dhcp')
         self.assertIn(('iw', 'dev', 'csap0', 'del'), events)
+
+    def test_persistent_forwarding_change_rolls_back_before_starting_services(self):
+        events = self.exercise_lifecycle('forwarding')
+        self.assertIn(('iw', 'dev', 'csap0', 'del'), events)
+        self.assertFalse(any('--unit=canscope-test-hostapd' in e for e in events))
 
     def test_up_refuses_failed_preflight_before_any_mutation(self):
         with patch.object(hotspot, 'preflight', return_value=dict(problems=['fixture conflict'])), \
@@ -223,9 +319,10 @@ class HotspotTests(unittest.TestCase):
 
     def test_monitor_schedules_rollback_without_touching_sta(self):
         with patch.object(hotspot, 'load_state', return_value=dict(baseline=BASE)), \
-             patch.object(hotspot, 'check_ap', side_effect=hotspot.HotspotError('channel changed')), \
-             patch.object(hotspot, 'run') as command, patch.dict(os.environ), redirect_stdout(io.StringIO()):
+             patch.object(hotspot, 'check_ap', side_effect=hotspot.IsolationError('net.ipv4.conf.csap0.forwarding 当前=1 期望=0')), \
+             patch.object(hotspot, 'run') as command, patch.dict(os.environ), redirect_stdout(io.StringIO()) as output:
             self.assertEqual(hotspot.monitor(), 1)
+        self.assertIn('net.ipv4.conf.csap0.forwarding 当前=1 期望=0', output.getvalue())
         command.assert_called_once_with('systemctl', 'start', '--no-block', 'canscope-test-rollback.service')
 
     def test_down_does_not_delete_replacement_interface_and_retains_retry_state(self):

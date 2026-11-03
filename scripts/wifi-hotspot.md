@@ -25,6 +25,8 @@ sudo /usr/bin/python scripts/test-hotspot.py up
 
 热点为 `CANScope-Test`、WPA2-PSK CCMP、PMF=0、20 MHz、10.77.0.1/24，DHCP 10.77.0.20–29（最多四个租约），不下发网关/DNS。不创建 NM shared 连接，不加 NAT、路由规则或防火墙规则，不更改全局 ip_forward；只对新增 csap0 关闭 IPv4 入向转发并禁用 IPv6。这里是主命名空间的专用接口与服务，不是主机本地端口的安全隔离。
 
+隔离在 link up 前施加，并在接口启用后及 hostapd 启动后重新施加：仅写 csap0 的 IPv4/IPv6 forwarding=0、disable_ipv6=1 等接口参数；每次等待 0.2 秒再核对，最多三次，不与其他写入者无限争用。重新施加会显示安全的字段和值变化；失败及运行中监控会显示上次值/当前值/期望值以及只读的全局参考值，再回滚，不修改 all/default forwarding。
+
 普通用户运行配网；密码由脚本从文件读取，经加密且校验 MITM 的 BLE 发给设备，不在终端输入/显示 Wi-Fi 密码：
 
 ```bash
