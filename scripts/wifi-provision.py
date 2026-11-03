@@ -72,6 +72,19 @@ def report_failure(exc, where=None):
             'org.freedesktop.DBus.Error.NoReply': ('D-Bus 无回复', '请检查蓝牙服务状态，等待旧操作结束后重试。'),
         }
         category, message = known.get(name, ('BlueZ/D-Bus 失败', '后端错误正文未输出；请检查目标设备、模式与当前连接。'))
+    elif type(exc).__name__ == 'JSONDecodeError':
+        category, message = '设备状态解析失败', '设备返回的状态不是有效 JSON；请先 QUERY 设备状态。'
+    elif type(exc) is ValueError and str(exc).startswith('设备配网失败，错误码：'):
+        # The text is our own literal plus a numeric firmware status code only.
+        code = str(exc).rsplit('：', 1)[-1]
+        reasons = {
+            '2': 'Wi-Fi 密码错误或握手超时；请核对 2.4 GHz 网络的密码。',
+            '3': '找不到该 Wi-Fi；请核对 SSID（区分大小写），并确认是 2.4 GHz、信号可达。',
+            '4': '设备未能接入该 Wi-Fi（其他原因）；请检查路由器的 2.4 GHz 设置、MAC 过滤和 DHCP。',
+            '5': '设备曾接入，随后断开；请检查信号和路由器设置。',
+        }
+        category = '设备配网失败（错误码 ' + (code if code.isdigit() else '?') + '）'
+        message = reasons.get(code, '设备返回了未知错误码；请先 QUERY 设备状态。')
     elif isinstance(exc, TimeoutError):
         category, message = '等待超时', '当前步骤未按时完成；配对码只在本终端明确提示后输入，结果未知时先查询。'
     elif isinstance(exc, (EOFError, KeyboardInterrupt)):
