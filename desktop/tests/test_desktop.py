@@ -281,7 +281,7 @@ class BleTests(unittest.IsolatedAsyncioTestCase):
             async def write_gatt_char(self, uuid, p, response):
                 assert response
                 if uuid==NETWORK: assert self.paired
-                self.writes.append((uuid,p))
+                self.writes.append((uuid,bytes(p)))
             async def read_gatt_char(self, uuid):
                 return json.dumps(dict(id='0123456789ab',fp='11'*32,token='22'*32,state=2,error=0,busy=False)).encode()
         with patch.dict(sys.modules,bleak=types.SimpleNamespace(BleakClient=FakeClient)):

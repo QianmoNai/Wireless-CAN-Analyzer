@@ -18,6 +18,7 @@ from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineScript, QWebEngineUrlRequestInterceptor, QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from .engine import Channel
+from .connection_store import load_connection, save_connection
 from . import __version__
 
 SOURCE = Path(__file__).resolve().parent
@@ -37,18 +38,11 @@ class Runtime(QObject):
     def add(self, slot):
         path = self.folder/f'connection-{slot}.json'
         try:
-            saved = json.loads(path.read_text('utf8'))
+            saved = load_connection(path)
         except (OSError, ValueError):
             saved = {}
         def save(value):
-            fd, temporary = tempfile.mkstemp(dir=self.folder, prefix='.connection-')
-            try:
-                with os.fdopen(fd, 'w', encoding='utf8') as stream:
-                    json.dump(value, stream, ensure_ascii=False)
-                os.replace(temporary, path)
-            finally:
-                if os.path.exists(temporary):
-                    os.unlink(temporary)
+            save_connection(path, value)
         async def create():
             channel = Channel(lambda kind, data: self.message.emit(slot, kind, json.dumps(data, ensure_ascii=False)), saved, save)
             self.channels[slot] = channel

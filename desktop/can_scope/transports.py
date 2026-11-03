@@ -89,9 +89,11 @@ class BleTransport:
         self.received, self.disconnected = received, disconnected
         self.client = None
         self.closed = False
+        self.provision_authenticated = False
 
     async def connect(self, device):
         from bleak import BleakClient
+        self.provision_authenticated = False
         self.client = BleakClient(device, disconnected_callback=lambda _: self.lost(), timeout=20)
         try:
             await self.client.connect()
@@ -103,6 +105,7 @@ class BleTransport:
             raise
 
     def lost(self):
+        self.provision_authenticated = False
         if not self.closed:
             self.disconnected('蓝牙连接已断开')
 
@@ -111,36 +114,55 @@ class BleTransport:
             raise ConnectionError('蓝牙未连接')
         await asyncio.wait_for(self.client.write_gatt_char(WRITE, p, response=True), 5)
 
-    async def provision(self, operation, ssid, password, status, networks):
-        commands = wifi_commands(operation, ssid, password, int(time.monotonic_ns() % 255) + 1)
-        # Pairing is delegated to the OS agent; PIN is shown on the ESP32.
-        await asyncio.wait_for(self.client.pair(), 65)
-        for p in commands:
-            await self.client.write_gatt_char(NETWORK, p, response=True)
-        for _ in range(50):
-            value = json.loads(bytes(await self.client.read_gatt_char(NETWORK)).decode('utf8'))
-            status(value)
-            if not value.get('busy'):
-                break
-            await asyncio.sleep(.7)
-            await self.client.write_gatt_char(NETWORK, bytes([1]) + bytes(19), response=True)
-        else:
-            raise TimeoutError('Wi-Fi 配置超时')
-        if value.get('error'):
-            raise ValueError('设备配网失败，错误码：' + str(value['error']))
-        if operation == 2:
-            rows = []
-            for _ in range(16):
-                await self.client.write_gatt_char(NETWORK, bytes([7, 0, len(rows)]) + bytes(17), response=True)
-                page = json.loads(bytes(await self.client.read_gatt_char(NETWORK)).decode('utf8'))
-                batch = page.get('scan', [])
-                rows.extend(batch)
-                if not batch or len(rows) >= page.get('total', 0):
+    async def provision(self, operation, ssid, password, status, networks, *, pair=True):
+        """Use pair=False only to reuse authentication on this same connection."""
+        commands = []
+        p = None
+        try:
+            # Pairing is delegated to the OS agent; PIN is shown on the ESP32.
+            if pair:
+                if await asyncio.wait_for(self.client.pair(), 65) is False:
+                    raise ConnectionError('蓝牙认证失败')
+                self.provision_authenticated = True
+            elif not self.provision_authenticated or not self.client.is_connected:
+                raise ConnectionError('请先在当前蓝牙连接上认证')
+            commands = [bytearray(item) for item in wifi_commands(
+                operation, ssid, password, int(time.monotonic_ns() % 255) + 1)]
+            ssid = password = ''
+            for p in commands:
+                await self.client.write_gatt_char(NETWORK, p, response=True)
+                p[:] = bytes(len(p))
+            for _ in range(50):
+                value = json.loads(bytes(await self.client.read_gatt_char(NETWORK)).decode('utf8'))
+                status(value)
+                if not value.get('busy'):
                     break
-            networks(rows)
+                await asyncio.sleep(.7)
+                await self.client.write_gatt_char(NETWORK, bytes([1]) + bytes(19), response=True)
+            else:
+                raise TimeoutError('Wi-Fi 配置超时')
+            if value.get('error') and operation != 1:
+                raise ValueError('设备配网失败，错误码：' + str(value['error']))
+            if operation == 2:
+                rows = []
+                for _ in range(16):
+                    await self.client.write_gatt_char(NETWORK, bytes([7, 0, len(rows)]) + bytes(17), response=True)
+                    page = json.loads(bytes(await self.client.read_gatt_char(NETWORK)).decode('utf8'))
+                    batch = page.get('scan', [])
+                    rows.extend(batch)
+                    if not batch or len(rows) >= page.get('total', 0):
+                        break
+                networks(rows)
+        finally:
+            ssid = password = ''
+            for p in commands:
+                p[:] = bytes(len(p))
+            commands.clear()
+            p = None
 
     async def close(self):
         self.closed = True
+        self.provision_authenticated = False
         if self.client and self.client.is_connected:
             await self.client.disconnect()
 
@@ -160,14 +182,14 @@ async def scan_ble(found):
     return devices
 
 
-async def discover(identity, found):
+async def discover(identity, found, *, broadcast='255.255.255.255', timeout=3):
     loop = asyncio.get_running_loop()
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.setblocking(False)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         sock.bind(('', 0))
-        await loop.sock_sendto(sock, b'CAN_SCOPE_DISCOVER_1', ('255.255.255.255', PORT))
-        deadline = loop.time() + 3
+        await loop.sock_sendto(sock, b'CAN_SCOPE_DISCOVER_1', (ipv4(broadcast), PORT))
+        deadline = loop.time() + timeout
         while loop.time() < deadline:
             try:
                 data, address = await asyncio.wait_for(loop.sock_recvfrom(sock, 128), deadline-loop.time())
