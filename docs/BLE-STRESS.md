@@ -123,3 +123,30 @@ from causing an endless spin. Normal blocked waits reset it. Generation tags
 reject packets popped before reset and recheck across ACK retries; stale hints
 only wake the worker and cannot authorize old data or complete a new token.
 Pool counts and queue capacities are independent test variables.
+
+## Connection parameter comparison
+
+`CONFIG_BLE_CONNECTION_POLICY` is a test-only option depending on diagnostics.
+It defaults to `0`, leaving central negotiation unchanged;
+`1` requests 15–30 ms and `2` requests 7.5–15 ms, both with latency zero.
+The bench negotiated 30/15 ms respectively. The 15 ms profile reduced RTT
+and loss, but one maximum-supply sample had unresolved UART ingress/accounting
+differences; its clean retest does not explain the failure. Neither profile is
+promoted to the normal default. Original failures and retests stay separate.
+The host event queue waits one second after first subscription to observe the
+central. A connection gets at most one accepted request; an immediate local
+API rejection permits one further attempt after three seconds. An accepted
+request ends that budget even if negotiation later fails or the central changes
+parameters. CCCD toggles cannot renew it. Disconnect/reset stops the callout;
+generation checks exclude stale callbacks. Only BLE data mode requests changes,
+leaving USB, LAN and dual mode alone. Legal existing supervision timeout is
+preserved; an invalid value falls back to 2 seconds. PHY, DLE, MTU, packet size,
+pool counts and scheduling are separate variables and remain unchanged.
+
+`param_requests`/`param_request_rc` record local API attempts; `param_changes`,
+`param_status`, actual `interval_ms`, latency and timeout record negotiation.
+The stress report saves an initial `connection_diagnostics` snapshot and the
+before/after snapshots of each load; a successful request alone is not evidence
+of the actual interval. Rejected/unsupported or ineffective profiles fall back
+to central defaults. Linux results do not validate Android HIGH/BALANCED,
+Windows, distance or power behavior.

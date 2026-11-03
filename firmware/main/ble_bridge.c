@@ -9,6 +9,7 @@ void ble_store_config_init(void);
 #include "ack_delivery.h"
 #include "notify_resource.h"
 #include "notify_schedule.h"
+#include "ble_connection_policy.h"
 #include "sdkconfig.h"
 #if CONFIG_BLE_EVENT_SCHEDULER
 #define BLE_EVENT_SCHEDULER_ENABLED 1
@@ -286,6 +287,41 @@ static const struct ble_gatt_svc_def services[] = {
     {0}
 };
 
+#if CONFIG_BLE_CONNECTION_POLICY
+static struct ble_npl_callout parameter_timer;
+static bridge_ble_policy_t parameter_policy;
+static void parameter_tick(struct ble_npl_event *event){
+    (void)event;
+    uint32_t generation=atomic_load(&ble_generation);
+    int conn=atomic_load(&connection);
+    struct ble_gap_conn_desc desc;
+    bool ready=atomic_load(&subscribed)&&!network_wifi_mode()&&!network_usb_mode()&&!network_dual_mode();
+    if(!ready||conn==BLE_HS_CONN_HANDLE_NONE||ble_gap_conn_find(conn,&desc))return;
+    int64_t now=esp_timer_get_time()/1000;
+    bridge_ble_params_t target;
+    if(bridge_ble_policy_next(&parameter_policy,generation,now,CONFIG_BLE_CONNECTION_POLICY,
+                               ready,desc.conn_itvl,desc.conn_latency,desc.supervision_timeout,&target)){
+        struct ble_gap_upd_params update={.itvl_min=target.min_interval,.itvl_max=target.max_interval,
+            .latency=target.latency,.supervision_timeout=target.timeout};
+        // Runs on the NimBLE host queue, serialized with connect/disconnect.
+        int rc=ble_gap_update_params(conn,&update);
+        bd_add(BD_PARAM_REQUESTS,1);bd_set(BD_PARAM_REQUEST_RC,rc);
+        bridge_ble_policy_result(&parameter_policy,rc);
+    }
+    if(!parameter_policy.finished&&parameter_policy.attempts<2){
+        int64_t remaining=parameter_policy.due_ms-esp_timer_get_time()/1000;
+        ble_npl_callout_reset(&parameter_timer,ble_npl_time_ms_to_ticks32(remaining>0?remaining:1));
+    }
+}
+static void parameter_subscribe(bool enabled){
+    if(!enabled){ble_npl_callout_stop(&parameter_timer);return;}
+    uint32_t generation=atomic_load(&ble_generation);
+    if(parameter_policy.generation==generation)return; // CCCD toggles cannot renew the request budget.
+    bridge_ble_policy_start(&parameter_policy,generation,esp_timer_get_time()/1000);
+    ble_npl_callout_reset(&parameter_timer,ble_npl_time_ms_to_ticks32(1000));
+}
+#endif
+
 static int gap_event(struct ble_gap_event *event, void *arg)
 {
     switch (event->type) {
@@ -302,6 +338,9 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         } else advertise();
         break;
     case BLE_GAP_EVENT_DISCONNECT:
+#if CONFIG_BLE_CONNECTION_POLICY
+        ble_npl_callout_stop(&parameter_timer);
+#endif
         atomic_fetch_add(&ble_generation,1);wake_notify();
         bd_add(BD_DISCONNECTS,1);bd_set(BD_DISCONNECT_REASON,event->disconnect.reason);
         atomic_store(&subscribed, false);
@@ -314,6 +353,9 @@ static int gap_event(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_SUBSCRIBE:
         if (event->subscribe.attr_handle == notify_handle) {
             atomic_store(&subscribed, event->subscribe.cur_notify != 0);wake_notify();
+#if CONFIG_BLE_CONNECTION_POLICY
+            parameter_subscribe(event->subscribe.cur_notify != 0);
+#endif
             if(event->subscribe.cur_notify){bridge_packet_t features={.bytes={1,15,1,0}};ble_bridge_publish(&features);bridge_packet_t name=name_status(0);ble_bridge_publish(&name);}
             ESP_LOGI(TAG, "CAN notifications %s", event->subscribe.cur_notify ? "enabled" : "disabled");
         }
@@ -391,6 +433,9 @@ static void on_sync(void)
 }
 static void on_reset(int reason)
 {
+#if CONFIG_BLE_CONNECTION_POLICY
+    ble_npl_callout_stop(&parameter_timer);
+#endif
     atomic_fetch_add(&ble_generation,1);wake_notify();
     if(!network_wifi_mode()&&!network_usb_mode())ble_bridge_reset_session();
     network_config_disconnect();
@@ -660,6 +705,9 @@ void ble_bridge_init(QueueHandle_t commands, QueueHandle_t queries)
     usb_link_init();
     network_init();
     ble_hs_cfg.sync_cb = on_sync;
+#if CONFIG_BLE_CONNECTION_POLICY
+    ble_npl_callout_init(&parameter_timer,nimble_port_get_dflt_eventq(),parameter_tick,NULL);
+#endif
     ble_hs_cfg.reset_cb = on_reset;
     ble_svc_gap_init();
     ble_svc_gatt_init();

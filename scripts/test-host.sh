@@ -40,6 +40,7 @@ compile_run test_ack_delivery firmware/main/ack_delivery.c
 compile_run test_feedback_poll firmware/main/feedback_poll.c firmware/main/ack_delivery.c
 compile_run test_notify_resource firmware/main/notify_resource.c firmware/main/ack_delivery.c
 compile_run test_notify_schedule -Wall -Wextra -Werror firmware/main/notify_schedule.c
+compile_run test_ble_connection_policy -Wall -Wextra -Werror firmware/main/ble_connection_policy.c
 cc -std=c11 -Itests/name_stubs -Ifirmware/main tests/test_name_store.c firmware/main/name_store.c -o "$test_build_dir/test_name_store"
 "$test_build_dir/test_name_store"
 python3 tests/test_query_tx_filter.py
@@ -50,6 +51,7 @@ python3 tests/test_panel_font.py
 python3 tests/test_panel_dma.py
 python3 tests/test_serial_hardware.py
 python3 tests/test_ble_stress.py
+python3 tests/test_ble_connection_glue.py
 node tests/test_imu.js
 node tests/test_motor_catalog.js
 node tests/test_history.js

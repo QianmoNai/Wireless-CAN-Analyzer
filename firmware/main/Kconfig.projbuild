@@ -12,6 +12,15 @@ config BLE_EVENT_SCHEDULER
     help
         Bench A/B only. The 12/24/36 pool candidates still failed overloaded
         control deadlines; keep the previous scheduler as the normal fallback.
+config BLE_CONNECTION_POLICY
+    int "Test connection profile (0=default, 1=15-30ms, 2=7.5-15ms)"
+    depends on BLE_TEST_DIAGNOSTICS
+    range 0 2
+    default 0
+    help
+        Observe the central first, then request once after subscription.
+        Only immediate local rejection permits one retry. No PHY/MTU changes.
+        Keep disabled normally: overload ingress accounting remains unresolved.
 endmenu
 
 menu "CAN analyzer status LED"

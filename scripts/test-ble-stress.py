@@ -278,6 +278,7 @@ async def main(args):
         device = targets[0]
         report['address'] = device.address
         await owner.connect(device)
+        report['connection_diagnostics'] = await owner.snapshot()
         await owner.status(115200)
         peer = serial.Serial(port=None, baudrate=115200, timeout=0, write_timeout=2, exclusive=True)
         peer.dtr = peer.rts = False
