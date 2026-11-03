@@ -9,6 +9,8 @@ from .usb_transport import UsbTransport, scan_usb
 
 
 UART_ACK_TIMEOUT = 3.0
+RX_BATCH_BYTES = 16 * 1024
+RX_BATCH_SECONDS = .004
 
 
 class Channel:
@@ -43,6 +45,9 @@ class Channel:
         self.capabilities = 0
         self.max_hz = 0
         self.ui_pending = False
+        self.control_pending = False
+        self.deliveries = {}
+        self.delivery_token = 0
         self.tasks = []
         self.closed = False
         self.busy = False
@@ -75,7 +80,13 @@ class Channel:
                 self.uart_cancelled.append(args[0])
             return
         if name == 'delivered':
-            self.ui_pending = False
+            if not args:  # Explicit page-load reset only; callbacks carry tokens.
+                self.deliveries.clear()
+                self.ui_pending = self.control_pending = False
+            elif len(args) == 1:
+                lane = self.deliveries.pop(args[0], None)
+                if lane == 'control':self.control_pending = False
+                elif lane == 'data':self.ui_pending = False
             return
         if name == 'networkState':
             self.network_state()
@@ -448,21 +459,62 @@ class Channel:
             self.dropped += 1
         queue.append((bytes(p), time.monotonic()))
 
+    def deliver_batch(self, lane, raw, samples=None, progress=None):
+        self.delivery_token += 1
+        self.deliveries[self.delivery_token] = lane
+        if lane == 'control':self.control_pending = True
+        else:self.ui_pending = True
+        samples = samples or []
+        self.emit('motorSamples' if samples else 'packets',
+                  dict(items=samples or raw, packets=raw if samples else [],
+                       uartTx=progress, key=self.detail, dropped=self.dropped,
+                       delivery=self.delivery_token, sentAt=int(time.time()*1000)))
+
+    def flush_once(self):
+        if not self.ready:
+            return
+        now = time.monotonic()
+        deadline = now + RX_BATCH_SECONDS
+        # One bounded control batch can pass a stalled data receipt. Device
+        # waiters/TX ACKs are already resolved directly in receive().
+        control_bytes = 0
+        if not self.control_pending and (self.controls or self.uart_progress):
+            raw = []
+            while self.controls and time.monotonic() < deadline:
+                p, arrived = self.controls.popleft()
+                raw.append(dict(hex=p.hex(), age=max(0, int((now-arrived)*1000))))
+            progress, self.uart_progress = self.uart_progress, None
+            control_bytes = len(raw)*20
+            self.deliver_batch('control', raw, progress=progress)
+        if self.ui_pending or not self.packets:
+            return
+        raw, samples, run = [], [], None
+        used = control_bytes
+        while self.packets and used + 20 <= RX_BATCH_BYTES and time.monotonic() < deadline:
+            p, arrived = self.packets.popleft()
+            used += 20
+            age = max(0, int((now-arrived)*1000))
+            if p[1] == 19 and 1 <= p[2] <= 12 and not p[3]:
+                seq = u32(p, 16)
+                if run is None or seq != (run['last']+1) & 0xffffffff:
+                    run = dict(uart=bytearray(), first=seq, last=seq, count=0, age=age)
+                    raw.append(run)
+                run['uart'].extend(p[4:4+p[2]])
+                run['last'] = seq
+                run['count'] += 1
+            else:
+                run = None
+                item = dict(hex=p.hex(), age=age)
+                (samples if p[1] == 11 else raw).append(item)
+        for item in raw:
+            if 'uart' in item:item['uart'] = item['uart'].hex()
+        if raw or samples:
+            self.deliver_batch('data', raw, samples)
+
     async def flush(self):
         while True:
             await asyncio.sleep(.025)
-            if self.ui_pending or not self.ready or not (self.packets or self.controls or self.uart_progress):
-                continue
-            now = time.monotonic()
-            raw, samples = [], []
-            for queue in (self.controls, self.packets):
-                for _ in range(min(len(queue), 128)):
-                    p, arrived = queue.popleft()
-                    item = dict(hex=p.hex(), age=int((now-arrived)*1000))
-                    (samples if p[1] == 11 else raw).append(item)
-            progress, self.uart_progress = self.uart_progress, None
-            self.ui_pending = True
-            self.emit('motorSamples' if samples else 'packets', dict(items=samples or raw, packets=raw if samples else [], uartTx=progress, key=self.detail, dropped=self.dropped, sentAt=int(time.time()*1000)))
+            self.flush_once()
 
     async def maintenance(self):
         while True:
@@ -486,7 +538,8 @@ class Channel:
         self.ready = False
         self.polls.clear()
         self.capabilities = 0
-        self.ui_pending = False
+        self.ui_pending = self.control_pending = False
+        self.deliveries.clear()
         self.packets.clear(); self.controls.clear()
         for token in self.pending_tx:
             self.emit('manualResult', dict(token=token, status='连接断开；发送结果未知'))

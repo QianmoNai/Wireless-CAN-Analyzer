@@ -26,6 +26,22 @@ const assert=require('assert/strict');
  assert.equal(await page.locator('#uartLog').textContent(),before);
  await page.evaluate(()=>showTab('uart'));await page.waitForTimeout(350);
  assert.notEqual(await page.locator('#uartLog').textContent(),before);
- console.log('PASS: exact latest 64 KiB, bounded layout blocks, pause/resume, hidden view suppression');
+ // The desktop's contiguous-run representation preserves ring bytes and UTF-8.
+ await page.evaluate(()=>{
+  $('uartClear').click();
+  let offset=0,seq=0;
+  while(offset<100000){const size=Math.min(6144,100000-offset),bytes=Uint8Array.from({length:size},(_,i)=>(offset+i)%256),count=Math.ceil(size/12);
+   onNative('packets',{items:[{uart:hexOf(bytes),first:seq+1,last:seq+count,count,age:0}]});seq+=count;offset+=size;}
+ });
+ await page.waitForTimeout(350);
+ assert.equal(await page.locator('#uartLog').textContent(),expected);
+ await page.evaluate(()=>{
+  $('uartClear').click();$('uartDisplay').value='text';$('uartDisplay').onchange();
+  onNative('packets',{items:[{uart:'e4b8',first:0xffffffff,last:0xffffffff,count:1},{uart:'adf09f',first:0,last:0,count:1},{uart:'9982',first:2,last:2,count:1}]});
+ });
+ await page.waitForTimeout(350);
+ assert.equal(await page.locator('#uartLog').textContent(),'中🙂');
+ assert((await page.locator('#uartLoss').textContent()).includes('缺失 1 个'));
+ console.log('PASS: exact latest 64 KiB, bounded layout blocks, pause/resume, hidden view suppression, contiguous UART batches/sequence wrap/gaps and split UTF-8');
  }finally{await browser.close()}
 })().catch(e=>{console.error(e);process.exitCode=1});

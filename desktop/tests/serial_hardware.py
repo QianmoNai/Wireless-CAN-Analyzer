@@ -66,6 +66,9 @@ def main():
                 sessions.append(self.runtime.channels[slot].transport.session)
             if kind == 'packets':
                 for item in data.get('items', []):
+                    if isinstance(item,dict) and 'uart' in item:
+                        packet_types.add(19)
+                        continue
                     raw = bytes.fromhex(item if isinstance(item,str) else item['hex'])
                     packet_types.add(raw[1])
                     if raw[1] == 21:

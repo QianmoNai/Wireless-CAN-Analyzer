@@ -213,7 +213,7 @@ class Window(QMainWindow):
         if slot not in self.ready:
             return
         expression = f'window.onNative&&window.onNative({json.dumps(kind)},{payload})'
-        self.views[slot].page().runJavaScript(expression, lambda _: self.runtime.call(slot, 'delivered', []) if kind in ('packets', 'motorSamples') else None)
+        self.views[slot].page().runJavaScript(expression, lambda _: self.runtime.call(slot, 'delivered', [json.loads(payload)['delivery']]) if kind in ('packets', 'motorSamples') else None)
         if kind == 'state':
             value = json.loads(payload)
             self.tabs.setTabText(slot-1, f'通道 {slot}'+(' · 已连接' if value['value'] == 'ready' else ''))

@@ -24,6 +24,7 @@ function u32(a,o){return (a[o]|a[o+1]<<8|a[o+2]<<16|a[o+3]<<24)>>>0}
 function put32(a,o,n){for(let i=0;i<4;i++)a[o+i]=(n>>>(8*i))&255}
 function hexOf(a){return Array.from(a,x=>x.toString(16).padStart(2,'0')).join('')}
 function parsePacket(hex){if(!/^[0-9a-f]{40}$/i.test(hex))return null;const a=Uint8Array.from(hex.match(/../g),x=>parseInt(x,16));if(a[0]!==1)return null;return a}
+function nativePacket(item,deliveryAge){if(item&&item.uart!==undefined&&window.uartBatch)uartBatch(item);else if(typeof item==='string')processPacket(item);else processPacket(item.hex,(item.age||0)+deliveryAge)}
 function processPacket(hex,age=0){
  const a=parsePacket(hex);if(!a)return;const kind=a[1];if(window.uartPacket&&uartPacket(a))return;if(window.devicePacket)devicePacket(a);if(window.watchedPacket)watchedPacket(a,age);
  if(kind===4){gotStatus=true;lastStatus=Date.now()-Math.max(0,age);cleanFailureCount=u32(a,12);renderFailureCount();firmwareDrops=u32(a,16);$('busStatus').textContent=['正常 · Error active','错误警告 · Error warning','错误被动 · Error passive','总线离线 · 正在恢复'][a[2]]||'未知状态';$('dropStatus').textContent='设备 '+firmwareDrops+' · App '+appDrops;updateHistoryNote();return}
@@ -40,8 +41,8 @@ window.onNative=function(type,d){
  else if(type==='error'){toast(d.message);if(window.deviceWriteFailed)deviceWriteFailed(d.message)}
  else if(type==='scanStart'){deviceMap.clear();$('deviceList').replaceChildren()}
  else if(type==='device'){deviceMap.set(d.address,d);renderDevices()}
- else if(type==='packets'){appDrops=d.dropped||0;d.items.forEach(item=>typeof item==='string'?processPacket(item):processPacket(item.hex,(item.age||0)+deliveryAge))}
- else if(type==='motorSamples'){appDrops=d.dropped||0;for(const item of d.packets||[])processPacket(item.hex,(item.age||0)+deliveryAge);for(const item of d.items||[])if(window.motorDetailSample)motorDetailSample({key:d.key,hex:item.hex,age:(item.age||0)+deliveryAge});}
+ else if(type==='packets'){appDrops=d.dropped||0;d.items.forEach(item=>nativePacket(item,deliveryAge))}
+ else if(type==='motorSamples'){appDrops=d.dropped||0;for(const item of d.packets||[])nativePacket(item,deliveryAge);for(const item of d.items||[])if(window.motorDetailSample)motorDetailSample({key:d.key,hex:item.hex,age:(item.age||0)+deliveryAge});}
  else if(type==='writeDone'&&!d.success&&window.deviceWriteFailed)deviceWriteFailed('设备未接受设置，请重试');
 };
 function renderDevices(){const root=$('deviceList');root.replaceChildren();for(const d of deviceMap.values()){const button=document.createElement('button');button.className='device';const text=document.createElement('div'),name=document.createElement('strong'),addr=document.createElement('small'),signal=document.createElement('span');name.textContent=d.name;addr.textContent=d.address;text.append(name,addr);signal.className='chip';signal.textContent=d.transport==='usb'?'USB':d.transport==='wifi'?'Wi-Fi':d.rssi+' dBm';button.append(text,signal);button.onclick=()=>{$('scanHint').textContent='正在连接 '+d.name+'…';invoke('connect',d.address)};root.append(button)}}

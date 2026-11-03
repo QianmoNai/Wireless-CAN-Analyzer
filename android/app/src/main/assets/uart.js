@@ -49,9 +49,20 @@ window.uartMode=false;
   document.querySelector('.hero .overline').textContent=enabled?'WIRELESS UART MONITOR':'WIRELESS CAN MONITOR';
   watchSettings();
  }
+ function receiveBytes(bytes,first,last){
+  if(!window.uartMode)return;
+  if(lastSequence!==null){const gap=(first-lastSequence-1)>>>0;if(gap<0x80000000)lost+=gap;}
+  lastSequence=last;
+  if(bytes.length>=buffer.length){bytes=bytes.slice(-buffer.length);head=0;}
+  const firstPart=Math.min(bytes.length,buffer.length-head);
+  buffer.set(bytes.subarray(0,firstPart),head);buffer.set(bytes.subarray(firstPart),0);
+  head=(head+bytes.length)%buffer.length;count=Math.min(buffer.length,count+bytes.length);changed=true;
+ }
+ // Desktop batches contain only contiguous runs; gaps split runs in Python.
+ window.uartBatch=row=>receiveBytes(Uint8Array.from(row.uart.match(/../g)||[],x=>parseInt(x,16)),row.first,row.last);
  window.uartPacket=a=>{
   if(a[1]===21){reported=true;lastStatusAt=Date.now();baud=u32(a,4);totalRx=u32(a,8);totalTx=u32(a,12);deviceDrops=u32(a,16);portReady=a[3]===0;mode(a[2]===1);stats();controls();return true;}
-  if(a[1]===19){if(!window.uartMode||!a[2]||a[2]>12||a[3])return true;const seq=u32(a,16);if(lastSequence!==null){const gap=(seq-lastSequence-1)>>>0;if(gap<0x80000000)lost+=gap;}lastSequence=seq;for(const byte of a.slice(4,4+a[2])){buffer[head]=byte;head=(head+1)%buffer.length;count=Math.min(buffer.length,count+1);}changed=true;return true;}
+  if(a[1]===19){if(!a[2]||a[2]>12||a[3])return true;receiveBytes(a.slice(4,4+a[2]),u32(a,16),u32(a,16));return true;}
   if(a[1]===20){if(pending&&u32(a,16)===pending.token){if(a[2]!==0){const reject=pending.reject;clearTimeout(pending.timer);pending=null;reject(Error('设备未完成串口输出（状态 '+a[2]+'）'));}else{pending.acked=true;finish();}}return true;}
   return false;
  };
