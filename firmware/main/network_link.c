@@ -226,12 +226,16 @@ static void discard_network_queue(QueueHandle_t queue){
  while(xQueueReceive(queue,&packet,0)==pdTRUE){wifi_diag_drop(WD_DROP_LAN_RESET,&packet);uart_bridge_drop_packet(&packet);}
 }
 static bool data_socket_options(int fd){
- int one=1;
- if(setsockopt(fd,IPPROTO_TCP,TCP_NODELAY,&one,sizeof(one))){
+#ifdef CAN_WIFI_TCP_NODELAY
+ int nodelay=CAN_WIFI_TCP_NODELAY;
+#else
+ int nodelay=1;
+#endif
+ if(setsockopt(fd,IPPROTO_TCP,TCP_NODELAY,&nodelay,sizeof(nodelay))){
   wifi_diag_set(WD_SOCKET_LAST_ERRNO,errno,WD_NOW_SEQUENCE);
   wifi_diag_set(WD_TCP_CLOSE_REASON,WD_CLOSE_OPTIONS,WD_NOW_SEQUENCE);return false;
  }
- wifi_diag_set(WD_TCP_NODELAY,1,WD_NOW_SEQUENCE);return true;
+ wifi_diag_set(WD_TCP_NODELAY,(uint32_t)nodelay,WD_NOW_SEQUENCE);return true;
 }
 static bool tls_diagnostic_reply(esp_tls_t *tls,uint32_t token){
  int rssi=INT32_MIN;wifi_phy_mode_t phy;
