@@ -90,6 +90,15 @@ static esp_err_t save_credentials(const network_credentials_t *c){nvs_handle_t h
 static void station_api(bool capture,uint8_t stage,esp_err_t err){
  if(capture){xSemaphoreTake(lock,portMAX_DELAY);network_diagnostics_api(&diagnostics,stage,err);xSemaphoreGive(lock);}
 }
+static esp_err_t start_station_radio(void){
+ if(!atomic_load(&radio_on)){
+  esp_err_t err=esp_wifi_start();if(err!=ESP_OK)return err;
+  atomic_store(&radio_on,true);
+ }
+ // Same 32 quarter-dBm request as the working 8 dBm TX test; after start,
+ // before either active scanning or association, including an already-on radio.
+ return esp_wifi_set_max_tx_power(32);
+}
 static bool release_ble_for_wifi(void){
  uint32_t until=millis()+2000;
  while(!atomic_load(&apply_acknowledged)&&(int32_t)(until-millis())>0)vTaskDelay(pdMS_TO_TICKS(10));
@@ -113,11 +122,8 @@ static bool begin_station(const network_credentials_t *c,bool capture){
  wifi_config_t cfg={0};memcpy(cfg.sta.ssid,c->ssid,c->ssid_len);memcpy(cfg.sta.password,c->password,c->password_len);cfg.sta.pmf_cfg.capable=true;
  station_api(capture,NET_STAGE_SET_CONFIG,ESP_OK);
  esp_err_t err=esp_wifi_set_config(WIFI_IF_STA,&cfg);memset(&cfg,0,sizeof(cfg));station_api(capture,NET_STAGE_SET_CONFIG,err);if(err!=ESP_OK)return false;
- if(!atomic_load(&radio_on)){
-  station_api(capture,NET_STAGE_START,ESP_OK);err=esp_wifi_start();station_api(capture,NET_STAGE_START,err);
-  if(err!=ESP_OK)return false;
-  atomic_store(&radio_on,true);
- }
+ station_api(capture,NET_STAGE_START,ESP_OK);err=start_station_radio();station_api(capture,NET_STAGE_START,err);
+ if(err!=ESP_OK)return false;
  station_api(capture,NET_STAGE_CONNECT,ESP_OK);err=esp_wifi_connect();station_api(capture,NET_STAGE_CONNECT,err);
  if(err!=ESP_OK)return false;
  station_api(capture,NET_STAGE_WAIT_IP,ESP_OK);return true;
@@ -253,9 +259,10 @@ static void manager_task(void *arg){
    if(network_dual_mode()||network_usb_mode()){dual_zero(&r,sizeof(r));continue;}
    if(r.op!=NET_SCAN){atomic_fetch_add(&network_epoch,1);atomic_store(&linked,false);ble_bridge_reset_session();}
    if(r.op==NET_SCAN){
-    if(!atomic_load(&radio_on)){if(esp_wifi_start()==ESP_OK)atomic_store(&radio_on,true);}
+    esp_err_t err=start_station_radio();
     wifi_scan_config_t config={.show_hidden=false,.scan_type=WIFI_SCAN_TYPE_ACTIVE,.scan_time.active={.min=80,.max=180}};
-    esp_err_t err=esp_wifi_scan_start(&config,true);uint16_t total=SCAN_MAX;
+    if(err==ESP_OK)err=esp_wifi_scan_start(&config,true);
+    uint16_t total=SCAN_MAX;
     xSemaphoreTake(lock,portMAX_DELAY);scan_count=0;if(err==ESP_OK&&esp_wifi_scan_get_ap_records(&total,scan_records)==ESP_OK)scan_count=total;else error_code=6;xSemaphoreGive(lock);
    }else if(r.op==NET_CLEAR){
     if(save_credentials(NULL)==ESP_OK){xSemaphoreTake(lock,portMAX_DELAY);memset(&saved,0,sizeof(saved));xSemaphoreGive(lock);credentials_ok=false;esp_wifi_disconnect();atomic_store(&online,false);atomic_store(&station_ip,0);set_status(0,0);}else set_status(4,5);
