@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
-from ble_stress import Owner, ChannelReceiver, diagnostics, HEADER, FIELDS, split_prefix
+from ble_stress import Owner, ChannelReceiver, diagnostics, HEADER, FIELDS, UART_FIELDS, split_prefix
 from can_scope.protocol import packet, u32
 
 spec = importlib.util.spec_from_file_location('ble_entry', ROOT/'scripts/test-ble-stress.py')
@@ -133,6 +133,16 @@ class StressTests(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(len(value), 512)
         with self.assertRaises(ValueError):
             diagnostics(value[:-1])
+
+    def test_uart_diagnostic_suffix(self):
+        words = [0]*(len(HEADER)+3*len(FIELDS)+len(UART_FIELDS))
+        words[:2] = [2, len(words)]
+        words[-len(UART_FIELDS)+UART_FIELDS.index('error_flush_bytes')] = 431
+        value = struct.pack('<'+'I'*len(words), *words)
+        self.assertEqual(diagnostics(value)['uart']['error_flush_bytes'], 431)
+        self.assertLessEqual(len(value), 512)
+        with self.assertRaises(ValueError):
+            diagnostics(value[:-4])
 
     def test_real_channel_rx_binary_batch_and_receipts(self):
         channel = ChannelReceiver()

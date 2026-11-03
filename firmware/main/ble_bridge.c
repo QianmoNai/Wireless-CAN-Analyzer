@@ -139,7 +139,7 @@ static void observe_connection(uint16_t conn){
 static int diagnostics_access(uint16_t conn,uint16_t attr,struct ble_gatt_access_ctxt *ctx,void *arg){
     if(ctx->op!=BLE_GATT_ACCESS_OP_READ_CHR)return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
     uint32_t snapshot[BD_TOTAL_WORDS];
-    bd_set(BD_VERSION,1);bd_set(BD_WORDS,BD_TOTAL_WORDS);
+    bd_set(BD_VERSION,2);bd_set(BD_WORDS,BD_TOTAL_WORDS);
     bd_set(BD_UPTIME_MS,esp_timer_get_time()/1000);
     bd_set(BD_HEAP_FREE,esp_get_free_heap_size());bd_set(BD_HEAP_MIN,esp_get_minimum_free_heap_size());
     bd_set(BD_POOL1_COUNT,CONFIG_BT_NIMBLE_MSYS_1_BLOCK_COUNT);
@@ -152,6 +152,7 @@ static int diagnostics_access(uint16_t conn,uint16_t attr,struct ble_gatt_access
             bd_max(bd_index(c,BD_MAX_AGE_MS),(esp_timer_get_time()-head.enqueued_us)/1000);
     }
     for(unsigned i=0;i<BD_TOTAL_WORDS;i++)snapshot[i]=atomic_load(&bd[i]);
+    uart_bridge_diagnostics(snapshot+BD_UART_START);
     return os_mbuf_append(ctx->om,snapshot,sizeof(snapshot))?BLE_ATT_ERR_INSUFFICIENT_RES:0;
 }
 #endif

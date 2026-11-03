@@ -20,6 +20,8 @@ done
 cc -std=c11 -Wall -Wextra -Werror -Itests/buzzer_stubs -Ifirmware/main tests/test_board_buzzer.c firmware/main/board_buzzer.c -o "$test_build_dir/test_board_buzzer"
 "$test_build_dir/test_board_buzzer"
 cc -std=c11 -Wall -Wextra -Werror -Itests/uart_stubs -Itests/dual_stubs -Ifirmware/main tests/test_uart_bridge.c -o "$test_build_dir/test_uart_bridge"
+cc -std=c11 -Wall -Wextra -Werror -DCONFIG_BLE_TEST_DIAGNOSTICS=1 -Itests/uart_stubs -Itests/dual_stubs -Ifirmware/main tests/test_uart_bridge.c -o "$test_build_dir/test_uart_bridge_diag"
+"$test_build_dir/test_uart_bridge_diag"
 "$test_build_dir/test_uart_bridge"
 cc -std=c11 -Wall -Wextra -Werror -Itests/usb_stubs -Ifirmware/main tests/test_usb_link.c -o "$test_build_dir/test_usb_link"
 "$test_build_dir/test_usb_link"

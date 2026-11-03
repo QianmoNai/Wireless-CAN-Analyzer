@@ -234,6 +234,9 @@ async def run_case(args, report, owner, peer, baud, rate, duplex, number):
             row['drop_accounting_difference'] = row['missing_bytes']-row['delta_drop']
             d0, d1 = row['diagnostics_before'], row['diagnostics_after']
             if d0 and d1:
+                if 'uart' in d0 and 'uart' in d1:
+                    row['uart_delta'] = {k: (d1['uart'][k]-v) & 0xffffffff
+                                         for k, v in d0['uart'].items() if k != 'event_high_water'}
                 causes = ('full_bytes', 'drop_alloc_bytes', 'drop_reserve_bytes', 'drop_submit_bytes', 'reset_bytes', 'other_bytes')
                 row['drop_causes'] = {k: (d1['raw'][k]-d0['raw'][k]) & 0xffffffff for k in causes}
                 row['cause_accounting_difference'] = row['delta_drop'] - sum(row['drop_causes'].values())

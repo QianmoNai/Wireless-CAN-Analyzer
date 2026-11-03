@@ -15,6 +15,32 @@ typedef struct { bridge_packet_t packet; uint32_t generation,config; } uart_comm
 static QueueHandle_t commands,events;
 static atomic_uint config_request=115200u<<1, connection_generation;
 static atomic_uint rx_total,tx_total,drop_total,error_total;
+#if CONFIG_BLE_TEST_DIAGNOSTICS
+static atomic_uint ud[UD_WORDS];
+#define ud_add(word,n) atomic_fetch_add(&ud[word],n)
+void uart_bridge_diagnostics(uint32_t out[UD_WORDS]) {
+    for(unsigned i=0;i<UD_WORDS;i++)out[i]=atomic_load(&ud[i]);
+}
+static void ud_event_depth(void) {
+    unsigned n=uxQueueMessagesWaiting(events),old=atomic_load(&ud[UD_EVENT_HIGH_WATER]);
+    while(old<n&&!atomic_compare_exchange_weak(&ud[UD_EVENT_HIGH_WATER],&old,n)){}
+}
+#else
+#define ud_add(word,n) ((void)0)
+#define ud_event_depth() ((void)0)
+#endif
+static void flush_rx(bool config_change) {
+    size_t buffered=0;
+    int rc=uart_get_buffered_data_len(PORT,&buffered);
+    ud_add(UD_BUFFER_QUERY_ERRORS,rc!=ESP_OK);
+    ud_add(config_change?UD_CONFIG_FLUSHES:UD_ERROR_FLUSHES,1);
+    ud_add(config_change?UD_CONFIG_FLUSH_BYTES:UD_ERROR_FLUSH_BYTES,buffered);
+    atomic_fetch_add(&drop_total,buffered);
+    rc=uart_flush_input(PORT);
+    ud_add(UD_FLUSH_ERRORS,rc!=ESP_OK);
+    (void)rc;
+    (void)config_change;
+}
 static atomic_bool ready;
 static TaskHandle_t worker;
 static bool installed;
@@ -28,11 +54,11 @@ static void result(const bridge_packet_t *command,unsigned status) {
     ble_bridge_publish(&p);
 }
 static void discard_pending(bool reply) {
-    if(tx_size){atomic_fetch_add(&drop_total,tx_size-tx_offset);if(tx_app&&reply)result(&tx_command,3);}
+    if(tx_size){ud_add(UD_TX_DISCARD_BYTES,tx_size-tx_offset);atomic_fetch_add(&drop_total,tx_size-tx_offset);if(tx_app&&reply)result(&tx_command,3);}
     tx_size=tx_offset=0;tx_app=false;
     uart_command_t command;
     while(xQueueReceive(commands,&command,0)==pdTRUE){
-        atomic_fetch_add(&drop_total,command.packet.bytes[2]);
+        ud_add(UD_TX_DISCARD_BYTES,command.packet.bytes[2]);atomic_fetch_add(&drop_total,command.packet.bytes[2]);
         if(reply && command.generation==atomic_load(&connection_generation))result(&command.packet,3);
     }
 }
@@ -59,17 +85,22 @@ static void step(void) {
     if(config!=applied_config || epoch!=applied_generation || peer!=peer_generation) {
         bool reopen=config!=applied_config;
         discard_pending(epoch==applied_generation);
-        if(installed){size_t buffered=0;uart_get_buffered_data_len(PORT,&buffered);atomic_fetch_add(&drop_total,buffered);uart_flush_input(PORT);}
+        if(installed)flush_rx(true);
         if(reopen){close_port();if(config&1 && !open_port(config>>1))atomic_fetch_add(&error_total,1);}
         applied_config=config;applied_generation=epoch;peer_generation=peer;
     }
     if(!(config&1) || !installed)return;
     uart_event_t event;
+    ud_event_depth();
     for(unsigned i=0;i<32&&xQueueReceive(events,&event,0)==pdTRUE;i++){
+        if(event.type==UART_DATA){ud_add(UD_DATA_EVENTS,1);ud_add(UD_DATA_EVENT_BYTES,event.size);}
+        if(event.type==UART_FIFO_OVF)ud_add(UD_FIFO_OVF,1);
+        if(event.type==UART_BUFFER_FULL)ud_add(UD_BUFFER_FULL,1);
+        if(event.type==UART_FRAME_ERR)ud_add(UD_FRAME_ERR,1);
+        if(event.type==UART_PARITY_ERR)ud_add(UD_PARITY_ERR,1);
         if(event.type==UART_FIFO_OVF || event.type==UART_BUFFER_FULL || event.type==UART_FRAME_ERR || event.type==UART_PARITY_ERR){
             atomic_fetch_add(&error_total,1);
-            size_t buffered=0;uart_get_buffered_data_len(PORT,&buffered);atomic_fetch_add(&drop_total,buffered);
-            uart_flush_input(PORT);
+            flush_rx(false);
         }
     }
     bool dual=network_dual_mode();
@@ -77,14 +108,18 @@ static void step(void) {
     uint8_t data[DUAL_UART_CHUNK];
     for(unsigned i=0;i<64;i++){
         int n=uart_read_bytes(PORT,data,dual?sizeof(data):UART_WIRE_BYTES,0);
-        if(n<=0)break;
+        ud_add(UD_READ_CALLS,1);
+        if(n<=0){ud_add(UD_READ_ERRORS,n<0);break;}
+        ud_add(UD_READ_BYTES,n);
         atomic_fetch_add(&rx_total,n);
-        if(!connected){atomic_fetch_add(&drop_total,n);continue;}
-        if(dual){if(!dual_link_uart_rx(data,n))atomic_fetch_add(&drop_total,n);}
+        if(!connected){ud_add(UD_DISCONNECTED_BYTES,n);atomic_fetch_add(&drop_total,n);continue;}
+        if(dual){ud_add(UD_DUAL_BYTES,n);if(!dual_link_uart_rx(data,n))atomic_fetch_add(&drop_total,n);}
         else {
             bridge_packet_t p={.bytes={1,UART_RX_EVENT,n,0}};
             memcpy(p.bytes+4,data,n);wire_put_u32(p.bytes+16,++rx_sequence);
-            if(!ble_bridge_uart_publish(&p))atomic_fetch_add(&drop_total,n);
+            ud_add(UD_BLE_ATTEMPT_BYTES,n);
+            if(!ble_bridge_uart_publish(&p)){ud_add(UD_BLE_REJECT_BYTES,n);atomic_fetch_add(&drop_total,n);}
+            else ud_add(UD_BLE_ACCEPT_BYTES,n);
         }
     }
     if(!connected){discard_pending(false);return;}
@@ -93,7 +128,7 @@ static void step(void) {
         else {
             uart_command_t command;
             if(xQueueReceive(commands,&command,0)==pdTRUE){
-                if(command.generation!=epoch || command.config!=config){atomic_fetch_add(&drop_total,command.packet.bytes[2]);return;}
+                if(command.generation!=epoch || command.config!=config){ud_add(UD_TX_DISCARD_BYTES,command.packet.bytes[2]);atomic_fetch_add(&drop_total,command.packet.bytes[2]);return;}
                 tx_command=command.packet;tx_size=command.packet.bytes[2];memcpy(tx_data,command.packet.bytes+4,tx_size);tx_app=true;
             }
         }
@@ -105,6 +140,7 @@ static void step(void) {
         if(tx_offset<tx_size){
             int n=uart_tx_chars(PORT,(const char*)tx_data+tx_offset,tx_size-tx_offset);
             if(n<0){
+                ud_add(UD_TX_DISCARD_BYTES,tx_size-tx_offset);
                 atomic_fetch_add(&error_total,1);atomic_fetch_add(&drop_total,tx_size-tx_offset);
                 if(tx_app)result(&tx_command,2);
                 tx_size=tx_offset=0;tx_app=false;return;
@@ -148,14 +184,19 @@ bool uart_bridge_send(const uint8_t p[20]) {
 void uart_bridge_disconnect(void){atomic_fetch_add(&connection_generation,1);if(worker)xTaskNotifyGive(worker);}
 void uart_bridge_drop_packet(const bridge_packet_t *p){
     if(p->bytes[0]==1 && p->bytes[1]==UART_RX_EVENT && p->bytes[2]>=1 &&
-       p->bytes[2]<=UART_WIRE_BYTES && !p->bytes[3])
+       p->bytes[2]<=UART_WIRE_BYTES && !p->bytes[3]){
+        ud_add(UD_DOWNSTREAM_DROP_BYTES,p->bytes[2]);
         atomic_fetch_add(&drop_total,p->bytes[2]);
+    }
 }
 void uart_bridge_stats(uart_bridge_stats_t *s){
     *s=(uart_bridge_stats_t){.rx=atomic_load(&rx_total),.tx=atomic_load(&tx_total),.dropped=atomic_load(&drop_total)+dual_link_uart_dropped(),
         .errors=atomic_load(&error_total),.baud=atomic_load(&config_request)>>1,.ready=atomic_load(&ready)};
 }
 #else
+#if CONFIG_BLE_TEST_DIAGNOSTICS
+void uart_bridge_diagnostics(uint32_t out[UD_WORDS]){memset(out,0,UD_WORDS*sizeof(*out));}
+#endif
 void uart_bridge_init(void){}
 void uart_bridge_configure(bool selected,uint32_t baud){(void)selected;(void)baud;}
 bool uart_bridge_selected(void){return false;}

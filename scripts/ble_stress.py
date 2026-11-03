@@ -20,17 +20,26 @@ FIELDS = ('enqueued full_packets full_bytes high_water max_age_ms alloc_fail res
           'submit_error submitted drop_alloc_bytes drop_reserve_bytes drop_submit_bytes '
           'reset_bytes other_bytes failed_packets depth').split()
 
+UART_FIELDS = ('data_events data_event_bytes fifo_ovf buffer_full frame_err parity_err '
+               'read_calls read_bytes ble_attempt_bytes ble_accept_bytes ble_reject_bytes '
+               'disconnected_bytes dual_bytes config_flushes config_flush_bytes '
+               'error_flushes error_flush_bytes tx_discard_bytes downstream_drop_bytes '
+               'buffer_query_errors flush_errors read_errors event_high_water').split()
+
 
 def diagnostics(value):
-    if len(value) != 4 * (len(HEADER) + 3 * len(FIELDS)):
+    base = len(HEADER) + 3 * len(FIELDS)
+    if len(value) not in (4 * base, 4 * (base + len(UART_FIELDS))):
         raise ValueError('Invalid diagnostic snapshot length')
     words = struct.unpack('<' + 'I' * (len(value)//4), value)
     result = dict(zip(HEADER, words))
-    if result['version'] != 1 or result['words'] != len(words):
+    if (result['version'], len(words)) not in ((1, base), (2, base + len(UART_FIELDS))) or result['words'] != len(words):
         raise ValueError('Unknown diagnostic version')
     for i, name in enumerate(('raw', 'control', 'ack')):
         start = len(HEADER) + i * len(FIELDS)
         result[name] = dict(zip(FIELDS, words[start:start + len(FIELDS)]))
+    if result['version'] == 2:
+        result['uart'] = dict(zip(UART_FIELDS, words[base:]))
     result['interval_ms'] = result['interval'] * 1.25
     result['timeout_ms'] = result['timeout'] * 10
     # Zero PHY means unavailable, never an inferred PHY or DLE result.

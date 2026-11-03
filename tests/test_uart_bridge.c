@@ -8,6 +8,7 @@ QueueHandle_t xQueueCreate(unsigned n,size_t size){struct queue*q=calloc(1,sizeo
 int xQueueSend(QueueHandle_t q,const void*p,unsigned w){(void)w;if(q->count==q->limit)return 0;memcpy(q->data+q->size*q->count++,p,q->size);return 1;}
 int xQueueReceive(QueueHandle_t q,void*p,unsigned w){(void)w;if(!q->count)return 0;memcpy(p,q->data,q->size);memmove(q->data,q->data+q->size,--q->count*q->size);return 1;}
 void xQueueReset(QueueHandle_t q){q->count=0;}
+unsigned uxQueueMessagesWaiting(QueueHandle_t q){return q->count;}
 int xTaskCreate(void(*f)(void*),const char*n,unsigned s,void*a,unsigned p,TaskHandle_t*h){(void)f;(void)n;(void)s;(void)a;(void)p;*h=(void*)1;return 1;}
 void xTaskNotifyGive(TaskHandle_t h){(void)h;}
 unsigned ulTaskNotifyTake(int c,unsigned w){(void)c;(void)w;return 0;}
@@ -59,6 +60,12 @@ int main(void){
  unsigned dropped=drop_total;admit=false;input_count=5;step();assert(drop_total==dropped+5);admit=true;
  dropped=drop_total;link=false;input_count=4;step();assert(drop_total==dropped+4);link=true;
  uart_event_t e={.type=UART_FIFO_OVF};xQueueSend(events,&e,0);input_count=9;step();assert(error_total==2&&input_count==0);
+#if CONFIG_BLE_TEST_DIAGNOSTICS
+ uint32_t d[UD_WORDS];uart_bridge_diagnostics(d);
+ assert(d[UD_FIFO_OVF]==1&&d[UD_ERROR_FLUSHES]==1&&d[UD_ERROR_FLUSH_BYTES]==9);
+ assert(d[UD_READ_BYTES]==265&&d[UD_BLE_ATTEMPT_BYTES]==261&&d[UD_BLE_REJECT_BYTES]==5&&d[UD_DISCONNECTED_BYTES]==4);
+ assert(d[UD_TX_DISCARD_BYTES]==27);
+#endif
  uart_bridge_configure(false,9600);step();fail_open=true;uart_bridge_configure(true,19200);step();assert(!ready&&error_total==3);
  // Downstream accounting accepts only actual UART RX payload bytes and is
  // cumulative across status reads, disconnect and baud/mode changes.

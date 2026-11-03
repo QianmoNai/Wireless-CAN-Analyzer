@@ -1,6 +1,7 @@
 #pragma once
 #include <stdint.h>
 #include <stdatomic.h>
+#include "uart_bridge.h"
 
 // Test-only UUID c0de0005. Little-endian uint32 words; no v1 event changes.
 // Counters are lifetime, wrapping, independently sampled (not a transaction).
@@ -17,7 +18,8 @@ enum { BD_ENQUEUED, BD_FULL_PACKETS, BD_FULL_BYTES, BD_HIGH_WATER,
     BD_DROP_SUBMIT_BYTES, BD_RESET_BYTES, BD_OTHER_BYTES,
     BD_FAILED_PACKETS, BD_DEPTH, BD_CLASS_WORDS };
 enum { BD_RAW, BD_CONTROL, BD_ACK, BD_CLASSES };
-#define BD_TOTAL_WORDS (BD_HEADER_WORDS + BD_CLASSES * BD_CLASS_WORDS)
+#define BD_UART_START (BD_HEADER_WORDS + BD_CLASSES * BD_CLASS_WORDS)
+#define BD_TOTAL_WORDS (BD_UART_START + UD_WORDS)
 _Static_assert(BD_TOTAL_WORDS * 4 <= 512, "bounded ATT diagnostic value");
 #if CONFIG_BLE_TEST_DIAGNOSTICS
 static atomic_uint bd[BD_TOTAL_WORDS];

@@ -60,6 +60,7 @@ void ble_bridge_reset_session(void){resets++;}
 int ble_bridge_command(const uint8_t p[20]){(void)p;return 0;}
 int ble_bridge_settings_command(const uint8_t p[20],bridge_packet_t*r){(void)p;(void)r;return 0;}
 static atomic_uint drop_total,dropped;
+#define ud_add(word,n) ((void)0)
 '''
 
 PLATFORM = r'''
