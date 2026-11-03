@@ -15,6 +15,8 @@ import subprocess
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'scripts'))
+from uart_stress_fixture import FixtureWriter, low_latency, restore_low_latency
 from can_scope.engine import Channel
 from can_scope.protocol import packet, u32
 from can_scope.usb_transport import prepare_usb, open_port
@@ -92,6 +94,8 @@ async def run(args, report):
     try:
         report['initial_settings']=await prepare_usb(args.usb,data=1,baud=115200)
         peer=open_port(args.peer)
+        peer.write_timeout=2
+        report['fixture_low_latency']=low_latency(peer,args.fixture_low_latency)
         channel.start()
         await channel.handle('connect',['usb:'+args.usb])
         for baud in args.bauds:
@@ -103,14 +107,22 @@ async def run(args, report):
                 await asyncio.sleep(.3)
                 active=dict(received=bytearray(),ages=[],last_seq=None,gaps=0,duplicates=0,reordered=0,
                             statuses=[],high_water=0,rss_max=rss(),rss_at=time.monotonic())
+                await asyncio.sleep(.65)
+                if not active['statuses']:raise TimeoutError('missing initial type21')
+                before_status=active['statuses'][-1]
                 before_drop=channel.dropped
                 expected,tx_expected,tx_actual=bytearray(),bytearray(),bytearray()
                 rng=random.Random(baud)
-                rate=baud/10*.98
+                rate=baud/10*args.rx_fraction
                 start=time.monotonic(); cpu=time.process_time(); due=start
                 pending=None
+                sender=None
+                rx_events=[]
+                if args.fixture_thread:
+                    sender=FixtureWriter(peer,duration,rate,args.fixture_chunk,baud,pattern).start(start)
+                    expected=sender.expected
                 async def tx():
-                    while time.monotonic()<start+duration:
+                    while not args.rx_only and time.monotonic()<start+duration:
                         data=rng.randbytes(12)
                         p=bytearray(packet(0x18,a=12,token=channel.next_token()));p[4:16]=data
                         tx_expected.extend(data)
@@ -121,12 +133,16 @@ async def run(args, report):
                     while time.monotonic()<start+duration:
                         now=time.monotonic()
                         tx_actual.extend(peer.read(65536))
+                        if not rx_events or now-start-rx_events[-1][0]>=.1:
+                            rx_events.append((now-start,len(active['received'])))
+                        if sender is not None and sender.done.is_set() and sender.error:
+                            sender.join()
                         if pending is not None and pending.done():
                             data,n=pending.result()
                             expected.extend(data[:n])
                             if n!=len(data):raise OSError('fixture short write; no retry')
                             pending=None
-                        if now>=due and pending is None:
+                        if sender is None and now>=due and pending is None:
                             size=min(4096,max(128,int(rate*.25))) if pattern=='burst' else max(12,min(256,int(rate/100)))
                             data=rng.randbytes(size)
                             async def write(data):return data,await asyncio.to_thread(peer.write,data)
@@ -134,6 +150,10 @@ async def run(args, report):
                             due=max(due+size/rate,now)
                         await asyncio.sleep(.001)
                 finally:
+                    if sender is not None:
+                        # Normal end lets the current bounded write finish; errors stop new writes.
+                        sender.stop.set()
+                        await asyncio.to_thread(sender.join)
                     if pending is not None:
                         data,n=await pending;expected.extend(data[:n])
                         if n!=len(data):raise OSError('fixture short write; no retry')
@@ -155,6 +175,17 @@ async def run(args, report):
                          queue_age_ms=percentile(active['ages']),queue_high_water_packets=active['high_water'],
                          engine_drops=channel.dropped-before_drop,remaining_queue=len(channel.packets),
                          cpu_percent=round((time.process_time()-cpu)/elapsed*100,2),rss_max_bytes=active['rss_max'])
+                if not active['statuses']:raise TimeoutError('missing final type21')
+                after_status=active['statuses'][-1]
+                delta=lambda offset:(u32(after_status,offset)-u32(before_status,offset))&0xffffffff
+                interior=[(t,n) for t,n in rx_events if 1<=t<=duration-1]
+                row.update(rx_only=args.rx_only,offered_rx_Bps=rate,
+                           fixture=sender.metrics() if sender is not None else None,
+                           type21_before=before_status.hex(),type21_after=after_status.hex(),
+                           type21_rx_delta=delta(8),type21_tx_delta=delta(12),type21_drop_delta=delta(16),
+                           unaccounted_rx_bytes=row['missing_rx_bytes']-delta(16),
+                           steady_rx_Bps=round((interior[-1][1]-interior[0][1])/(interior[-1][0]-interior[0][0]),2) if len(interior)>1 else None,
+                           rx_events=rx_events)
                 row['ok']=row['strict_tx_equal'] and not (row['duplicates'] or row['reordered'] or errors or row['remaining_queue'])
                 report['loads'].append(row)
                 args.output.write_text(json.dumps(report,indent=2)+'\n')
@@ -188,7 +219,9 @@ async def run(args, report):
         active=None
         await channel.close()
         for handle in timers:handle.cancel()
-        if peer:peer.close()
+        if peer:
+            try:restore_low_latency(peer,report.get('fixture_low_latency',{}))
+            finally:peer.close()
         report['restored_settings']=await prepare_usb(args.usb,data=1,baud=115200)
         report['errors']=errors
 
@@ -200,7 +233,16 @@ def main():
     ap.add_argument('--duration',type=float,default=20);ap.add_argument('--burst-duration',type=float,default=5)
     ap.add_argument('--recovery-cycles',type=int,default=2);ap.add_argument('--ui-delay-ms',type=float,default=25)
     ap.add_argument('--output',type=Path,required=True)
+    ap.add_argument('--fixture-thread',action='store_true')
+    ap.add_argument('--fixture-chunk',type=int,default=4096)
+    ap.add_argument('--rx-fraction',type=float,default=.98,help='8N1 fraction; 0 = unpaced (thread only)')
+    ap.add_argument('--fixture-low-latency',action='store_true')
+    ap.add_argument('--rx-only',action='store_true')
     args=ap.parse_args()
+    if args.fixture_chunk<=0 or not 0<=args.rx_fraction<=1:
+        ap.error('chunk must be positive; RX fraction must be in [0,1]')
+    if (args.rx_only or args.rx_fraction!=.98) and not args.fixture_thread:
+        ap.error('RX-only and custom fractions require --fixture-thread')
     if args.duration<=0 or args.burst_duration<=0 or args.recovery_cycles<0 or args.ui_delay_ms<0:
         ap.error('durations must be positive; cycles and UI delay must be nonnegative')
     report=dict(commit=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),scope='real Channel/USB/UART with JSON + delayed UI receipt; no renderer, no CAN TX',

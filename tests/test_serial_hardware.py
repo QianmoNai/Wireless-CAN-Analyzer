@@ -161,5 +161,49 @@ class BurstTests(unittest.TestCase):
                 self.run_fixture(outcome)
 
 
+class DedicatedWriterTests(unittest.TestCase):
+    def test_no_retry_and_exact_known_prefix_or_unknown_exception(self):
+        for outcome in ('full', 'short', 'error'):
+            with self.subTest(outcome=outcome):
+                class Peer:
+                    calls = 0
+                    sent = b''
+                    def write(self, data):
+                        self.calls += 1
+                        writer.stop.set()
+                        if outcome == 'error':
+                            raise OSError('write result unknown')
+                        n = len(data) if outcome == 'full' else 7
+                        self.sent = data[:n]
+                        return n
+                peer = Peer()
+                writer = stress.FixtureWriter(peer, 1, 0, 128)
+                writer.start()
+                if outcome == 'full':
+                    writer.join()
+                else:
+                    with self.assertRaises(OSError):writer.join()
+                self.assertEqual(peer.calls, 1)
+                self.assertEqual(bytes(writer.expected), peer.sent)
+                self.assertEqual(writer.unknown_accepted_bytes, outcome == 'error')
+                self.assertFalse(writer.thread.is_alive())
+
+    def test_continuous_writer_does_not_block_usb_polling(self):
+        started, release = threading.Event(), threading.Event()
+        class Peer:
+            def read(self, _):return b''
+            def write(self, data):
+                started.set()
+                if not release.wait(2):raise RuntimeError('USB not polled')
+                writer.stop.set()
+                return len(data)
+        peer = Peer()
+        writer = stress.FixtureWriter(peer, 1, 0, 128).start()
+        self.assertTrue(started.wait(1))
+        release.set()
+        writer.join()
+        self.assertEqual(len(writer.expected), 128)
+
+
 if __name__ == '__main__':
     unittest.main()

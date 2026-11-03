@@ -2,8 +2,10 @@
 """Opt-in real CUSB/UART load test. No CAN TX and no physical disconnect.
 
 The lossless group is deliberately paced (RX <=1200 B/s, one TX in flight).
-The overload group offers 98% UART line rate; loss is measured, not concealed
+The overload group defaults to 98% UART line rate; loss is measured, not concealed
 or treated as a lossless pass. Neither path includes the desktop/UI pipeline.
+Use --fixture-thread to decouple writes from USB polling and --rx-only to isolate
+RX. --rx-fraction 0 measures unpaced fixture supply, not physical line rate.
 """
 import argparse
 from concurrent.futures import ThreadPoolExecutor
@@ -12,9 +14,13 @@ import importlib.util
 import json
 from pathlib import Path
 import random
+import os
 import secrets
 import sys
 import time
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from uart_stress_fixture import FixtureWriter, low_latency, restore_low_latency, rss_bytes
 
 spec = importlib.util.spec_from_file_location('serial_acceptance', Path(__file__).with_name('test-serial-hardware.py'))
 base = importlib.util.module_from_spec(spec)
@@ -53,7 +59,11 @@ def quiet(probe, peer, seconds=.3):
     return dict(peer_hex=data.hex(), packets=packets)
 
 
-def run_load(probe, peer, baud, group, duration, pattern='continuous', progress=None):
+def run_load(probe, peer, baud, group, duration, pattern='continuous', progress=None,
+             fixture=None, rx_only=False):
+    if fixture is not None:
+        return _run_load(probe, peer, baud, group, duration, pattern, progress,
+                         fixture=fixture, rx_only=rx_only)
     if pattern != 'burst':
         return _run_load(probe, peer, baud, group, duration, pattern, progress)
     # Large fixture writes can block while its USB adapter drains. Keep USB
@@ -63,10 +73,15 @@ def run_load(probe, peer, baud, group, duration, pattern='continuous', progress=
         return _run_load(probe, peer, baud, group, duration, pattern, progress, writer)
 
 
-def _run_load(probe, peer, baud, group, duration, pattern, progress, writer=None):
+def _run_load(probe, peer, baud, group, duration, pattern, progress, writer=None, fixture=None, rx_only=False):
     rng = random.Random(baud + (0 if group == 'lossless' else 1))
     expected_rx, received_rx, expected_tx, received_tx = (bytearray() for _ in range(4))
     rx_rate = min(1200., baud / 20) if group == 'lossless' else baud / 10 * .98
+    sender = None
+    cpu_start = time.process_time()
+    rss_max = 0
+    rss_due = 0
+    rx_events = []
     inflight = None
     ack_latencies, ping_rtts, statuses, rejections = [], [], [], []
     peer_write_latencies = []
@@ -91,6 +106,10 @@ def _run_load(probe, peer, baud, group, duration, pattern, progress, writer=None
     start = time.monotonic()
     end = start + duration
     rx_due = tx_due = start
+    if fixture is not None:
+        rx_rate = baud/10*fixture['fraction']
+        sender = FixtureWriter(peer, duration, rx_rate, fixture['chunk'], baud, pattern).start(start)
+        expected_rx = sender.expected
     def write_burst(data):
         started = time.monotonic()
         try:
@@ -161,6 +180,13 @@ def _run_load(probe, peer, baud, group, duration, pattern, progress, writer=None
         while True:
             now = time.monotonic()
             consume(now)
+            if now >= rss_due:
+                rss_max = max(rss_max, rss_bytes() or 0)
+                rss_due = now+.25
+            if not rx_events or now-start-rx_events[-1][0] >= .1:
+                rx_events.append((now-start, len(received_rx)))
+            if sender is not None and sender.done.is_set() and sender.error:
+                sender.join()
             if pending_write is not None and pending_write[1].done():
                 settle_write()
             if progress and now >= checkpoint_at:
@@ -171,14 +197,14 @@ def _run_load(probe, peer, baud, group, duration, pattern, progress, writer=None
                               duplicate_sequences=duplicates, reordered_sequences=reordered,
                               type20_count=len(ack_latencies), type20_ms=percentiles(ack_latencies),
                               ping_rtt_ms=percentiles(ping_rtts),
-                              input_sha256=hashlib.sha256(expected_rx).hexdigest(),
+                              input_sha256=hashlib.sha256(bytes(expected_rx)).hexdigest(),
                               output_sha256=hashlib.sha256(received_rx).hexdigest(),
                               latest_type21=statuses[-1] if statuses else before.hex(),
                               peer_write_max_ms=round(max(peer_write_latencies, default=0)*1000, 3),
                               max_poll_gap_ms=round(max_poll_gap*1000, 3)))
                 checkpoint_at = now+1
             sending = now < end
-            if sending and now >= rx_due and pending_write is None:
+            if sender is None and sending and now >= rx_due and pending_write is None:
                 if pattern == 'burst':
                     size = min(4096, max(128, int(rx_rate*.25)))
                     rx_due = now + size/rx_rate
@@ -196,7 +222,7 @@ def _run_load(probe, peer, baud, group, duration, pattern, progress, writer=None
                     expected_rx.extend(data[:n])
                     if n != len(data):
                         raise OSError('Short UART fixture write; load outcome unknown')
-            if sending and inflight is None and now >= tx_due:
+            if not rx_only and sending and inflight is None and now >= tx_due:
                 data = rng.randbytes(12)
                 token, p = command(probe, data)
                 probe.send(p)
@@ -209,21 +235,34 @@ def _run_load(probe, peer, baud, group, duration, pattern, progress, writer=None
                 probe.last_ping = last_ping = ping_started
             if inflight is not None and now-inflight[1] > 4:
                 raise TimeoutError('type20 timeout under load')
-            if not sending and now > end+1.5 and inflight is None and pending_write is None:
+            if not sending and now > end+1.5 and inflight is None and pending_write is None and (sender is None or sender.done.is_set()):
                 break
             if now > end+5:
                 raise TimeoutError('Load drain timeout')
             time.sleep(.0005)
     finally:
         primary_error = sys.exc_info()[0] is not None
+        sender_error = None
+        if sender is not None:
+            sender.stop.set()
+            try:
+                sender.join()
+            except OSError as exc:
+                sender_error = exc
+                fixture_failure = dict(accepted_bytes=len(sender.expected),
+                                       accepted_bytes_unknown=sender.unknown_accepted_bytes,
+                                       error=sender.error, fixture=sender.metrics())
+            peer_write_latencies = sender.latencies
         try:
             if pending_write is not None:
                 settle_write()  # Wait before the executor/ports are closed.
+            if sender_error is not None and not primary_error:
+                raise sender_error
         except BaseException:
             if not primary_error:
                 raise
         finally:
-            if progress and writer is not None and (primary_error or fixture_failure):
+            if progress and (writer is not None or sender is not None) and (primary_error or fixture_failure):
                 progress(dict(baud=baud, group=group, pattern=pattern,
                               elapsed_s=round(time.monotonic()-start, 3),
                               input_bytes=len(expected_rx), output_bytes=len(received_rx),
@@ -231,7 +270,7 @@ def _run_load(probe, peer, baud, group, duration, pattern, progress, writer=None
                               sequence_gaps=gaps, duplicate_sequences=duplicates,
                               reordered_sequences=reordered, type20_count=len(ack_latencies),
                               type20_ms=percentiles(ack_latencies), ping_rtt_ms=percentiles(ping_rtts),
-                              input_sha256=hashlib.sha256(expected_rx).hexdigest(),
+                              input_sha256=hashlib.sha256(bytes(expected_rx)).hexdigest(),
                               output_sha256=hashlib.sha256(received_rx).hexdigest(),
                               latest_type21=statuses[-1] if statuses else before.hex(),
                               peer_write_max_ms=round(max(peer_write_latencies, default=0)*1000, 3),
@@ -259,7 +298,7 @@ def _run_load(probe, peer, baud, group, duration, pattern, progress, writer=None
                effective_tx_Bps=round(len(received_tx)/duration, 2),
                missing_rx_bytes=len(expected_rx)-len(received_rx), missing_tx_bytes=len(expected_tx)-len(received_tx),
                strict_rx_equal=rx_equal, strict_tx_equal=tx_equal,
-               input_sha256=hashlib.sha256(expected_rx).hexdigest(),
+               input_sha256=hashlib.sha256(bytes(expected_rx)).hexdigest(),
                output_sha256=hashlib.sha256(received_rx).hexdigest(),
                tx_input_sha256=hashlib.sha256(expected_tx).hexdigest(),
                tx_output_sha256=hashlib.sha256(received_tx).hexdigest(),
@@ -270,6 +309,12 @@ def _run_load(probe, peer, baud, group, duration, pattern, progress, writer=None
                type21_drop_delta=delta(16, before_drop), type21_before=before.hex(), type21_after=after.hex(),
                command_rejections=rejections, peer_write_ms=percentiles(peer_write_latencies),
                max_poll_gap_ms=round(max_poll_gap*1000, 3))
+    interior = [(t,n) for t,n in rx_events if 1 <= t <= duration-1]
+    row.update(rx_only=rx_only, uid=os.getuid(),
+               cpu_percent=round((time.process_time()-cpu_start)/elapsed*100,2),
+               rss_max_bytes=rss_max or None, queue_age_ms=None,
+               steady_rx_Bps=round((interior[-1][1]-interior[0][1])/(interior[-1][0]-interior[0][0]),2) if len(interior)>1 else None,
+               rx_events=rx_events, fixture=sender.metrics() if sender is not None else None)
     row['unaccounted_rx_bytes'] = row['missing_rx_bytes']-row['type21_drop_delta']
     passed = tx_equal and not (duplicates or reordered or foreign or rejections)
     if group == 'lossless':
@@ -364,7 +409,16 @@ def main():
     ap.add_argument('--patterns', nargs='+', choices=['continuous', 'burst'], default=['continuous', 'burst'])
     ap.add_argument('--recovery-cycles', type=int, default=2)
     ap.add_argument('--recovery-only', action='store_true', help='Run lifecycle load cycles without baud sweeps')
+    ap.add_argument('--fixture-thread', action='store_true', help='Dedicated writer, independent of USB polling')
+    ap.add_argument('--fixture-chunk', type=int, default=4096)
+    ap.add_argument('--rx-fraction', type=float, default=.98, help='8N1 line fraction; 0 = unpaced (thread only)')
+    ap.add_argument('--fixture-low-latency', action='store_true')
+    ap.add_argument('--rx-only', action='store_true', help='No reverse UART TX load')
     args = ap.parse_args()
+    if args.fixture_chunk <= 0 or not 0 <= args.rx_fraction <= 1:
+        ap.error('chunk must be positive; RX fraction must be in [0,1]')
+    if (args.rx_only or args.rx_fraction != .98) and not args.fixture_thread:
+        ap.error('RX-only and custom fractions require --fixture-thread')
     if args.duration <= 0 or args.burst_duration <= 0 or args.recovery_cycles < 0:
         ap.error('durations must be positive; recovery cycles must be nonnegative')
     report = dict(started=time.strftime('%Y-%m-%d %H:%M:%S'), tests=[], usb=args.usb, uart=args.uart,
@@ -395,6 +449,7 @@ def main():
         probe.settled(4, 1, 115200)
         probe.hello()
         peer = base.serial.Serial(args.uart, 115200, timeout=0, write_timeout=2, exclusive=True)
+        report['fixture_low_latency'] = low_latency(peer, args.fixture_low_latency)
         for baud in ([] if args.recovery_only else args.bauds):
             probe.settings(6, data=1, baud=baud, expected=1)
             probe.settled(4, 1, baud)
@@ -409,7 +464,9 @@ def main():
                         report['current_load'] = partial
                         base.save_report(report, args.output)
                     try:
-                        row = run_load(probe, peer, baud, group, duration, pattern, checkpoint)
+                        row = run_load(probe, peer, baud, group, duration, pattern, checkpoint,
+                                       fixture=dict(fraction=args.rx_fraction, chunk=args.fixture_chunk) if args.fixture_thread else None,
+                                       rx_only=args.rx_only)
                     except Exception as exc:
                         # Preserve the partial case; never replay unknown TX.
                         # Subsequent cases get a fresh session and setup boundary.
@@ -449,7 +506,8 @@ def main():
         primary_error = sys.exc_info()[0] is not None
         if peer:
             try:
-                peer.close()
+                try:restore_low_latency(peer, report.get('fixture_low_latency', {}))
+                finally:peer.close()
             except BaseException as exc:
                 record('peer_close', 'FAIL', error=repr(exc))
         if probe:
