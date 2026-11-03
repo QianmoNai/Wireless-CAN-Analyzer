@@ -32,8 +32,8 @@ int main(void){
 '''
 with tempfile.TemporaryDirectory(prefix='wifi-socket-diag-') as d:
     c=Path(d)/'test.c';c.write_text(test)
-    # The normal build and an unset option retain P1; P0-only explicitly sets 0.
-    for name, expected, flags in [('default',1,[]), ('p0',0,['-DCAN_WIFI_TCP_NODELAY=0']),
+    # The default and an unset option keep P0; P1 requires explicit opt-in.
+    for name, expected, flags in [('default',0,[]), ('p0',0,['-DCAN_WIFI_TCP_NODELAY=0']),
                                   ('p0-p1',1,['-DCAN_WIFI_TCP_NODELAY=1'])]:
         binary=Path(d)/name
         subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror',

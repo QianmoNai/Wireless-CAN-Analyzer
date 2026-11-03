@@ -3,6 +3,7 @@
 #include "uart_bridge.h"
 #include "dual_link.h"
 #include "network_protocol.h"
+#include "network_batch.h"
 #include "network_diagnostics.h"
 #include "network_identity.h"
 #include "wifi_uart_diag.h"
@@ -229,7 +230,7 @@ static bool data_socket_options(int fd){
 #ifdef CAN_WIFI_TCP_NODELAY
  int nodelay=CAN_WIFI_TCP_NODELAY;
 #else
- int nodelay=1;
+ int nodelay=0;
 #endif
  if(setsockopt(fd,IPPROTO_TCP,TCP_NODELAY,&nodelay,sizeof(nodelay))){
   wifi_diag_set(WD_SOCKET_LAST_ERRNO,errno,WD_NOW_SEQUENCE);
@@ -247,6 +248,11 @@ static bool tls_diagnostic_reply(esp_tls_t *tls,uint32_t token){
  size_t n=wifi_diag_frames(&snapshot,token,frames,sizeof(frames));
  return n&&tls_write_all(tls,frames,n);
 }
+static unsigned collect_batch(uint8_t *batch){
+ unsigned count=0;bridge_packet_t p;
+ while(count<CAN_WIFI_TLS_BATCH&&(xQueueReceive(control_out,&p,0)==pdTRUE||xQueueReceive(raw_out,&p,0)==pdTRUE)){memcpy(batch+20*count++,p.bytes,20);}
+ return count;
+}
 static void serve_client(int fd){
  if(!data_socket_options(fd)){close(fd);return;}
  unsigned epoch=atomic_load(&network_epoch);struct timeval timeout={.tv_sec=4};setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout));setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&timeout,sizeof(timeout));
@@ -263,8 +269,7 @@ static void serve_client(int fd){
  uint8_t incoming[20];unsigned at=0,close_reason=WD_CLOSE_MODE;uint32_t last_rx=millis();
  while(network_connected()&&epoch==atomic_load(&network_epoch)){
   // Limit each batch so commands and mode changes are serviced under full CAN load.
-  uint8_t batch[20*16];unsigned count=0;bridge_packet_t p;
-  while(count<16&&(xQueueReceive(control_out,&p,0)==pdTRUE||xQueueReceive(raw_out,&p,0)==pdTRUE)){memcpy(batch+20*count++,p.bytes,20);}
+  uint8_t batch[20*CAN_WIFI_TLS_BATCH];unsigned count=collect_batch(batch);
   wifi_diag_queue(WD_LAN_RAW_DEPTH,WD_LAN_RAW_HIGH,uxQueueMessagesWaiting(raw_out));
   wifi_diag_queue(WD_LAN_CONTROL_DEPTH,WD_LAN_CONTROL_HIGH,uxQueueMessagesWaiting(control_out));
   if(count&&!tls_write_batch(tls,batch,count)){close_reason=WD_CLOSE_WRITE;break;}

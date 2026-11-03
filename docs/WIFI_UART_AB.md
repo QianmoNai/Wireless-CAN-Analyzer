@@ -1,10 +1,10 @@
 # Wi-Fi UART P0-only / P0＋P1 对照
 
-本次仅准备可比较的镜像，恢复路径和烧录均有执行前检查点。不能将构建或离线测试记作实体负载结果。
+当前源码默认关闭设备NODELAY，保留P0；恢复默认值的镜像仍须按用户要求先确认再烧录。下文保留A/B准备、实体测试与结论的阶段记录。不能将构建或离线测试记作实体负载结果。
 
 ## 唯一实验变量
 
-`CAN_WIFI_TCP_NODELAY` 是 CMake 构建选项，默认 ON，保持9ab2277的设备行为。OFF 明确对接受的设备socket设置 TCP_NODELAY=0；ON 设置1。两种情况均保留相同的P0、认证和错误处理，快照 `tcp_nodelay` 回报对应设置值。设置失败仍关闭socket并记 options 错误，不继续测量。
+`CAN_WIFI_TCP_NODELAY` 是 CMake 构建选项，当前默认 OFF；历史0a1f3c1默认ON，经过下文失败对照后恢复为OFF。OFF 明确对接受的设备socket设置 TCP_NODELAY=0；ON 设置1。两种情况均保留相同的P0、认证和错误处理，快照 `tcp_nodelay` 回报对应设置值。设置失败仍关闭socket并记 options 错误，不继续测量。已有CMake缓存中显式保存的ON不会被默认值覆盖；恢复构建应使用全新独立目录，或显式传入 `-D CAN_WIFI_TCP_NODELAY=OFF`。
 
 P0-only不是旧版无诊断固件。不能在一组关闭观测、另一组开启观测；客户端asyncio原有NODELAY也保持不变。发射功率请求32 quarter-dBm、16帧批次、1500 ms截止、所有队列/池/reserve、BLE v1/CUSB/session/type20及不重传策略不变。
 

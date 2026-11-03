@@ -48,7 +48,7 @@ desktop/.venv/bin/python desktop/main.py --wifi-diag-log "$HOME/grokbot/wifi-uar
 
 ## P1及验证
 
-设备对接受的TCP socket设置 `TCP_NODELAY=1`，失败时记录errno和分类并关闭该socket；不修改全局网络设置。Linux asyncio原本已启用客户端NODELAY，未重复改变客户端设置。
+设备对接受的TCP socket显式设置 `TCP_NODELAY=0`，保留P0；默认及未定义构建选项的回退均为0。P1实体A/B失败后，`CAN_WIFI_TCP_NODELAY=ON` 仅作为显式实验选项保留。旧CMake缓存的ON需显式关闭或使用新目录；不会因修改默认值而自动覆盖已有缓存。设置失败时记录errno和分类并关闭该socket；不修改全局网络设置。Linux asyncio原本已启用客户端NODELAY，未重复改变客户端设置。
 
 测试覆盖：真实UART worker、真实下游计数所有权与TLS部分写/WANT/超时，时间戳/序号与未知值，严格分片/版本校验，旧请求隔离，私有日志不包含测试payload，BLE/CUSB不接受诊断扩展，NODELAY成功/失败。主机模拟不能替代实体Wi-Fi证据。
 
