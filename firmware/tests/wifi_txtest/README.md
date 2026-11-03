@@ -11,6 +11,8 @@ source /home/qianmo/.espressif/tools/activate_idf_v6.0.2.sh
 bash firmware/tests/wifi_txtest/build.sh
 ```
 
+可选低功率对照（只影响独立测试 app，不改主固件）：`WIFI_TXTEST_POWER_QDBM=32 bash firmware/tests/wifi_txtest/build.sh app`。请求 32 个 quarter-dBm（约 8 dBm），实际以串口读回为准。不指定该环境变量时始终传入默认 84，避免复用构建缓存中的低功率值。此变量只含公开的功率数值。
+
 仅接受 `build`/`app`；输出到仓库外 `~/.cache/can-scope-wifi-txtest/<路径hash>/esp32s3/wifi_txtest.bin`，配置也在外部。使用相同 ESP-IDF 6.0.2、DIO/4MB/40MHz，直接引用 `firmware/partitions.csv`（NVS 0x9000，PHY 0xf000，factory app 0x10000/2MiB）。构建也生成 bootloader/分区表用于离线比较，**不要烧录它们，不使用构建末尾的整机 flash 命令或 `@flash_args`**。
 
 实际复制镜像路径、大小、分区表比较结果见 `~/grokbot/wifi-txtest-result.md`。本测试没有修改任何正常固件源码/默认配置。

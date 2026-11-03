@@ -1,6 +1,8 @@
 """Small offline parser/fallback test; never scans or opens a network device."""
 import importlib.util
+import os
 from pathlib import Path
+import subprocess
 import unittest
 from unittest.mock import patch
 
@@ -11,6 +13,15 @@ spec.loader.exec_module(scan)
 
 
 class ScanTests(unittest.TestCase):
+    def test_invalid_power_stops_before_build(self):
+        for value in ('7', '85', 'invalid'):
+            with self.subTest(value=value):
+                result = subprocess.run(['bash', str(Path(__file__).with_name('build.sh')), 'app'],
+                                        env={**os.environ, 'WIFI_TXTEST_POWER_QDBM': value},
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn('must be an integer in 8..84', result.stderr)
+
     def test_outputs_only_public_test_rows(self):
         iw = ('BSS 90:da:72:73:72:2d(on wlan0)\n\tfreq: 2412\n\tsignal: -62.50 dBm\n'
               '\tSSID: CANScope-TX-722D\n'

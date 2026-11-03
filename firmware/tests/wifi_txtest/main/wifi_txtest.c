@@ -80,7 +80,7 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_wifi_set_event_mask(mask&~WIFI_EVENT_MASK_AP_PROBEREQRECVED));
     ESP_ERROR_CHECK(esp_wifi_start());
     /* IDF maps the maximum request 84 to its supported/regulatory cap, often 80. */
-    ESP_ERROR_CHECK(esp_wifi_set_max_tx_power(84));
-    ESP_LOGI(TAG,"requested TX power=84 quarter-dBm units; read-back below is authoritative");
+    ESP_ERROR_CHECK(esp_wifi_set_max_tx_power(WIFI_TXTEST_POWER_QDBM));
+    ESP_LOGI(TAG,"requested TX power=%d quarter-dBm units; read-back below is authoritative",WIFI_TXTEST_POWER_QDBM);
     for(;;){status();vTaskDelay(pdMS_TO_TICKS(5000));}
 }
