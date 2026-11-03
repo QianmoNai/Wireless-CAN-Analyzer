@@ -1,6 +1,6 @@
 """Offline safety checks. All credentials/devices here are synthetic fixtures."""
 import asyncio
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import asynccontextmanager, redirect_stderr, redirect_stdout
 import importlib.util
 import io
 import json
@@ -40,6 +40,22 @@ class CacheTests(unittest.TestCase):
 
 
 class OfflineCliTests(unittest.TestCase):
+    def test_structured_errors_are_classified_without_backend_payloads(self):
+        from bleak.exc import BleakDBusError, BleakGATTProtocolError
+        from dbus_fast import DBusError
+        errors = [BleakGATTProtocolError(3),
+                  BleakDBusError('org.bluez.Error.AuthenticationTimeout', ['SYNTHETIC-SENSITIVE-PAYLOAD']),
+                  BleakDBusError('SYNTHETIC-SENSITIVE-NAME', ['SYNTHETIC-SENSITIVE-PAYLOAD']),
+                  DBusError('org.bluez.Error.AuthenticationFailed', 'SYNTHETIC-SENSITIVE-PAYLOAD'),
+                  ValueError('SYNTHETIC-SENSITIVE-PAYLOAD')]
+        with redirect_stderr(io.StringIO()) as output:
+            for error in errors:
+                cli.report_failure(error, '[2/7] 测试认证')
+        text = output.getvalue()
+        self.assertNotIn('SYNTHETIC-SENSITIVE', text)
+        for expected in ('BLE 写入不允许', '认证超时', '认证失败', 'BleakGATTProtocolError', '[2/7] 测试认证'):
+            self.assertIn(expected, text)
+
     def test_help_and_dry_run_cannot_access_hardware_or_cache(self):
         with patch('bleak.BleakClient', side_effect=AssertionError('pairing forbidden')), \
              patch('bleak.BleakScanner', side_effect=AssertionError('scan forbidden')), \
@@ -179,14 +195,25 @@ class ProvisionTests(unittest.IsolatedAsyncioTestCase):
             events.append('credentials')
             return 'Fixture SSID', 'FixturePassword'
 
+        @asynccontextmanager
+        async def agent(selected_client, selected_address):
+            test.assertIs(selected_client, clients[0])
+            test.assertEqual(selected_address, address)
+            events.append('register-agent')
+            try:
+                yield
+            finally:
+                events.append('unregister-agent')
+
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'connection-1.json'
             save_connection(path, dict(unrelated=True))
             with patch('bleak.BleakClient', Client), patch('can_scope.transports.scan_ble', scan), \
                  patch('can_scope.transports.LanTransport', Lan), patch('can_scope.transports.discover', discover), \
                  patch('can_scope.connection_store.connection_folder', return_value=Path(directory)), \
+                 patch.object(cli, 'pairing_agent', agent), \
                  patch('builtins.input', return_value=address), patch.object(cli, 'read_credentials', credentials), \
-                 redirect_stdout(io.StringIO()) as output:
+                 redirect_stdout(io.StringIO()) as output, redirect_stderr(output):
                 if identity != cli.TARGET or fail_apply:
                     with self.assertRaises(Exception):
                         await cli.provision()
@@ -211,6 +238,8 @@ class ProvisionTests(unittest.IsolatedAsyncioTestCase):
     async def test_full_order_single_pair_tls_and_query(self):
         events = await self.exercise()
         self.assertLess(events.index('pair'), events.index('status'))
+        self.assertLess(events.index('register-agent'), events.index('pair'))
+        self.assertLess(events.index('unregister-agent'), events.index('credentials'))
         self.assertLess(events.index('status'), events.index('credentials'))
         self.assertLess(events.index('apply'), events.index('mode'))
         self.assertLess(events.index('mode'), events.index('discover'))

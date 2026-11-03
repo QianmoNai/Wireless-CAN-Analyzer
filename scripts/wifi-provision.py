@@ -4,6 +4,7 @@
 本脚本会配对所选设备并修改设备的 Wi-Fi 设置。
 先关闭桌面端/手机 App，在设备屏幕手动选择蓝牙模式。
 仅支持目标设备 90da7273722c；不操作串口或电脑网络连接。
+Linux 内置临时配对代理；仅在出现“ESP32 六位配对码”提示时，在本终端输入六位码。
 """
 import argparse
 import asyncio
@@ -23,10 +24,73 @@ TARGET = '90da7273722c'
 SUBNET = ipaddress.IPv4Network('192.168.1.0/24')
 USB_PORT = '/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_90:DA:72:73:72:2C-if00'
 NOTICE = '本脚本会配对所选设备并修改设备的 Wi-Fi 设置。'
+CURRENT_STEP = '启动/参数检查'
 
 
 class StopProvision(Exception):
     """Messages are fixed literals; never include a credential or backend error."""
+
+
+def step(value):
+    global CURRENT_STEP
+    CURRENT_STEP = value
+
+
+def report_failure(exc, where=None):
+    """Only structured error codes, class names and our own fixed messages."""
+    from bleak.exc import BleakDBusError, BleakGATTProtocolError
+    from dbus_fast import DBusError
+    from can_scope.bluez_agent import AgentSetupError
+    category = '未分类错误'
+    message = '请检查当前步骤；敏感错误正文未输出。'
+    if isinstance(exc, (StopProvision, AgentSetupError)):
+        category, message = '前置检查/设备状态', str(exc)
+    elif isinstance(exc, BleakGATTProtocolError):
+        try:
+            code = int(exc.code)
+        except ValueError:
+            code = None
+        if code == 3:
+            category, message = 'BLE 写入不允许', '设备可能仍在 Wi-Fi/USB/dual 模式；请在设备屏幕选择蓝牙模式后重试。'
+        elif code in (5, 8, 15):
+            category, message = 'BLE 安全认证不足', '请完成本终端六位码认证；不绕过加密或 MITM 校验。'
+    elif isinstance(exc, (BleakDBusError, DBusError)):
+        name = exc.dbus_error if isinstance(exc, BleakDBusError) else exc.type
+        known = {
+            'org.bluez.Error.AuthenticationFailed': ('认证失败', '请核对 ESP32 屏幕六位码；脚本不自动重试配对。'),
+            'org.bluez.Error.AuthenticationRejected': ('认证被拒绝', '请核对实体设备和六位码，不自动重试配对。'),
+            'org.bluez.Error.AuthenticationCanceled': ('认证已取消', '配对被取消；仅在终端六位码提示出现后输入。'),
+            'org.bluez.Error.AuthenticationTimeout': ('认证超时', '请在终端六位码提示出现后及时输入；不会自动重试。'),
+            'org.bluez.Error.Canceled': ('终端认证取消/超时', '请输入恰好六位数字；回车、输入超时或远端取消会停止认证。'),
+            'org.bluez.Error.Rejected': ('代理拒绝请求', '请求不属于所选设备，或不是要求的六位码认证流程。'),
+            'org.bluez.Error.InProgress': ('BlueZ 操作进行中', '目标连接/配对或扫描尚在进行；关闭原脚本并等待后重试，不重启适配器。'),
+            'org.bluez.Error.NotReady': ('蓝牙未就绪', '请检查系统蓝牙与设备状态；脚本不会重启 hci0。'),
+            'org.bluez.Error.NotPermitted': ('BLE 操作不允许', '请确认设备为蓝牙模式（network=0），且未被其他客户端占用。'),
+            'org.bluez.Error.NotAuthorized': ('蓝牙未授权', '请完成目标设备的终端配对认证。'),
+            'org.bluez.Error.AlreadyExists': ('配对代理已存在', '当前 D-Bus 会话已有代理；关闭原脚本后重新运行。'),
+            'org.freedesktop.DBus.Error.AccessDenied': ('D-Bus 权限不足', '请在正常用户桌面会话运行；不使用 sudo。'),
+            'org.freedesktop.DBus.Error.NoReply': ('D-Bus 无回复', '请检查蓝牙服务状态，等待旧操作结束后重试。'),
+        }
+        category, message = known.get(name, ('BlueZ/D-Bus 失败', '后端错误正文未输出；请检查目标设备、模式与当前连接。'))
+    elif isinstance(exc, TimeoutError):
+        category, message = '等待超时', '当前步骤未按时完成；配对码只在本终端明确提示后输入，结果未知时先查询。'
+    elif isinstance(exc, (EOFError, KeyboardInterrupt)):
+        category, message = '用户中止', '已停止；已提交配置可能仍生效，请先 QUERY，不盲目重发。'
+    elif isinstance(exc, ConnectionError):
+        category, message = '连接中断', '请检查目标设备模式和其他客户端占用。'
+    elif isinstance(exc, getpass.GetPassWarning):
+        category, message = '终端不能隐藏输入', '请在正常交互式终端运行；拒绝回退到明文密码输入。'
+    elif isinstance(exc, OSError):
+        category, message = '系统 I/O 失败', '请检查终端、蓝牙连接、缓存目录权限或网络状态。'
+    name = type(exc).__name__
+    if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,63}', name):
+        name = 'Exception'
+    print(f'失败步骤：{where or CURRENT_STEP}；异常类型：{name}；分类：{category}。{message}', file=sys.stderr)
+
+
+def pairing_agent(client, address):
+    from can_scope.bluez_agent import TerminalPairingAgent
+    return TerminalPairingAgent(client, address)
 
 
 def recovery_commands():
@@ -76,7 +140,7 @@ async def select_device(scan):
         raise StopProvision('没有发现设备；请检查设备已选择蓝牙模式且未被其他客户端占用。')
     for address in sorted(choices):
         print('  BLE 地址：' + address)
-    print('目标 STA ID：' + TARGET + '。BLE 地址可能与 STA ID 不同，请先核对实体设备和系统蓝牙管理器。')
+    print('目标 STA ID：' + TARGET + '。BLE 地址可能与 STA ID 不同，请先核对实体设备和已知 BLE 地址。')
     address = input('只输入已确认属于该目标设备的完整 BLE 地址（回车取消）：').strip().upper()
     if address not in choices:
         raise StopProvision('未确认扫描列表中的目标地址，已停止。')
@@ -110,8 +174,10 @@ async def provision():
     # Suppress arbitrary backend exception messages in asyncio diagnostics too.
     asyncio.get_running_loop().set_exception_handler(
         lambda *_: print('后台连接异常，详细内容已隐藏；请检查当前步骤。', file=sys.stderr))
+    step('启动/读取连接缓存')
     path = connection_folder() / 'connection-1.json'
     saved = load_connection(path)  # Fail before pairing if the existing cache is corrupt.
+    step('[1/7] BLE 扫描/选择')
     address, device = await select_device(scan_ble)
     channel = Channel(lambda *_: None, saved, lambda value: save_connection(path, value))
 
@@ -137,20 +203,29 @@ async def provision():
 
     ble = BleTransport(channel.receive, disconnected)
     try:
+        step('[1/7] BLE 连接')
         await ble.connect(device)
         channel.transport, channel.ready = ble, True
+        step('[1/7] BLE QUERY/模式检查')
         current = await channel.handle('deviceSettings', [{}])
         if current['status'] != 0 or current['network'] != 0:
             raise StopProvision('设备未处于蓝牙模式；请在设备屏幕切换后重新运行。')
-        print('[2/7] 仅对此地址调用一次配对/认证；请在系统提示中输入目标 ESP32 屏幕上的六位码。')
-        await asyncio.wait_for(ble.provision(1, '', '', status, lambda _: None), 105)
+        print('[2/7] 注册本进程临时配对代理；仅对此地址调用一次配对/认证。')
+        print('请等待本终端出现“ESP32 六位配对码”提示，再输入目标屏幕上的六位码；不会在系统弹窗中输入。')
+        step('[2/7] 注册终端配对代理')
+        async with pairing_agent(ble.client, address):
+            step('[2/7] BLE 配对/认证和身份核对')
+            await asyncio.wait_for(ble.provision(1, '', '', status, lambda _: None), 105)
+        print('本进程配对代理已注销。')
         print('已通过加密 BLE 核对目标 ID；TLS 信任信息仅保留在内存中。')
         ssid = password = ''
         try:
+            step('[3/7] 终端凭据输入')
             ssid, password = read_credentials()
             print('[3/7] 发送 Wi-Fi 配置并等待设备接入；复用当前认证，不再次配对。')
             pending = ble.provision(5, ssid, password, status, lambda _: None, pair=False)
             ssid = password = ''
+            step('[3/7] 配网发送/接入')
             await asyncio.wait_for(pending, 105)
             if not completed:
                 raise StopProvision('设备未确认 Wi-Fi 已接入并保存。')
@@ -158,14 +233,17 @@ async def provision():
             ssid = password = ''
         print('设备已报告配网成功。')
         print('[4/7] 仅发送一次 Wi-Fi 模式设置；回执不确定时不重发，以最终 QUERY 为准。')
+        step('[4/7] 设置 Wi-Fi 模式')
         try:
             result = await channel.handle('deviceSettings', [dict(network=1)])
             if result['status'] != 1 or result['network'] != 1:
                 raise StopProvision('Wi-Fi 模式设置未确认。')
-        except Exception:
+        except Exception as exc:
             # Mode switching may reset notification routing before its ACK arrives.
             # Never replay the mutation; a successful TLS QUERY must prove mode=1.
+            report_failure(exc)
             print('Wi-Fi 模式回执未确认，结果未知；继续发现并核验，不重发设置。')
+        step('[5/7] 保存信任缓存')
         channel.mode, channel.address = 'wifi', address
         channel.network_status(trusted)  # Desktop validation, whitelist and persistence.
         print('[5/7] 已按桌面端方式原子保存 connection-1.json（权限 0600）；不显示令牌或指纹。')
@@ -173,15 +251,19 @@ async def provision():
         channel.ready = False
         await ble.close()
 
+    step('[6/7] UDP 发现')
     ip = await find_ip(discover)
     print('设备 IP：' + ip)
     channel.saved['ip'] = ip
+    step('[6/7] 保存发现的 IP')
     channel.persist()
     lan = LanTransport(channel.receive, disconnected)
     try:
         print('[7/7] 尝试一次 TLS 1.2 连接：先校验证书指纹，再发送认证令牌；随后只发送一次 QUERY。')
+        step('[7/7] TLS 连接/认证')
         await lan.connect(ip, trusted['fp'], trusted['token'])
         channel.transport, channel.ready = lan, True
+        step('[7/7] TLS QUERY')
         result = await channel.handle('deviceSettings', [{}])
         if result['status'] != 0 or result['network'] != 1:
             raise StopProvision('TLS QUERY 未确认 Wi-Fi 模式。')
@@ -197,11 +279,12 @@ async def provision():
 def dry_run():
     # No credentials, scanning, pairing, sockets, serial ports or cache access.
     import importlib.util
+    from can_scope.bluez_agent import PasskeyAgent
     from can_scope.connection_store import load_connection, save_connection
     from can_scope.engine import Channel
     from can_scope.protocol import device_settings_command, device_settings_status, packet, wifi_commands
     from can_scope.transports import BleTransport, LanTransport, discover, scan_ble
-    for module in ('bleak', 'serial', 'PySide6.QtCore'):
+    for module in ('bleak', 'dbus_fast', 'serial', 'PySide6.QtCore'):
         if importlib.util.find_spec(module) is None:
             raise StopProvision('缺少桌面端依赖，请先按 desktop/README.md 配置虚拟环境。')
     if (device_settings_command(network=1)[4] != 1 or
@@ -212,8 +295,13 @@ def dry_run():
     if not all(callable(item) for item in (load_connection, save_connection, Channel,
                                            BleTransport.provision, LanTransport.connect, discover, scan_ble)):
         raise StopProvision('桌面端复用接口自检失败。')
+    interface = PasskeyAgent('/org/bluez/hci0/dev_90_DA_72_73_72_2E').introspect()
+    if not any(item.name == 'RequestPasskey' and item.in_signature == 'o' and item.out_signature == 'u'
+               for item in interface.methods):
+        raise StopProvision('BlueZ 配对代理接口自检失败。')
     print('DRY-RUN PASS：依赖及无凭据协议自检通过；未扫描、未配对、未打开网络/串口、未读取或写入缓存。')
     print('真实运行将依次：确认地址 → 一次 BLE 认证并核对 ID → 隐藏输入密码 → 配网 → Wi-Fi 模式 → 私有缓存 → UDP 发现 → 一次 TLS + QUERY。')
+    print('配对代理接口自检通过；真实配对时仅在本终端的“ESP32 六位配对码”提示处输入，不依赖系统配对代理。')
 
 
 def main():
@@ -222,6 +310,7 @@ def main():
     parser.add_argument('--dry-run', action='store_true', help='离线无凭据自检；不扫描、不配对、不写缓存、不操作硬件')
     args = parser.parse_args()
     protect_process()
+    step('启动/参数检查')
     try:
         print(NOTICE)
         if args.dry_run:
@@ -236,15 +325,11 @@ def main():
             raise StopProvision('用户未确认，已停止。')
         asyncio.run(provision())
         return 0
-    except StopProvision as exc:
-        print(str(exc), file=sys.stderr)  # Only our fixed literal messages.
-    except (KeyboardInterrupt, EOFError):
-        print('用户中止；已提交的配置可能仍生效，请先 QUERY，勿盲目重发。', file=sys.stderr)
-    except Exception:
-        # In particular never format UnicodeEncodeError, BleakError, JSON or OS
-        # errors: their args/repr/traceback can retain a secret-bearing payload.
-        print('当前步骤失败，错误详情已隐藏；请参照排查说明，先确认设备状态再重试。', file=sys.stderr)
-    print('恢复 USB直连+UART+115200（仓库根目录，串口程序均关闭后）：\n' + recovery_commands(), file=sys.stderr)
+    except (KeyboardInterrupt, EOFError) as exc:
+        report_failure(exc)
+    except Exception as exc:
+        report_failure(exc)
+    print('已停止；先查询设备状态，重试配网前请保持设备为蓝牙模式。手动 USB 恢复命令见 --help。', file=sys.stderr)
     return 1
 
 
