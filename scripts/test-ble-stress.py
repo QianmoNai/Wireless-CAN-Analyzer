@@ -16,7 +16,7 @@ import sys
 import time
 import traceback
 
-from ble_stress import Owner, ChannelReceiver, digest, percentiles, split_prefix
+from ble_stress import Owner, ChannelReceiver, digest, percentiles, split_prefix, account_ledgers
 from uart_stress_fixture import FixtureWriter, rss_bytes
 from can_scope.protocol import u32
 from can_scope.transports import scan_ble
@@ -228,18 +228,7 @@ async def run_case(args, report, owner, peer, baud, rate, duplex, number):
                    tx_confirmed_sha256=digest(confirmed), peer_sha256=digest(peer_rx),
                    cpu_s=time.process_time()-cpu_start, rss_max=rss_max)
         if 'after' in row:
-            for key in ('rx', 'tx', 'drop'):
-                row['delta_'+key] = (row['after'][key]-row['before'][key]) & 0xffffffff
-            row['input_accounting_difference'] = len(expected)-row['delta_rx']
-            row['drop_accounting_difference'] = row['missing_bytes']-row['delta_drop']
-            d0, d1 = row['diagnostics_before'], row['diagnostics_after']
-            if d0 and d1:
-                if 'uart' in d0 and 'uart' in d1:
-                    row['uart_delta'] = {k: (d1['uart'][k]-v) & 0xffffffff
-                                         for k, v in d0['uart'].items() if k != 'event_high_water'}
-                causes = ('full_bytes', 'drop_alloc_bytes', 'drop_reserve_bytes', 'drop_submit_bytes', 'reset_bytes', 'other_bytes')
-                row['drop_causes'] = {k: (d1['raw'][k]-d0['raw'][k]) & 0xffffffff for k in causes}
-                row['cause_accounting_difference'] = row['delta_drop'] - sum(row['drop_causes'].values())
+            account_ledgers(row)
         artifact_dir = args.output.with_suffix('.streams')
         artifact_dir.mkdir(exist_ok=True)
         for name, data in [('input', expected), ('rx', received), ('peer', peer_rx), ('tx', submitted)]:
@@ -249,6 +238,8 @@ async def run_case(args, report, owner, peer, baud, rate, duplex, number):
         print(json.dumps({k: row.get(k) for k in ('baud', 'target_Bps', 'duplex', 'input_bytes', 'rx_bytes', 'delta_drop', 'drop_causes', 'type20_ms', 'settings_rtt_ms', 'errors')}), flush=True)
     if any(row[k] for k in ('duplicates', 'out_of_order', 'input_accounting_difference', 'drop_accounting_difference')):
         raise AssertionError('RX ledger/sequence mismatch')
+    if any(row.get('uart_layer_residuals', {}).values()):
+        raise AssertionError('UART layer ledger mismatch')
     if row.get('cause_accounting_difference', 0) or not row['all_submitted_equal_peer'] or row['tx_unknown_bytes']:
         raise AssertionError('Reason ledger or physical TX mismatch')
     if channel and (row['channel_rx']['dropped'] or not row['channel_rx']['equal_transport']):

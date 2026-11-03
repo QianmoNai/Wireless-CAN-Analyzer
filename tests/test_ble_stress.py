@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
-from ble_stress import Owner, ChannelReceiver, diagnostics, HEADER, FIELDS, UART_FIELDS, split_prefix
+from ble_stress import Owner, ChannelReceiver, diagnostics, HEADER, FIELDS, UART_FIELDS, split_prefix, account_ledgers
 from can_scope.protocol import packet, u32
 
 spec = importlib.util.spec_from_file_location('ble_entry', ROOT/'scripts/test-ble-stress.py')
@@ -133,6 +133,29 @@ class StressTests(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(len(value), 512)
         with self.assertRaises(ValueError):
             diagnostics(value[:-1])
+
+    def test_ingress_flush_and_unmeasured_hardware_loss_stay_distinct(self):
+        before = dict(rx=0, tx=0, drop=0)
+        d0 = dict(raw={k: 0 for k in FIELDS}, uart={k: 0 for k in UART_FIELDS})
+        d1 = dict(raw=dict(d0['raw']), uart=dict(d0['uart']))
+        d1['raw']['full_bytes'] = 524340
+        d1['raw']['drop_reserve_bytes'] = 2400
+        d1['uart'].update(data_event_bytes=618435, read_bytes=618245,
+                          ble_attempt_bytes=618245, ble_accept_bytes=93905,
+                          ble_reject_bytes=524340, downstream_drop_bytes=2400,
+                          error_flush_bytes=190, fifo_ovf=1)
+        row = dict(before=before, after=dict(rx=618245, tx=0, drop=526930),
+                   input_bytes=618496, missing_bytes=526991,
+                   diagnostics_before=d0, diagnostics_after=d1)
+        account_ledgers(row)
+        self.assertEqual(row['input_read_difference'], 251)
+        self.assertEqual(row['input_accounting_difference'], 61)
+        self.assertEqual(row['drop_accounting_difference'], 61)
+        self.assertEqual(row['raw_cause_accounting_difference'], 190)
+        self.assertEqual(row['cause_accounting_difference'], 0)
+        self.assertEqual(row['driver_event_read_difference'], 0)
+        self.assertEqual(row['host_vs_driver_event_difference'], 61)
+        self.assertFalse(any(row['uart_layer_residuals'].values()))
 
     def test_uart_diagnostic_suffix(self):
         words = [0]*(len(HEADER)+3*len(FIELDS)+len(UART_FIELDS))

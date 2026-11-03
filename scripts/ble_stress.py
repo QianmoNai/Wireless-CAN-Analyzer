@@ -46,6 +46,47 @@ def diagnostics(value):
     return result
 
 
+def account_ledgers(row):
+    """Keep host acceptance, UART reads and known discards distinct.
+
+    A hardware error event is not a byte count. Unobserved ingress remains a
+    failing residual, never manufactured drop bytes from input minus output.
+    Use quiescent boundaries; lifetime diagnostic words are not transactional.
+    """
+    for key in ('rx', 'tx', 'drop'):
+        row['delta_'+key] = (row['after'][key]-row['before'][key]) & 0xffffffff
+    row['input_read_difference'] = row['input_bytes']-row['delta_rx']
+    row['input_accounting_difference'] = row['input_read_difference']
+    row['drop_accounting_difference'] = row['missing_bytes']-row['delta_drop']
+    d0, d1 = row['diagnostics_before'], row['diagnostics_after']
+    if not d0 or not d1:
+        return
+    causes = ('full_bytes', 'drop_alloc_bytes', 'drop_reserve_bytes',
+              'drop_submit_bytes', 'reset_bytes', 'other_bytes')
+    row['drop_causes'] = {k: (d1['raw'][k]-d0['raw'][k]) & 0xffffffff for k in causes}
+    known_uart = 0
+    if 'uart' in d0 and 'uart' in d1:
+        u = row['uart_delta'] = {k: (d1['uart'][k]-v) & 0xffffffff
+                                for k, v in d0['uart'].items() if k != 'event_high_water'}
+        row['uart_drop_causes'] = {k: u[k] for k in
+            ('config_flush_bytes', 'error_flush_bytes', 'disconnected_bytes', 'tx_discard_bytes')}
+        known_uart = sum(row['uart_drop_causes'].values())
+        flushed = u['config_flush_bytes']+u['error_flush_bytes']
+        row['input_accounting_difference'] -= flushed
+        row['uart_layer_residuals'] = dict(
+            status_vs_read=row['delta_rx']-u['read_bytes'],
+            read_vs_route=u['read_bytes']-u['ble_attempt_bytes']-u['disconnected_bytes']-u['dual_bytes'],
+            admission=u['ble_attempt_bytes']-u['ble_accept_bytes']-u['ble_reject_bytes'],
+            rejected_vs_full=u['ble_reject_bytes']-row['drop_causes']['full_bytes'],
+            reported_drop=row['delta_drop']-u['ble_reject_bytes']-u['downstream_drop_bytes']-known_uart)
+        # Informational only: event delivery can itself be incomplete. Require
+        # conservation with reads + known flushes before interpreting this gap.
+        row['driver_event_read_difference'] = u['data_event_bytes']-u['read_bytes']-flushed
+        row['host_vs_driver_event_difference'] = row['input_bytes']-u['data_event_bytes']
+    row['raw_cause_accounting_difference'] = row['delta_drop']-sum(row['drop_causes'].values())
+    row['cause_accounting_difference'] = row['raw_cause_accounting_difference']-known_uart
+
+
 def percentiles(values):
     a = sorted(values)
     return dict(n=len(a), **{k: a[round((len(a)-1)*p)] if a else None
