@@ -86,9 +86,71 @@ class HotspotTests(unittest.TestCase):
         def read(*args, **_):
             return 'no' if args[0] == 'nmcli' else RADIO.replace('type managed', 'type AP')
         with patch.object(hotspot, 'check_unchanged'), patch.object(hotspot, 'check_isolation'), \
+             patch.object(hotspot, 'nm_ap_state', return_value=dict(managed='no', state=10, reason=0)), \
              patch.object(hotspot, 'run', side_effect=read), patch.object(hotspot, 'data', return_value=[dict(dev='Meta')]):
-            with self.assertRaises(hotspot.HotspotError):
+            with self.assertRaises(hotspot.HotspotError) as caught:
                 hotspot.check_ap(dict(baseline=BASE), enabled=True)
+            self.assertIn('VPN', str(caught.exception))
+
+    def test_nm_state_parser_and_failure_diagnostics_exclude_arbitrary_text(self):
+        with patch.object(hotspot, 'run', return_value='yes\n100 (SYNTHETIC_PRIVATE)\n77 (SYNTHETIC_PRIVATE)'):
+            value = hotspot.nm_ap_state()
+        self.assertEqual(value, dict(managed='yes', state=100, reason=77))
+        self.assertNotIn('SYNTHETIC_PRIVATE', hotspot.nm_state_text(value))
+        with patch.object(hotspot, 'run', return_value='SYNTHETIC_PRIVATE\nSYNTHETIC_PRIVATE\nSYNTHETIC_PRIVATE'):
+            value = hotspot.nm_ap_state()
+        self.assertEqual(value, dict(managed='unknown', state=None, reason=None))
+        with patch.object(hotspot, 'check_unchanged'), patch.object(hotspot, 'check_isolation'), \
+             patch.object(hotspot, 'nm_ap_state', return_value=dict(managed='yes', state=100, reason=77)):
+            with self.assertRaises(hotspot.HotspotError) as caught:
+                hotspot.check_ap(dict(baseline=BASE))
+        self.assertIn('NM managed=yes state=100', str(caught.exception))
+        self.assertIn('reason=77', str(caught.exception))
+
+    def test_wait_requires_unmanaged_state_not_just_managed_false(self):
+        state = dict(nm_changed=False)
+        with patch.object(hotspot, 'nm_ap_state', side_effect=[dict(managed='no', state=30, reason=0),
+                                                            dict(managed='no', state=10, reason=77)]), \
+             patch.object(hotspot, 'save_state'), patch.object(hotspot, 'run') as command, \
+             patch.object(hotspot.time, 'sleep'):
+            hotspot.wait_unmanaged(state)
+        self.assertEqual(state['nm_before'], 'reset')
+        command.assert_called_once_with('nmcli', 'device', 'set', 'csap0', 'managed', 'no', timeout=1)
+
+    def test_wait_timeout_reports_last_nm_state_and_is_bounded(self):
+        with patch.object(hotspot, 'nm_ap_state', return_value=dict(managed='yes', state=30, reason=0)) as read, \
+             patch.object(hotspot, 'save_state'), patch.object(hotspot, 'run'), patch.object(hotspot.time, 'sleep'):
+            with self.assertRaises(hotspot.HotspotError) as caught:
+                hotspot.wait_unmanaged(dict(nm_changed=False))
+        self.assertIn('超时', str(caught.exception))
+        self.assertIn('NM managed=yes state=30', str(caught.exception))
+        self.assertEqual(read.call_count, 20)
+
+    def test_rule_cleanup_retries_reload_even_after_file_has_been_deleted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            rule = Path(directory) / 'rule.conf'
+            rule.write_text(hotspot.NM_RULE_TEXT)
+            info = rule.stat()
+            state = dict(nm_rule_inode=[info.st_dev, info.st_ino], nm_rule_applied=True)
+            with patch.object(hotspot, 'NM_RULE', rule), patch.object(hotspot, 'save_state'), \
+                 patch.object(hotspot, 'run', side_effect=[hotspot.HotspotError('fixture reload'), '']) as command:
+                with self.assertRaises(hotspot.HotspotError):
+                    hotspot.remove_nm_rule(state)
+                self.assertFalse(rule.exists())
+                self.assertTrue(state['nm_reload_pending'])
+                hotspot.remove_nm_rule(state)
+                self.assertFalse(state['nm_reload_pending'])
+                self.assertEqual(command.call_count, 2)
+
+    def test_rule_cleanup_never_unlinks_replacement_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            rule = Path(directory) / 'rule.conf'
+            rule.write_text('synthetic other file')
+            with patch.object(hotspot, 'NM_RULE', rule), patch.object(hotspot, 'run') as command:
+                with self.assertRaises(hotspot.HotspotError):
+                    hotspot.remove_nm_rule(dict(nm_rule_inode=[-1, -1]))
+                self.assertTrue(rule.exists())
+                command.assert_not_called()
 
     def test_global_forwarding_one_does_not_invalidate_isolated_ap(self):
         values = dict(hotspot.AP_ISOLATION)
@@ -177,10 +239,12 @@ class HotspotTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
             root = Path(directory)
             runtime = root / 'run'
+            rule = root / 'nm/conf.d/canscope-test-unmanaged.conf'
             secret = root / 'home/grokbot/secret'
             secret.parent.mkdir(parents=True)
             owner = dict(uid=os.getuid(), gid=os.getgid(), home=str(root / 'home'))
             managed = ['yes']
+            reloads = []
             proc = dict(hotspot.AP_ISOLATION)
             proc.update({key: 1 for key in hotspot.GLOBAL_FORWARDING})
             proc['ipv4/conf/csap0/forwarding'] = 1
@@ -189,6 +253,10 @@ class HotspotTests(unittest.TestCase):
             initial_globals = {key: proc[key] for key in hotspot.GLOBAL_FORWARDING}
             def command(*args, **kwargs):
                 events.append(args)
+                if args == ('nmcli', 'general', 'reload', 'conf'):
+                    reloads.append(rule.exists())
+                    if fail == 'nm-reload' and len(reloads) == 1:
+                        raise hotspot.HotspotError('synthetic reload failure')
                 if args[0] == 'systemd-run':
                     name = next(v.removeprefix('--unit=') for v in args if v.startswith('--unit='))
                     if fail == 'timer' and name.endswith('rollback'):
@@ -205,8 +273,12 @@ class HotspotTests(unittest.TestCase):
                 if args[:2] == ('systemctl', 'stop'):
                     units.discard(args[2])
                 if args[:3] == ('nmcli', 'device', 'set'):
-                    managed[0] = args[-1]
-                if args[0] == 'nmcli': return managed[0]
+                    if fail != 'nm-timeout':
+                        managed[0] = args[-1]
+                    if args[-1] == 'reset':
+                        self.assertTrue(rule.exists())  # Still strictly unmanaged during deletion.
+                if args[:2] == ('nmcli', '-g'):
+                    return managed[0] + ('\n10 (unmanaged)\n77 (fixture)' if managed[0] == 'no' else '\n100 (connected)\n0')
                 if fail == 'dhcp' and args[0] == 'systemd-run' and '--unit=canscope-test-dhcp' in args:
                     raise hotspot.HotspotError('fixture backend error')
                 return ''
@@ -231,7 +303,15 @@ class HotspotTests(unittest.TestCase):
                 return original_write(path, value, *args, **kwargs)
             def exists(path):
                 return True if str(path) == '/sys/class/net/csap0/ifindex' else original_exists(path)
-            for name, replacement in [('RUNTIME', runtime), ('preflight', lambda: dict(BASE)), ('identity', lambda: owner),
+            def configuration():
+                result = {('device', 'wifi.backend'): 'iwd', ('keyfile', 'unmanaged-devices'): 'interface-name:fixture0'}
+                if rule.exists() and fail not in ('nm-shadow', 'nm-other-config'):
+                    result['keyfile', 'unmanaged-devices'] += ';interface-name:csap0'
+                if rule.exists() and fail == 'nm-other-config':
+                    result['device-wlan0', 'managed'] = '0'
+                return result
+            for name, replacement in [('RUNTIME', runtime), ('NM_RULE', rule), ('nm_config', configuration),
+                                      ('preflight', lambda: dict(BASE)), ('identity', lambda: owner),
                                       ('run', command), ('active', lambda name: name in units),
                                       ('check_ap', lambda *_, **kw: events.append(('check-ap', kw.get('enabled', False)))),
                                       ('check_unchanged', lambda _: events.append(('check-original',))),
@@ -259,6 +339,7 @@ class HotspotTests(unittest.TestCase):
                     (runtime / 'leases').write_text('SYNTHETIC_LEASE')
                     hotspot.down()
                 self.assertFalse(runtime.exists())
+                self.assertFalse(rule.exists())
                 self.assertFalse(secret.exists() and list(secret.iterdir()))
                 self.assertNotIn('A' * 24, output.getvalue())
                 # A second cleanup must not touch unrelated interfaces/services.
@@ -269,7 +350,9 @@ class HotspotTests(unittest.TestCase):
             if event and event[0] in ('iw', 'ip', 'nmcli', 'systemctl', 'systemd-run'):
                 self.assertNotIn('A' * 24, repr(event))
                 self.assertNotIn('wlan0', event)  # mutations must target AP only
-                self.assertFalse(any(v in event for v in ('nft', 'iptables', 'reload', 'reconnect', 'disconnect', 'netns')))
+                self.assertFalse(any(v in event for v in ('nft', 'iptables', 'reconnect', 'disconnect', 'netns')))
+                if 'reload' in event:
+                    self.assertEqual(event, ('nmcli', 'general', 'reload', 'conf'))
         return events
 
     def test_up_order_and_idempotent_cleanup_preserve_sta(self):
@@ -282,7 +365,9 @@ class HotspotTests(unittest.TestCase):
         link_up = events.index(('ip', 'link', 'set', 'dev', 'csap0', 'up'))
         self.assertLess(isolate, link_up)
         self.assertEqual(events.count(writes), 3)  # Pre-link, after link up, after hostapd.
-        self.assertIn(('nmcli', 'device', 'set', 'csap0', 'managed', 'yes'), events)
+        self.assertIn(('nmcli', 'device', 'set', 'csap0', 'managed', 'reset'), events)
+        self.assertEqual(events.count(('nmcli', 'general', 'reload', 'conf')), 2)
+        self.assertLess(events.index(('nmcli', 'general', 'reload', 'conf')), create)
         self.assertIn(('iw', 'dev', 'csap0', 'del'), events)
         self.assertIn(('check-original',), events)
 
@@ -296,6 +381,22 @@ class HotspotTests(unittest.TestCase):
 
     def test_persistent_forwarding_change_rolls_back_before_starting_services(self):
         events = self.exercise_lifecycle('forwarding')
+        self.assertIn(('iw', 'dev', 'csap0', 'del'), events)
+        self.assertFalse(any('--unit=canscope-test-hostapd' in e for e in events))
+
+    def test_nm_reload_failure_cleans_rule_without_creating_interface_or_password(self):
+        events = self.exercise_lifecycle('nm-reload')
+        self.assertFalse(any(e[0] in ('synthetic-password', 'iw', 'ip') for e in events))
+        self.assertEqual(events.count(('nmcli', 'general', 'reload', 'conf')), 2)
+
+    def test_shadowed_rule_or_other_configuration_change_does_not_reload_nm(self):
+        for failure in ('nm-shadow', 'nm-other-config'):
+            events = self.exercise_lifecycle(failure)
+            self.assertNotIn(('nmcli', 'general', 'reload', 'conf'), events)
+            self.assertNotIn(('synthetic-password',), events)
+
+    def test_nm_unmanaged_timeout_rolls_back_without_starting_hostapd(self):
+        events = self.exercise_lifecycle('nm-timeout')
         self.assertIn(('iw', 'dev', 'csap0', 'del'), events)
         self.assertFalse(any('--unit=canscope-test-hostapd' in e for e in events))
 

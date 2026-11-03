@@ -23,6 +23,10 @@ sudo /usr/bin/python scripts/test-hotspot.py up
 
 先安排 root 的 20 分钟回滚，再生成 24 字符随机临时密码。私有目录 `~/grokbot/secret/` 必须为本人所有、0700；三个固定文件 `canscope-test.password`、`canscope-test.hostapd.conf`、`canscope-test.dnsmasq.conf` 均为本人所有、0600，不覆盖已有文件，不允许放入 Git 仓库。不要 cat 密码或配置。
 
+创建 csap0 前，先在 `/run/NetworkManager/conf.d/canscope-test-unmanaged.conf` 写入 `[keyfile]` 下的 `unmanaged-devices+=interface-name:csap0`（追加，不覆盖原列表），核对有效磁盘配置只有这一项变化，再执行 `nmcli general reload conf`。不使用 SIGHUP、重启服务、连接重载或 DNS 重载。此后限时约 5 秒等待 `NM managed=no state=10（unmanaged）`；必要时仅对此接口设置一次 runtime managed=no。失败时显示 managed/state/reason 的安全字段。创建前后的已有网络快照必须一致。
+
+CONF 重载只重读 NM 主配置，不重载连接配置；本规则只匹配 csap0。仍应确保系统没有其他人留下的无关待加载 NM 配置；真正 reload/up 的共存效果需要用户验证，脚本不承诺物理上绝无瞬断。
+
 热点为 `CANScope-Test`、WPA2-PSK CCMP、PMF=0、20 MHz、10.77.0.1/24，DHCP 10.77.0.20–29（最多四个租约），不下发网关/DNS。不创建 NM shared 连接，不加 NAT、路由规则或防火墙规则，不更改全局 ip_forward；只对新增 csap0 关闭 IPv4 入向转发并禁用 IPv6。这里是主命名空间的专用接口与服务，不是主机本地端口的安全隔离。
 
 隔离在 link up 前施加，并在接口启用后及 hostapd 启动后重新施加：仅写 csap0 的 IPv4/IPv6 forwarding=0、disable_ipv6=1 等接口参数；每次等待 0.2 秒再核对，最多三次，不与其他写入者无限争用。重新施加会显示安全的字段和值变化；失败及运行中监控会显示上次值/当前值/期望值以及只读的全局参考值，再回滚，不修改 all/default forwarding。
@@ -37,6 +41,8 @@ desktop/.venv/bin/python scripts/wifi-provision.py \
 ```
 
 按提示输入目标 ID `90da7273722c`，再输入扫描列表中已确认的完整 BLE 地址。只复用 Paired=true 且 Bonded=true 的目标；没有绑定就停止，不重新配对，不要求六位配对码。可选 `--target '90da7273722c@完整BLE地址'` 跳过交互确认；仍须扫描到该地址并在受保护状态里核对 ID，不能把 STA MAC 当作 BLE MAC。
+
+带 `--password-file` 时，在任何 BLE 扫描/连接前先只检查文件存在、归属和 0600 权限，不提前读密码；实际读取前再次校验。文件不存在时会明确提示“密码文件不存在，请先运行 test-hotspot.py up 并确认 status 正常”。热点失败回滚会删除密码，因此只有 status 显示接口存在、NM managed=no/state=10、hostapd/dhcp/monitor/rollback.timer 全部 active 后才运行配网。
 
 另一个终端取证（只输出白名单事件，丢弃原始 daemon 正文和客户端主机名）：
 
@@ -54,6 +60,8 @@ python scripts/test-hotspot.py status
 ```
 
 down 可重复运行：停止本次专用服务，关闭并删除所拥有的 csap0，撤销其 NM managed 临时变化，删除三份私有文件、租约和 root 运行目录；比较 wlan0 的 BSSID/信道/IP/活动连接、默认路由及 10.42.0.1 的地址/链路状态与启动前是否一致。发现外部变化只报告，不重连 wlan0。root 侧回滚失败会保留状态，可重跑 down；定时回滚失败还会自动重试。
+
+接口删除前，在严格 unmanaged 规则仍在时清除本次 runtime 覆盖；删除接口后，按已记录的 inode 核对并删除本次 `/run` 规则，再只重载 `conf`。不删除被替换的规则，不覆盖其他 NM 文件。删除规则后重载失败会保留待重载标记，重跑 down/定时回滚仍会重试，即使规则文件已经删除。
 
 2 秒监控发现信道/关联/路由/NM 管理/专用服务变化时，会提前回滚。代码不更改 wlan0 的连接配置；共享空口占用和驱动共存是否稳定需实际 up 验证，离线测试不能证明无线连接绝不中断。
 

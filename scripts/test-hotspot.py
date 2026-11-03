@@ -5,6 +5,7 @@
 up 会创建 csap0 和私有密码文件；20 分钟后自动 down。不要用 root 运行配网桌面端。
 """
 import argparse
+import configparser
 import fcntl
 import ipaddress
 import json
@@ -28,7 +29,10 @@ NET = ipaddress.IPv4Network('10.77.0.0/24')
 RUNTIME = Path('/run/canscope-hotspot')
 PREFIX = 'canscope-test-'
 MAC = r'(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}'
-TOOLS = ('iw', 'ip', 'nmcli', 'hostapd', 'dnsmasq', 'systemd-run', 'systemctl')
+TOOLS = ('iw', 'ip', 'nmcli', 'NetworkManager', 'hostapd', 'dnsmasq', 'systemd-run', 'systemctl')
+NM_RULE = Path('/run/NetworkManager/conf.d/canscope-test-unmanaged.conf')
+# Append rather than replacing pre-existing unmanaged-device lists.
+NM_RULE_TEXT = '[keyfile]\nunmanaged-devices+=interface-name:csap0\n'
 STEP = '参数检查'
 # Fixed paths/values only: diagnostics must never read arbitrary configuration.
 AP_ISOLATION = {
@@ -45,9 +49,9 @@ class HotspotError(Exception):
     """Only fixed messages. Never include subprocess output or private file data."""
 
 
-def run(*args, required=True):
+def run(*args, required=True, timeout=20):
     result = subprocess.run(list(args), stdin=subprocess.DEVNULL, capture_output=True,
-                            text=True, timeout=20, env={'PATH': '/usr/bin:/usr/sbin', 'LC_ALL': 'C'})
+                            text=True, timeout=timeout, env={'PATH': '/usr/bin:/usr/sbin', 'LC_ALL': 'C'})
     if required and result.returncode:
         raise HotspotError('系统命令失败；未输出后端正文，请用 status 检查安全状态。')
     return result.stdout if result.returncode == 0 else ''
@@ -124,12 +128,14 @@ def snapshot(require_24=True):
 def preflight():
     missing = [name for name in TOOLS if not shutil.which(name)]
     if missing:
-        raise HotspotError('缺少热点依赖；请检查 iw/ip/nmcli/hostapd/dnsmasq/systemd-run/systemctl。')
+        raise HotspotError('缺少热点依赖；请检查 iw/ip/nmcli/NetworkManager/hostapd/dnsmasq/systemd-run/systemctl。')
     baseline = snapshot()
     phy = baseline['phy']
     info = run('iw', 'phy', phy, 'info')
     devices = run('iw', 'dev')
     problems = []
+    if NM_RULE.exists() or NM_RULE.is_symlink():
+        problems.append('测试 NM 临时规则已存在；先检查旧会话，不覆盖未知文件。')
     if not same_channel_combination(info, devices, phy):
         problems.append('当前接口数量/类型不满足 STA+AP 同信道组合。')
     frequency = re.search(r'^\s*\* ' + str(baseline['frequency']) + r'(?:\.0)? MHz[^\n]*', info, re.M)
@@ -197,6 +203,104 @@ def save_state(state):
     temporary = RUNTIME / 'state.new'
     private_write(temporary, json.dumps(state))
     temporary.replace(RUNTIME / 'state.json')
+
+
+def nm_config():
+    # Read-only parser output stays in RAM; never log the complete configuration.
+    parser = configparser.ConfigParser(interpolation=None, strict=False)
+    parser.read_string(run('NetworkManager', '--print-config'))
+    return {(section, key): value for section in parser.sections()
+            for key, value in parser.items(section, raw=True)}
+
+
+def install_nm_rule(state):
+    before = nm_config()
+    # Stage on /run and journal its inode before linking into NM's config dir.
+    # A hard link avoids the crash window between creating a file and recording
+    # its ownership; never overwrite or delete another session's rule.
+    staged = RUNTIME / 'nm-unmanaged.conf'
+    private_write(staged, NM_RULE_TEXT)
+    info = staged.stat()
+    state['nm_rule_inode'] = [info.st_dev, info.st_ino]
+    save_state(state)
+    NM_RULE.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    os.link(staged, NM_RULE, follow_symlinks=False)
+    after = nm_config()
+    key = ('keyfile', 'unmanaged-devices')
+    old = [v.strip() for v in re.split('[;,]', before.get(key, '')) if v.strip()]
+    new = [v.strip() for v in re.split('[;,]', after.get(key, '')) if v.strip()]
+    expected = old if 'interface-name:csap0' in old else old + ['interface-name:csap0']
+    before.pop(key, None)
+    after.pop(key, None)
+    if before != after or new != expected:
+        raise HotspotError('NM 临时规则未按预期生效或被其他配置覆盖；不重载，停止测试。')
+    state['nm_rule_applied'] = True
+    reload_nm_conf(state)
+    check_unchanged(state['baseline'])
+
+
+def reload_nm_conf(state):
+    state['nm_reload_pending'] = True
+    save_state(state)
+    # CONF only: no SIGHUP, DNS reload, profile reload or service restart.
+    run('nmcli', 'general', 'reload', 'conf')
+    state['nm_reload_pending'] = False
+    save_state(state)
+
+
+def remove_nm_rule(state):
+    identity = state.get('nm_rule_inode')
+    if not identity:
+        return
+    if NM_RULE.exists() or NM_RULE.is_symlink():
+        info = NM_RULE.lstat()
+        if not stat.S_ISREG(info.st_mode) or [info.st_dev, info.st_ino] != identity:
+            raise HotspotError('测试 NM 规则已被替换；拒绝删除其他文件，保留回滚状态。')
+        state['nm_reload_pending'] = state.get('nm_rule_applied', False) or state.get('nm_reload_pending', False)
+        save_state(state)
+        NM_RULE.unlink()
+    if state.get('nm_reload_pending'):
+        reload_nm_conf(state)
+
+
+def nm_ap_state(timeout=1):
+    try:
+        values = run('nmcli', '-g', 'GENERAL.NM-MANAGED,GENERAL.STATE,GENERAL.REASON',
+                     'device', 'show', AP, required=False, timeout=timeout).strip().splitlines()
+    except (OSError, subprocess.TimeoutExpired):
+        values = []
+    managed = values[0] if values and values[0] in ('yes', 'no') else 'unknown'
+    def number(index):
+        match = re.match(r'([0-9]{1,3})(?:\s|$)', values[index]) if len(values) > index else None
+        return int(match[1]) if match else None
+    return dict(managed=managed, state=number(1), reason=number(2))
+
+
+def nm_state_text(value):
+    code = value['state']
+    label = {10: 'unmanaged', 20: 'unavailable', 30: 'disconnected', 100: 'activated', 120: 'failed'}.get(code, '其他/未知')
+    return f"NM managed={value['managed']} state={code}（{label}）reason={value['reason']}"
+
+
+def wait_unmanaged(state):
+    deadline = time.monotonic() + 5
+    value = dict(managed='unknown', state=None, reason=None)
+    for _ in range(20):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        value = nm_ap_state(timeout=min(1, remaining))
+        if value['managed'] == 'no' and value['state'] == 10:
+            return
+        if value['managed'] != 'unknown' and not state['nm_changed']:
+            state['nm_changed'], state['nm_before'] = True, 'reset'
+            save_state(state)
+            try:
+                run('nmcli', 'device', 'set', AP, 'managed', 'no', timeout=1)
+            except (HotspotError, OSError, subprocess.TimeoutExpired):
+                raise HotspotError('设置 csap0 managed no 失败；' + nm_state_text(value)) from None
+        time.sleep(min(0.25, max(0, deadline - time.monotonic())))
+    raise HotspotError('等待 csap0 unmanaged 超时；' + nm_state_text(value) + '；停止测试，不改 wlan0/iwd。')
 
 
 def load_state():
@@ -365,8 +469,9 @@ def check_unchanged(baseline):
 def check_ap(state, enabled=False):
     check_unchanged(state['baseline'])
     check_isolation('运行检查', state.get('isolation'))
-    if run('nmcli', '-g', 'GENERAL.NM-MANAGED', 'device', 'show', AP).strip() != 'no':
-        raise HotspotError('NM 未放弃 csap0 管理；不修改 iwd 或 wlan0，停止测试。')
+    nm_state = nm_ap_state()
+    if nm_state['managed'] != 'no' or nm_state['state'] != 10:
+        raise HotspotError('NM 未放弃 csap0 管理；' + nm_state_text(nm_state) + '；停止测试，不改 wlan0/iwd。')
     ap = run('iw', 'dev', AP, 'info')
     if not re.search(r'\btype AP\b', ap):
         raise HotspotError('csap0 类型异常；可能存在管理器争用，停止测试。')
@@ -408,6 +513,8 @@ def up():
             '/usr/bin/python', '-I', str(helper), 'down')
         if not active(PREFIX + 'rollback.timer'):
             raise HotspotError('自动回滚定时器未就绪；拒绝创建热点。')
+        STEP = '创建接口前安装临时 NM unmanaged 规则'
+        install_nm_rule(state)
         STEP = '生成私有临时配置'
         paths = prepare_secret_directory(owner)
         # Persist intentions first so a partial write is cleaned by down/watchdog.
@@ -424,30 +531,20 @@ def up():
         finally:
             password = hostapd = ''
         STEP = '创建专用 AP 接口'
-        # No namespace movement, no change to wlan0, no iwd/global NM reconfigure.
+        # No namespace movement or wlan0/iwd changes. Rule is already loaded.
         run('iw', 'phy', baseline['phy'], 'interface', 'add', AP, 'type', '__ap')
         state['ifindex'] = int(Path('/sys/class/net/csap0/ifindex').read_text())
         state['created'] = True
         save_state(state)
-        # Let NM observe the new interface, then change only its runtime Managed.
-        managed = ''
-        for _ in range(20):
-            managed = run('nmcli', '-g', 'GENERAL.NM-MANAGED', 'device', 'show', AP, required=False).strip()
-            if managed in ('yes', 'no'):
-                break
-            time.sleep(0.25)
-        if managed not in ('yes', 'no'):
-            raise HotspotError('NM 未识别新增 AP 接口；停止，不重启管理器。')
-        state['nm_before'], state['nm_changed'] = managed, managed == 'yes'
-        save_state(state)
-        if state['nm_changed']:
-            run('nmcli', 'device', 'set', AP, 'managed', 'no')
+        STEP = '等待 NM 确认 csap0 unmanaged'
+        wait_unmanaged(state)
         isolation()  # Before link up, address assignment and hostapd.
         run('ip', 'address', 'add', '10.77.0.1/24', 'dev', AP)
         run('ip', 'link', 'set', 'dev', AP, 'up')
         STEP = '接口启用后校验 csap0 隔离'
         state['isolation'] = settle_isolation('接口启用后')
         save_state(state)
+        STEP = '接口启用后检查 AP/NM 状态'
         check_ap(state)
         STEP = '启动专用 hostapd/dnsmasq'
         service('hostapd', '/usr/bin/python', '-I', str(helper), '_serve', 'hostapd')
@@ -458,6 +555,7 @@ def up():
         STEP = '专用服务启动后校验 csap0 隔离'
         state['isolation'] = settle_isolation('专用服务启动后')
         save_state(state)
+        STEP = '专用服务启动后检查 AP/NM 状态'
         check_ap(state, enabled=True)
         service('monitor', '/usr/bin/python', '-I', str(helper), '_monitor')
         print('热点启动：CANScope-Test；10.77.0.1/24；WPA2-CCMP；同信道 20 MHz；20 分钟自动停止。')
@@ -474,6 +572,7 @@ def down():
         print('没有本脚本拥有的热点会话；未操作任何接口。')
         return
     failures = []
+    interface_removed = True
     # Do not kill this process if it is the rollback.service/monitor itself.
     current_unit = os.environ.get('CANSCOPE_UNIT', '')
     for name in ('monitor.service', 'hostapd.service', 'dhcp.service'):
@@ -495,7 +594,13 @@ def down():
                 run('nmcli', 'device', 'set', AP, 'managed', state['nm_before'])
             run('iw', 'dev', AP, 'del')
         except Exception:
+            interface_removed = False
             failures.append('csap0 或 NM 管理状态回滚失败。')
+    if interface_removed:
+        try:
+            remove_nm_rule(state)
+        except Exception as exc:
+            failures.append(str(exc) if isinstance(exc, HotspotError) else '测试 NM 临时规则回滚/重载失败。')
     # Only the three fixed filenames of this owner, never arbitrary JSON paths.
     _, expected = files(state['owner'])
     for path in expected.values():
@@ -580,6 +685,8 @@ def monitor():
 def status():
     # Ordinary user can inspect public interface/service metadata without secrets.
     print('热点接口存在：' + str(Path('/sys/class/net/csap0').exists()))
+    print('测试 NM 临时规则存在：' + str(NM_RULE.exists()))
+    print(nm_state_text(nm_ap_state()))
     for name in ('hostapd.service', 'dhcp.service', 'monitor.service', 'rollback.timer'):
         print(name + ' active=' + str(active(PREFIX + name)))
     print(json.dumps(snapshot(require_24=False), ensure_ascii=False, indent=2))

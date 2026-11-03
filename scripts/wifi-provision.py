@@ -126,15 +126,33 @@ def protect_process():
     sys.excepthook = lambda *_: print('配网异常，详细内容已隐藏；请按恢复命令查询设备。', file=sys.stderr)
 
 
-def read_password_file(path):
-    """Validate the opened inode before reading; never interpolate file data/errors."""
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    raw = bytearray()
+def open_password_file(path):
+    """Metadata validation only. Missing files have a fixed, actionable message."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        raise StopProvision('密码文件不存在，请先运行 test-hotspot.py up 并确认 status 正常。') from None
     try:
         info = os.fstat(fd)
         if (not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600
                 or info.st_uid != os.geteuid() or info.st_nlink != 1):
             raise StopProvision('密码文件必须是当前用户所有、权限恰好 0600 的普通文件，且不能是链接。')
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def check_password_file(path):
+    """Before any BLE activity, check accessibility and mode without reading data."""
+    os.close(open_password_file(path))
+
+
+def read_password_file(path):
+    """Revalidate the opened inode immediately before reading; never print data."""
+    fd = open_password_file(path)
+    raw = bytearray()
+    try:
         raw.extend(os.read(fd, 66))
         if len(raw) > 65:
             raise StopProvision('密码文件过长。')
@@ -299,6 +317,9 @@ async def diagnose(options=None):
 
 
 async def provision(options=None):
+    if options and options.password_file is not None:
+        step('启动/密码文件检查')
+        check_password_file(options.password_file)
     from can_scope.connection_store import connection_folder, load_connection, save_connection
     from can_scope.engine import Channel
     from can_scope.protocol import secret
@@ -468,6 +489,9 @@ def main():
             return 0
         if os.geteuid() == 0:
             raise StopProvision('请用普通桌面用户运行，禁止 root。')
+        if args.password_file is not None and not args.diagnose:
+            step('启动/密码文件检查')
+            check_password_file(args.password_file)
         if not sys.stdin.isatty() or not sys.stdout.isatty():
             raise StopProvision('必须由用户在交互式终端运行；不接受重定向或管道输入。')
         print('请关闭桌面端和手机 App，在设备屏幕选择蓝牙模式；电脑保持现有网络连接。')

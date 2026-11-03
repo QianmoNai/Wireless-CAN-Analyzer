@@ -40,6 +40,30 @@ class CacheTests(unittest.TestCase):
 
 
 class OfflineCliTests(unittest.TestCase):
+    def test_missing_password_file_fails_before_any_ble_or_confirmation(self):
+        with patch.object(cli, 'protect_process'), patch.object(cli.os, 'geteuid', return_value=1000), \
+             patch.object(cli.os, 'open', side_effect=FileNotFoundError('SYNTHETIC_PRIVATE')), \
+             patch.object(sys, 'argv', ['wifi-provision.py', '--password-file', '/synthetic/not-present']), \
+             patch.object(cli, 'provision', side_effect=AssertionError('BLE forbidden')), \
+             patch('builtins.input', side_effect=AssertionError('confirmation forbidden')), \
+             redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as output:
+            self.assertEqual(cli.main(), 1)
+        self.assertIn('密码文件不存在，请先运行 test-hotspot.py up 并确认 status 正常', output.getvalue())
+        self.assertIn('启动/密码文件检查', output.getvalue())
+        self.assertNotIn('SYNTHETIC_PRIVATE', output.getvalue())
+
+    @unittest.skipUnless(sys.platform == 'linux', 'Linux file permission/NOFOLLOW semantics')
+    def test_early_password_check_reads_metadata_only_and_rechecks_after_deletion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'fixture.password'
+            path.write_text('SyntheticFixtureOnly\n')
+            path.chmod(0o600)
+            with patch.object(cli.os, 'read', side_effect=AssertionError('credential read forbidden')):
+                cli.check_password_file(path)
+            path.unlink()
+            with self.assertRaises(cli.StopProvision) as caught:
+                cli.read_password_file(path)
+            self.assertIn('密码文件不存在', str(caught.exception))
     @unittest.skipUnless(sys.platform == 'linux', 'Linux file permission/NOFOLLOW semantics')
     def test_password_file_checks_mode_owner_links_size_before_reading(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -182,6 +206,9 @@ class OfflineCliTests(unittest.TestCase):
                 self.assertEqual(caught.exception.code, 0)
             with patch.object(sys, 'argv', ['wifi-provision.py', '--dry-run']):
                 self.assertEqual(cli.main(), 0)
+            with patch.object(sys, 'argv', ['wifi-provision.py', '--dry-run', '--password-file', '/nonexistent']), \
+                 patch.object(cli, 'check_password_file', side_effect=AssertionError('file forbidden')):
+                self.assertEqual(cli.main(), 0)
             self.assertIn('DRY-RUN PASS', output.getvalue())
             self.assertIn(cli.NOTICE, output.getvalue())
 
@@ -216,6 +243,14 @@ class OfflineCliTests(unittest.TestCase):
 
 
 class ProvisionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_direct_provision_also_prechecks_before_cache_and_ble(self):
+        options = SimpleNamespace(password_file=Path('/synthetic/missing'))
+        with patch.object(cli, 'check_password_file', side_effect=cli.StopProvision('密码文件不存在')), \
+             patch('can_scope.connection_store.load_connection', side_effect=AssertionError('cache forbidden')), \
+             patch('can_scope.transports.scan_ble', side_effect=AssertionError('BLE forbidden')):
+            with self.assertRaises(cli.StopProvision):
+                await cli.provision(options)
+
     async def test_existing_bond_checks_paired_without_pair_or_trust_update(self):
         from dbus_fast import MessageType, Variant
         bus = SimpleNamespace(call=AsyncMock(return_value=SimpleNamespace(
