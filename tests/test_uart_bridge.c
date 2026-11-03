@@ -59,14 +59,20 @@ int main(void){
  // Backpressure, disconnected RX and hardware errors all remain visible.
  unsigned dropped=drop_total;admit=false;input_count=5;step();assert(drop_total==dropped+5);admit=true;
  dropped=drop_total;link=false;input_count=4;step();assert(drop_total==dropped+4);link=true;
- uart_event_t e={.type=UART_FIFO_OVF};xQueueSend(events,&e,0);input_count=9;step();assert(error_total==2&&input_count==0);
+ uart_event_t e={.type=UART_FIFO_OVF};xQueueSend(events,&e,0);input_count=9;
+ unsigned rx_before=rx_total,published_before=published_count;step();
+ assert(error_total==2&&input_count==0&&rx_total==rx_before+9&&published_count==published_before+1);
+ // Ring-full and line-error events also preserve valid queued bytes.
+ for(unsigned type=UART_BUFFER_FULL;type<=UART_PARITY_ERR;type++){
+  e.type=type;xQueueSend(events,&e,0);input_count=7;rx_before=rx_total;step();assert(rx_total==rx_before+7);
+ }
 #if CONFIG_BLE_TEST_DIAGNOSTICS
  uint32_t d[UD_WORDS];uart_bridge_diagnostics(d);
- assert(d[UD_FIFO_OVF]==1&&d[UD_ERROR_FLUSHES]==1&&d[UD_ERROR_FLUSH_BYTES]==9);
- assert(d[UD_READ_BYTES]==265&&d[UD_BLE_ATTEMPT_BYTES]==261&&d[UD_BLE_REJECT_BYTES]==5&&d[UD_DISCONNECTED_BYTES]==4);
+ assert(d[UD_FIFO_OVF]==1&&d[UD_ERROR_FLUSHES]==0&&d[UD_ERROR_FLUSH_BYTES]==0);
+ assert(d[UD_READ_BYTES]==295&&d[UD_BLE_ATTEMPT_BYTES]==291&&d[UD_BLE_REJECT_BYTES]==5&&d[UD_DISCONNECTED_BYTES]==4);
  assert(d[UD_TX_DISCARD_BYTES]==27);
 #endif
- uart_bridge_configure(false,9600);step();fail_open=true;uart_bridge_configure(true,19200);step();assert(!ready&&error_total==3);
+ uart_bridge_configure(false,9600);step();fail_open=true;uart_bridge_configure(true,19200);step();assert(!ready&&error_total==6);
  // Downstream accounting accepts only actual UART RX payload bytes and is
  // cumulative across status reads, disconnect and baud/mode changes.
  dropped=drop_total;bridge_packet_t lost={.bytes={1,19,7}};

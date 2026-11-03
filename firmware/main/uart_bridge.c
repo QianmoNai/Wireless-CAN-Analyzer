@@ -100,7 +100,11 @@ static void step(void) {
         if(event.type==UART_PARITY_ERR)ud_add(UD_PARITY_ERR,1);
         if(event.type==UART_FIFO_OVF || event.type==UART_BUFFER_FULL || event.type==UART_FRAME_ERR || event.type==UART_PARITY_ERR){
             atomic_fetch_add(&error_total,1);
-            flush_rx(false);
+            // The IDF ISR already resets an overflowing hardware FIFO. Keep
+            // readable ring/stash data: another flush needlessly destroys it
+            // (and races new FIFO arrivals that buffered_data_len cannot count).
+            // BUFFER_FULL is recovered by uart_read_bytes draining the stash.
+            // Error events have no lost-byte count; never invent one here.
         }
     }
     bool dual=network_dual_mode();
