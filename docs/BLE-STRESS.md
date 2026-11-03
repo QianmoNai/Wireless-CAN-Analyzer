@@ -126,13 +126,21 @@ Pool counts and queue capacities are independent test variables.
 
 ## Connection parameter comparison
 
-`CONFIG_BLE_CONNECTION_POLICY` is a test-only option depending on diagnostics.
-It defaults to `0`, leaving central negotiation unchanged;
-`1` requests 15–30 ms and `2` requests 7.5–15 ms, both with latency zero.
-The bench negotiated 30/15 ms respectively. The 15 ms profile reduced RTT
-and loss, but one maximum-supply sample had unresolved UART ingress/accounting
-differences; its clean retest does not explain the failure. Neither profile is
-promoted to the normal default. Original failures and retests stay separate.
+`CONFIG_BLE_CONNECTION_POLICY` defaults to `2` in normal and diagnostic builds,
+independently of diagnostic instrumentation. Profile `2` requests 7.5–15 ms
+with latency zero; the bench central negotiated 15 ms. This is a request, not a
+guarantee that every central will choose 15 ms. `0` leaves negotiation entirely
+to the central; `1` requests 15–30 ms. Diagnostics and the experimental scheduler
+still default off; the normal pools remain 12/24 and the reserve is unchanged.
+
+The default was enabled after the UART error-path flush fix and explicit user
+acceptance of one remaining risk: a **pre-fix** maximum-supply run with a real
+FIFO_OVF had a 61-byte UART ingress discrepancy whose exact origin remains
+unresolved. A logic analyzer is needed to distinguish on-wire loss, the ISR FIFO
+reset and the former flush race. Clean retests do not explain that sample.
+Shorter intervals reduce measured RTT/loss but do not guarantee lossless UART
+forwarding, maximum-supply capacity, distance or power behavior.
+
 The host event queue waits one second after first subscription to observe the
 central. A connection gets at most one accepted request; an immediate local
 API rejection permits one further attempt after three seconds. An accepted

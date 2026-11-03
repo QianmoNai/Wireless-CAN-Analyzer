@@ -16,7 +16,9 @@ prelude=r'''
 #include <stdint.h>
 #include <stdio.h>
 #include "ble_connection_policy.h"
+#ifndef CONFIG_BLE_CONNECTION_POLICY
 #define CONFIG_BLE_CONNECTION_POLICY 1
+#endif
 #define BLE_HS_CONN_HANDLE_NONE 0xffff
 struct ble_npl_event {int unused;};
 struct ble_npl_callout {int unused;};
@@ -52,7 +54,7 @@ int main(void){
  parameter_tick(NULL);assert(requests==0&&timer_ms==1000);
  clock_ms=1000;parameter_tick(NULL);
  assert(requests==1&&bd[BD_PARAM_REQUESTS]==1&&bd[BD_PARAM_REQUEST_RC]==0);
- assert(last.itvl_min==12&&last.itvl_max==24&&last.latency==0&&last.supervision_timeout==42);
+ assert(last.itvl_min==(CONFIG_BLE_CONNECTION_POLICY==2?6:12)&&last.itvl_max==(CONFIG_BLE_CONNECTION_POLICY==2?12:24)&&last.latency==0&&last.supervision_timeout==42);
  clock_ms=10000;parameter_tick(NULL);assert(requests==1);
  parameter_subscribe(false);assert(stopped==1);
  parameter_subscribe(true);parameter_tick(NULL);assert(requests==1);
@@ -72,5 +74,6 @@ int main(void){
 '''
 with tempfile.TemporaryDirectory(prefix='ble-connection-')as d:
  p=Path(d);(p/'test.c').write_text(prelude+function('static void parameter_tick(')+function('static void parameter_subscribe(')+main)
- subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror','-I'+str(root/'firmware/main'),str(p/'test.c'),str(root/'firmware/main/ble_connection_policy.c'),'-o',str(p/'test')],check=True)
- subprocess.run([str(p/'test')],check=True)
+ for profile in (1,2):
+  subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror','-DCONFIG_BLE_CONNECTION_POLICY='+str(profile),'-I'+str(root/'firmware/main'),str(p/'test.c'),str(root/'firmware/main/ble_connection_policy.c'),'-o',str(p/'test')],check=True)
+  subprocess.run([str(p/'test')],check=True)
