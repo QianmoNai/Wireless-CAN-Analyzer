@@ -46,9 +46,12 @@ python3 tests/test_build_scripts.py
 python3 tests/test_asset_routes.py
 python3 tests/test_panel_font.py
 python3 tests/test_panel_dma.py
+python3 tests/test_serial_hardware.py
 node tests/test_imu.js
 node tests/test_motor_catalog.js
 node tests/test_history.js
+node tests/test_uart_ui.cjs
+node tests/test_uart_render.cjs
 java_src=android/app/src/main/java/dev/qianmo/canview
 javac -encoding UTF-8 -d "$test_build_dir/java" \
     "$java_src/LanTransport.java" "$java_src/MonitorCommands.java" "$java_src/FeedbackQueries.java" "$java_src/HomeTelemetry.java" \

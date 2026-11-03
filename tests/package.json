@@ -1,0 +1,7 @@
+{
+  "name": "can-scope-host-tests",
+  "private": true,
+  "devDependencies": {
+    "playwright": "1.64.1"
+  }
+}

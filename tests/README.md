@@ -4,11 +4,17 @@
 
 ## C / Java / JavaScript 测试
 
-依赖 C 编译器、Python 3、Node.js 和 JDK 17：
+依赖 C 编译器、Python 3、pyserial 3.5、Node.js 20 以上、JDK 17 和 OpenSSL 开发库。首次运行先安装依赖和锁定的 Node Playwright 及其匹配浏览器：
 
 ```bash
-bash scripts/test-host.sh
+python3 -m venv .venv
+.venv/bin/python -m pip install pyserial==3.5
+npm ci --prefix tests
+npm exec --prefix tests -- playwright install --with-deps --only-shell chromium
+PATH="$PWD/.venv/bin:$PATH" bash scripts/test-host.sh
 ```
+
+入口包含 `test_uart_ui.cjs` 与 `test_uart_render.cjs`。独立的 `checks.yml` workflow 对 firmware、scripts、tests、desktop 及共享 App 资源变更运行主机与桌面单测，不创建 Release，也不访问实机串口。
 
 覆盖 CAN 所有者循环、轮询查询、错误计数、速率和估算负载、BLE 数据筛选、ACK 调度、电机/IMU 订阅、蓝牙名称存储、本机按键与屏幕逻辑、App 查询和重连配置，以及有界接收、连接优先级、环形历史、WebView 资源路由和构建脚本保护。
 

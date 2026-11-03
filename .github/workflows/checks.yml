@@ -1,0 +1,60 @@
+name: Host and desktop checks
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'firmware/**'
+      - 'scripts/**'
+      - 'tests/**'
+      - 'desktop/**'
+      - 'android/app/src/main/assets/**'
+      - 'android/app/src/main/java/**'
+      - 'android/build.sh'
+      - '.github/workflows/checks.yml'
+  pull_request:
+    paths:
+      - 'firmware/**'
+      - 'scripts/**'
+      - 'tests/**'
+      - 'desktop/**'
+      - 'android/app/src/main/assets/**'
+      - 'android/app/src/main/java/**'
+      - 'android/build.sh'
+      - '.github/workflows/checks.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: desktop/requirements.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: tests/package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install host and desktop dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libssl-dev libegl1 libopengl0 libxkbcommon-x11-0 libxcb-cursor0 libnss3 libasound2t64
+          python -m pip install -r desktop/requirements.txt
+          npm ci --prefix tests
+      - name: Install Chromium matching the locked Playwright version
+        run: npm exec --prefix tests -- playwright install --with-deps --only-shell chromium
+      - name: Firmware host and shared UART page tests
+        run: bash scripts/test-host.sh
+      - name: Desktop unit tests
+        run: python -m unittest discover -s desktop/tests -v
