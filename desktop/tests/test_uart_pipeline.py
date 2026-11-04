@@ -78,7 +78,12 @@ class UartPipelineTests(unittest.IsolatedAsyncioTestCase):
     async def test_control_owner_has_priority_between_chunks(self):
         self.t.auto=False;self.c.start();task=await self.begin()
         self.c.submit('send',[(bytes([1,0x13,1,0,65])+bytes(15)).hex()])
-        self.t.reply(self.t.writes[0]);await asyncio.sleep(.01)
+        self.t.reply(self.t.writes[0])
+        # Windows timer resolution can delay the UART worker's 1 ms yield.
+        # Wait for the writes before checking their order.
+        async with asyncio.timeout(1):
+            while len(self.t.writes)<3:
+                await asyncio.sleep(.001)
         self.assertEqual(self.t.writes[1][1],0x13)
         self.assertEqual(self.t.writes[2][1],24)
         self.c.submit('uartCancel',[1]);self.t.reply(self.t.writes[-1]);await task

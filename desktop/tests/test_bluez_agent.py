@@ -9,6 +9,9 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
 
+if sys.platform != 'linux':
+    raise unittest.SkipTest('Linux-only BlueZ terminal pairing agent')
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from dbus_fast import DBusError, Message, MessageType
 from can_scope.bluez_agent import AgentSetupError, PasskeyAgent, TerminalPairingAgent, read_passkey

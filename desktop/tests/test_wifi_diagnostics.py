@@ -1,6 +1,7 @@
 """Small offline test of the real numeric parser, counters and Channel gate."""
 import asyncio
 import json
+import os
 import re
 from pathlib import Path
 import struct
@@ -55,7 +56,28 @@ class WifiDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         c.wifi_diagnostics.pending.cancel()
         await c.close()
 
-    async def test_per_second_loss_wrap_and_private_numeric_log(self):
+    async def test_per_second_loss_wrap_and_numeric_rows(self):
+        class MemoryLog:
+            def __init__(self):self.rows=[]
+            def write(self,event,slot,epoch,**values):self.rows.append(dict(event=event,slot=slot,epoch=epoch,**values))
+        log=MemoryLog()
+        c=Channel(lambda *args:None);c.mode='wifi';c.ready=True
+        diag=WifiDiagnostics(c,log)
+        for seq in (0xffffffff,1,1,0):
+            p=bytearray(packet(19,a=12,token=seq));p[4:16]=b'SECRET-DATA!'
+            diag.receive(bytes(p))
+        diag.tick()
+        diag.disconnected()
+        self.assertEqual(log.rows[0]['bytes'],48)
+        self.assertEqual(log.rows[0]['sequence_gaps'],1)
+        self.assertEqual(log.rows[0]['duplicates'],1)
+        self.assertEqual(log.rows[0]['reordered'],1)
+        self.assertEqual([row['event'] for row in log.rows],['rx_second','rx_partial','link_closed'])
+        self.assertNotIn('SECRET',json.dumps(log.rows))
+        self.assertNotIn('hex',json.dumps(log.rows))
+
+    @unittest.skipUnless(os.name=='posix','POSIX private log ownership, mode and NOFOLLOW semantics')
+    async def test_private_numeric_log(self):
         with tempfile.TemporaryDirectory() as d:
             path=Path(d)/'diag.jsonl';log=NumericLog(path)
             c=Channel(lambda *args:None);c.mode='wifi';c.ready=True

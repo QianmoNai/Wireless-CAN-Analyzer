@@ -12,6 +12,9 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+if sys.platform != 'linux':
+    raise unittest.SkipTest('Linux-only BlueZ provisioning CLI and POSIX credential files')
+
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'desktop'))
 from can_scope.connection_store import load_connection, save_connection
