@@ -1,162 +1,213 @@
 <p align="center">
-  <img src="docs/assets/hero.svg" alt="BLE CAN Scope — ESP32-S3 蓝牙 CAN 分析仪与 Android App" width="100%">
+  <img src="docs/assets/hero.svg" alt="CAN Scope：ESP32-S3 CAN / UART 分析仪，支持 Android、Windows 和 Linux" width="100%">
 </p>
 
-<h1 align="center">BLE CAN Scope</h1>
+<h1 align="center">Wireless CAN Analyzer</h1>
 
 <p align="center">
-  <strong>把 CAN 总线状态，带到你的手机上。</strong><br>
-  ESP32-S3 固件 × Android App · 蓝牙 / 局域网无线监控 · 电机与 IMU · 本机屏幕
+  <strong>CAN Scope · 在手机和电脑上，看懂你的 CAN 与 UART 数据。</strong><br>
+  ESP32-S3 固件 · Android App · Windows / Linux 桌面端 · 本机屏幕
 </p>
 
 <p align="center">
-  <a href="https://github.com/QianmoNai/Wireless-CAN-Analyzer/releases/tag/desktop-v1.0.0"><img src="https://img.shields.io/badge/Firmware-1.21.0-65e6cb?style=flat-square&amp;labelColor=17212f" alt="Firmware 1.21.0"></a>
-  <a href="https://github.com/QianmoNai/Wireless-CAN-Analyzer/releases/tag/desktop-v1.0.0"><img src="https://img.shields.io/badge/Android_App-1.20.0-88baff?style=flat-square&amp;labelColor=17212f" alt="Android App 1.20.0"></a>
-  <img src="https://img.shields.io/badge/Transport-Bluetooth_LE-65e6cb?style=flat-square&amp;labelColor=17212f" alt="Bluetooth LE">
+  <a href="#hardware"><img src="https://img.shields.io/badge/Hardware-ESP32--S3-65e6cb?style=flat-square&amp;labelColor=17212f" alt="ESP32-S3"></a>
+  <a href="#quickstart"><img src="https://img.shields.io/badge/Connect-BLE_%7C_Wi--Fi_%7C_USB-88baff?style=flat-square&amp;labelColor=17212f" alt="BLE、Wi-Fi 与 USB"></a>
+  <a href="docs/DUAL_CAN.md"><img src="https://img.shields.io/badge/Bridge-ESP--NOW-f4cf72?style=flat-square&amp;labelColor=17212f" alt="ESP-NOW 双机转发"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPL--3.0-ccd6e0?style=flat-square&amp;labelColor=17212f" alt="GPL-3.0-only"></a>
 </p>
 
 <p align="center">
-  <a href="#download"><strong>下载安装</strong></a> ·
   <a href="#preview">界面预览</a> ·
+  <a href="#features">功能特性</a> ·
+  <a href="#download"><strong>下载与运行</strong></a> ·
   <a href="#quickstart">快速上手</a> ·
   <a href="#hardware">硬件接线</a> ·
   <a href="#build">源码构建</a> ·
-  <a href="#docs">文档</a>
+  <a href="#docs">文档导航</a>
 </p>
 
----
+**CAN Scope** 是面向机器人与嵌入式调试的 CAN / UART 工具，提供 ESP32-S3 固件、Android App 和 Windows / Linux 桌面端完整源码。通过蓝牙、局域网或 USB 查看原始报文、电机与 IMU 状态、实时曲线，也能把外部单片机的 UART 字节流带到手机和电脑上。
 
-**BLE CAN Scope** 是一套包含 ESP32-S3 固件和 Android App 完整源码的蓝牙 CAN 监控工具。通过 BLE 同时连接多个 CAN 通道，在手机上查看电机状态、IMU 参数、实时曲线和原始报文；也可以通过设备上的屏幕与按键查看总线状态。
+设备带有独立屏幕和按键，可查看状态、切换通信方式及保存设置。两台设备还能通过 ESP-NOW 组成无线桥，在不连接 App 的情况下转发两端的 CAN 或 UART 数据。
 
-<sub>Bluetooth LE CAN analyzer with ESP32-S3 firmware and an Android app. Multi-device monitoring, motor and IMU decoding, live charts, and an onboard display.</sub>
-
-当前源码固件 **1.24.2** / App **1.21.0** 支持蓝牙安全配网、局域网通信选择，以及实体按键切换蓝牙蓝色 / Wi-Fi 紫色界面。固件提供蜂鸣器低 / 中 / 高三档试验音量、页面滑动、菜单选中框移动和蓝紫主题渐变；1.20.3 修正整屏切换时的 DMA 调度等待，并柔化页面滑动起步；1.20.4 将四个方向的亮度加减对调，统一为上方或左侧按键增加、下方或右侧按键减少，详见 [本机面板操作](docs/LOCAL_PANEL.md)。原有蓝牙保留，使用步骤见 [Wi-Fi 配网与通信说明](docs/WIFI.md)。本次 Release 包含安卓、Linux、Windows 与 ESP32-S3 固件四类运行文件。
-
-**1.24.2 新增远程设置**：通过既有 BLE / Wi-Fi / USB 桥接报文查询、持久化通信模式、CAN/UART 数据选择与八档 UART 波特率；原生 USB 可在未握手时查询或切入 USB 模式，无需实体按键。桌面 1.2.4 提供远程设置 API，附命令行脚本切入 USB；协议与命令行示例见 [USB 说明](docs/USB.md)。
-
-**1.23.0 新增无线串口**：设备屏幕选择 CAN 或 UART，使用开发板 TX（GPIO43）/RX（GPIO44）与其他单片机连接；通过原有蓝牙或 Wi-Fi 在 App 接收/发送 HEX、UTF-8 数据。默认 115200 / 8N1，串口速率可在屏幕设置。声音与音量合并为“关闭、低、中、高”。详见 [接线和使用说明](docs/UART.md)。需同时更新固件及 App；下方历史 Release 下载仍为原版本。
-
-当前源码固件保留 **1.22.0** 新增的 [GPIO3 绿色通信指示灯](docs/STATUS_LED.md)：未连接熄灭、连接常亮、当前选中的 CAN/UART 数据成功收发时闪烁，兼容蓝牙、Wi-Fi 与双机 A/B，并独立于屏幕工作。下方现有 Release 的固件仍为 1.21.0，不包含此新增功能。
-
-## Linux / Windows 桌面上位机
-
-当前桌面源码 **CAN Scope Desktop 1.2.4**：新增与固件 1.23.0 配套的 CAN/UART 数据选择与无线串口 HEX/文本收发，保留蓝牙 / Wi-Fi、四通道、电机与 IMU 曲线、经典 CAN 单次发送、配置导入导出及 CSV 记录导出。Linux 启动 `bash desktop/start.sh`，Windows 双击 `desktop/start.bat`；独立打包和使用说明见 [桌面版文档](desktop/README.md)。
+<sub>ESP32-S3 CAN &amp; UART analyzer with Android, Windows and Linux clients. Live telemetry, motor and IMU decoding, BLE / Wi-Fi / USB connectivity, and standalone ESP-NOW bridging.</sub>
 
 <a id="preview"></a>
 
-## 从设备总览，到每一帧反馈
+## 界面预览
+
+### 桌面端：多通道监控与实时曲线
+
+![CAN Scope Linux 桌面端：通道、设备状态与温度卡片，使用模拟数据](desktop/preview-overview.png)
+
+<details>
+<summary>查看电机曲线与 CAN 报文界面</summary>
+
+![电机详情与实时曲线，使用模拟数据](desktop/preview-detail.png)
+
+![CAN 报文监视与单次发送，使用模拟数据](desktop/preview-live.png)
+
+</details>
+
+### Android：设备总览与独立详情
 
 <table>
   <tr>
-    <td align="center" width="50%"><strong>多通道设备总览</strong><br><sub>通道、设备 ID 与连接状态，一屏查看</sub></td>
-    <td align="center" width="50%"><strong>单设备参数曲线</strong><br><sub>独立详情、实时反馈、点击曲线全屏查看</sub></td>
+    <td align="center" width="50%"><strong>多通道设备总览</strong></td>
+    <td align="center" width="50%"><strong>参数与实时曲线</strong></td>
   </tr>
   <tr>
-    <td align="center"><img src="docs/assets/app-overview.png" width="330" alt="App 首页：多通道电机卡片，使用模拟数据"></td>
-    <td align="center"><img src="docs/assets/app-detail.png" width="330" alt="App 电机详情：参数曲线，页面向下滚动，使用模拟数据"></td>
+    <td align="center"><img src="docs/assets/app-overview.png" width="280" alt="Android App WebView 总览，使用模拟数据"></td>
+    <td align="center"><img src="docs/assets/app-detail.png" width="280" alt="Android App WebView 详情页曲线区域，使用模拟数据"></td>
   </tr>
 </table>
 
-<sub>以上为实际 App WebView 页面在浏览器中的渲染，使用模拟 CAN 数据，不是手机实测截图。详情图展示向下滚动后的曲线区域。</sub>
-
-### 离开手机，也能查看总线
+<details>
+<summary>查看设备屏幕与按键界面</summary>
 
 <p align="center">
-  <img src="docs/local-panel-preview.png" alt="ST7789 中文总览与设置两页，横竖屏模拟数据" width="728">
+  <img src="docs/local-panel-preview.png" width="600" alt="固件绘制代码生成的 ST7789 中文总览与设置页，使用模拟数据">
 </p>
 
-<sub>本机页面由固件实际绘制代码生成，使用模拟数据。中文总览与设置两页，支持背光亮度、声音四档、CAN/UART 数据选择、通信模式与 0°/90°/180°/270° 四方向，设置断电保存；本机不显示报文数据流。</sub>
+中文总览与设置页支持四方向布局、亮度、声音、通信模式和 CAN / UART 选择，设置断电保存。本机屏幕显示状态和统计，原始报文在 App 或桌面端查看。
 
-## 为机器人调试准备
+</details>
 
-| 能力 | 可以做什么 |
+<sub>桌面图为 Linux 程序实际渲染；Android 图为 App WebView 页面在浏览器中的渲染；屏幕图由固件实际绘制代码生成。均使用模拟数据，不代表手机、屏幕或真实总线的实测结果。</sub>
+
+<a id="features"></a>
+
+## 功能特性
+
+| 能力 | 你可以做什么 |
 | --- | --- |
-| **蓝牙多通道** | 同时连接多台 ESP32，按通道管理设备，一键重连上次成功连接的设备 |
-| **电机状态卡片** | 显示来源通道、电机 ID、反馈 CAN ID；左滑删除、右滑配置、长按拖动排序 |
-| **实时参数曲线** | 独立查看电机或 IMU 参数，点击曲线进入横屏全屏，查看对应 CAN 数据流 |
-| **达妙持续查询** | 每台电机独立开关与频率，默认 100Hz，可调 1～1000Hz |
-| **CAN 报文监控** | CAN ID 与 RX/TX 筛选、记录保存上限、发送失败原因、设备端帧率和估算负载 |
-| **配置备份** | 导入/导出通道、电机及重连记录，设备蓝牙名称断电保存 |
-| **本机屏幕** | 中文总览与设置两页，四方向布局，三个按键、PWM 背光及蜂鸣器提示 |
+| **多通道监控** | Android 管理多个设备；桌面端提供最多四个独立通道，每个通道保存自己的连接、设备和记录配置 |
+| **CAN 报文分析** | 查看 RX / TX、CAN ID 筛选、发送失败原因、设备端帧率及估算总线负载；桌面端支持经典 CAN 单次发送 |
+| **电机与 IMU 解码** | 查看大疆、达妙电机反馈与温度，解析达妙 IMU 的加速度、角速度、姿态角和四元数 |
+| **实时曲线** | 独立设备详情、全屏曲线与采样设置；达妙电机可按设备开启 1～1000 Hz 反馈查询，默认 100 Hz |
+| **UART 字节收发** | HEX / UTF-8 显示与发送、换行追加、暂停和清空；支持八档波特率，默认 115200 / 8N1 |
+| **配置与记录** | 通道及设备配置导入 / 导出、成功连接记录与重连；桌面端可导出当前保留的 CAN 记录为 CSV |
+| **本机操作** | ST7789 中文屏幕、三个按键、四方向布局、PWM 背光、四档声音和通信指示灯 |
+| **远程设置** | 通过现有连接查询或保存通信模式、CAN / UART 选择和串口波特率；原生 USB 支持无需按键切入 USB 模式 |
 
-### 支持的设备
+### 选择适合你的连接方式
+
+| 方式 | Android | Windows / Linux | 适合场景 |
+| --- | :---: | :---: | --- |
+| **Bluetooth LE** | ✓ | ✓ | 近距离无线调试，按通道连接设备 |
+| **Wi-Fi 局域网** | ✓ | ✓ | 设备与上位机处于同一局域网，通过认证蓝牙取得信任信息后使用 TLS 连接 |
+| **原生 USB** | — | ✓ | 电脑直连，无需配网；同一个接口承载 CAN 或 UART |
+| **ESP-NOW 双机** | 无需 App | 无需上位机 | 两台设备组成 A / B 无线桥，转发两端 CAN 或 UART 数据 |
+
+每台设备同时只使用一种数据通信模式，并在 CAN / UART 中选择一种数据类型。双机模式下，两端须选择相同数据类型；CAN 转发连接的是两条独立总线。
+
+### 已接入的协议
 
 | 类别 | 型号 / 协议 | 说明 |
 | --- | --- | --- |
 | 大疆电机 | C620 / M3508、C610 / M2006、GM6020、GM3510 | 按型号解析反馈；GM3510 部分参数保留原始值 |
-| 达妙电机 | DM4310 及更多型号预设、自定义解码范围 | 独立 ID / Master ID 配置，支持状态查询 |
-| 达妙 IMU | DM-IMU-L1 | 主动 CAN 上报，加速度、角速度、姿态角、四元数等 |
+| 达妙电机 | DM4310 等型号预设、自定义解码范围 | 独立 ID / Master ID 配置，支持反馈查询 |
+| 达妙 IMU | DM-IMU-L1 | 解析主动 CAN 上报的惯性与姿态数据 |
 
-具体型号、量程与协议来源见 [电机型号表](docs/MOTOR_CATALOG.md) 和 [DM-IMU-L1 说明](docs/DM_IMU_L1.md)。
+完整型号、量程及协议来源见 [电机型号表](docs/MOTOR_CATALOG.md)、[电机协议](docs/MOTOR_PROTOCOLS.md) 和 [DM-IMU-L1](docs/DM_IMU_L1.md)。
 
 <a id="download"></a>
 
-## 下载与安装
+## 下载与运行
 
-**[前往 Release 下载 →](https://github.com/QianmoNai/Wireless-CAN-Analyzer/releases/tag/desktop-v1.0.0)**
+### 使用发行包
 
-| 下载内容 | 版本 | 适用环境 |
+**[下载完整套件 →](https://github.com/QianmoNai/Wireless-CAN-Analyzer/releases/tag/desktop-v1.0.0)**
+
+已发布的完整套件是一个固定版本快照，**版本与当前 `main` 源码不同**。需要 USB 直连、UART 等后续功能时，请使用对应的新版本源码构建；不要把下表历史包当成当前源码的运行包。
+
+| 组件 | 已发布版本 | 下载与环境 |
 | --- | --- | --- |
-| [Android APK](https://github.com/QianmoNai/Wireless-CAN-Analyzer/releases/download/desktop-v1.0.0/BLE-CAN-Scope-Android-1.20.0-debug.apk) | **1.20.0** | Android 8.0 及以上，支持 BLE |
-| [Linux 运行包](https://github.com/QianmoNai/Wireless-CAN-Analyzer/releases/download/desktop-v1.0.0/CAN-Scope-Desktop-1.0.0-Linux-x64.tar.gz) | **1.0.0** | x64，Ubuntu 24.04 兼容运行库 |
-| [Windows 运行包](https://github.com/QianmoNai/Wireless-CAN-Analyzer/releases/download/desktop-v1.0.0/CAN-Scope-Desktop-1.0.0-Windows-x64.zip) | **1.0.0** | Windows 10/11 x64 |
-| [ESP32-S3 烧录包](https://github.com/QianmoNai/Wireless-CAN-Analyzer/releases/download/desktop-v1.0.0/BLE-CAN-Scope-ESP32-S3-1.21.0.zip) | **1.21.0** | ESP32-S3，4MB Flash；三个镜像、烧录脚本与说明 |
-| [SHA-256 校验文件](https://github.com/QianmoNai/Wireless-CAN-Analyzer/releases/download/desktop-v1.0.0/SHA256SUMS) | 本次发行 | 覆盖四类完整安装/烧录包 |
+| Android | **1.20.0** | [APK](https://github.com/QianmoNai/Wireless-CAN-Analyzer/releases/download/desktop-v1.0.0/BLE-CAN-Scope-Android-1.20.0-debug.apk) · Android 8.0+，支持 BLE |
+| Linux 桌面端 | **1.0.0** | [TAR.GZ](https://github.com/QianmoNai/Wireless-CAN-Analyzer/releases/download/desktop-v1.0.0/CAN-Scope-Desktop-1.0.0-Linux-x64.tar.gz) · x64，Ubuntu 24.04 兼容运行库 |
+| Windows 桌面端 | **1.0.0** | [ZIP](https://github.com/QianmoNai/Wireless-CAN-Analyzer/releases/download/desktop-v1.0.0/CAN-Scope-Desktop-1.0.0-Windows-x64.zip) · Windows 10 / 11 x64 |
+| ESP32-S3 固件 | **1.21.0** | [烧录包](https://github.com/QianmoNai/Wireless-CAN-Analyzer/releases/download/desktop-v1.0.0/BLE-CAN-Scope-ESP32-S3-1.21.0.zip) · 本项目 ESP32-S3，4 MB Flash |
+| 文件校验 | 同次发行 | [SHA256SUMS](https://github.com/QianmoNai/Wireless-CAN-Analyzer/releases/download/desktop-v1.0.0/SHA256SUMS) |
 
-[Gitee 同步发行页](https://gitee.com/qianmonai/Wireless-CAN-Analyzer/releases/desktop-v1.0.0) 提供相同 APK 和固件包；桌面大包采用分卷，按附件说明合并。
+桌面包完整解压后运行 `CAN-Scope` / `CAN-Scope.exe`，无需另装 Python；固件按包内 `README.txt` 烧录。[Gitee 同步发行页](https://gitee.com/qianmonai/Wireless-CAN-Analyzer/releases/desktop-v1.0.0) 提供相同 APK 与固件，桌面分卷按附件说明合并。
 
-> 固件与 App 独立编号，以上版本配套使用。仓库当前为私有，下载需要登录具有访问权限的 GitHub 账号。APK 使用开发签名；更换签名需要卸载时，请先导出配置。
+仓库当前为私有，下载需要有访问权限的账号。Android APK 使用开发签名，Windows 程序未代码签名；自行构建 APK 若因签名不同而需要卸载旧版，请先导出配置。
+
+### 使用当前源码
+
+| 组件 | 源码版本 | 入口 |
+| --- | --- | --- |
+| ESP32-S3 固件 | **1.24.2** | [构建与烧录](#build) |
+| Android App | **1.21.0** | [Android 构建](#build-android) |
+| CAN Scope Desktop | **1.2.4** | [桌面使用说明](desktop/README.md) |
+
+```bash
+git clone git@github.com:QianmoNai/Wireless-CAN-Analyzer.git
+cd Wireless-CAN-Analyzer
+```
+
+桌面源码运行需要 **Python 3.12（64 位，推荐）**：
+
+- **Linux**：在仓库根目录执行 `bash desktop/start.sh`。
+- **Windows**：安装 Python 并加入 PATH，双击 `desktop/start.bat`。
+
+启动脚本首次创建独立虚拟环境并安装依赖。Linux 的图形运行库、蓝牙及串口权限配置见 [桌面版文档](desktop/README.md#从源码运行)。桌面 CI 的安装包保存在对应运行的 **Release 草稿**，不是新的正式完整套件。
 
 <a id="quickstart"></a>
 
 ## 快速上手
 
-1. **接线与供电** — 连接 SN65HVD230 与 ESP32，CANH/CANL 对应接入总线，所有模块及被测设备共地。
-2. **烧录与安装** — 下载固件包，按包内 `README.txt` 烧录；安装 Android APK。
-3. **蓝牙连接** — 开启手机蓝牙，授予扫描与连接权限，在 App 添加设备建立通道。
-4. **配置设备** — 设置与总线一致的 CAN 波特率，添加电机或 IMU，填写设备 ID 和反馈 CAN ID。
-5. **开始监控** — 点击首页卡片查看曲线；达妙电机按需开启持续查询，IMU 使用主动上报。在通道页查看原始 CAN 报文。
+1. **准备设备**：使用 ESP32-S3、SN65HVD230 与配套固件；连接 CANH / CANL、共地，并按总线两端配置终端电阻。
+2. **启动客户端**：安装 Android App，或在 Windows / Linux 运行桌面端。使用新功能时同步更新对应客户端与固件。
+3. **建立连接**：在设备屏幕选择通信模式，在客户端选择对应入口；首次使用可从蓝牙或桌面 USB 开始，具体步骤见下表。
+4. **选择数据**：CAN 模式下设置与总线一致的波特率，添加电机或 IMU 及其反馈 ID；UART 模式下按 3.3 V TTL 交叉接 TX / RX，选择相同串口速率。
+5. **查看与记录**：打开设备详情查看曲线，或查看原始 CAN / UART 数据；达妙电机按需开启反馈查询，IMU 使用主动上报。
 
 ```text
-电机 / IMU ── CAN 总线 ── SN65HVD230 ── ESP32-S3 ── BLE ── Android App
-                                         │
-                                  ST7789 屏幕 + 按键
+电机 / IMU ── CAN 收发器 ─┐                ┌── BLE ───── Android / Desktop
+                         ├── ESP32-S3 ────┼── Wi-Fi ─── Android / Desktop
+外部 MCU ── 3.3 V UART ───┘       │        └── USB ───── Desktop
+                            屏幕 + 按键
 ```
 
-每台 ESP32 对应一条 CAN 总线；App 可以同时管理多个 BLE 通道。详情页按当前设备订阅所需数据，减少无关蓝牙传输。
+| 我想… | 下一步 |
+| --- | --- |
+| 通过蓝牙连接 | 设备选蓝牙模式，客户端扫描并连接；一台设备同时只连接一个上位机 |
+| 通过局域网连接 | 先通过认证蓝牙配置 2.4 GHz Wi-Fi 并保存信任信息，再切换设备和客户端模式；见 [Wi-Fi 指南](docs/WIFI.md) |
+| 用 USB 连接电脑 | 设备选 USB 直连，插入连接 GPIO19 / 20 的原生 USB 口，桌面端扫描串口；见 [USB 指南](docs/USB.md) |
+| 收发单片机串口数据 | 设备选 UART，与外部单片机交叉接线并共地；见 [UART 指南](docs/UART.md) |
+| 不用上位机做双机转发 | 两端在屏幕选择 A / B 并核对配对码；见 [双机转发](docs/DUAL_CAN.md) |
 
 <a id="hardware"></a>
 
 ## 硬件接线
 
-**ESP32-S3 Mini + SN65HVD230 + 1.47 英寸 ST7789（172×320）**，配三个按键和 3V 有源蜂鸣器。CAN 默认 **1Mbit/s**。
+目标硬件：**ESP32-S3 Mini + SN65HVD230 + 1.47 英寸 ST7789（172 × 320）**，配三个按键和 3 V 有源蜂鸣器。CAN 默认 **1 Mbit/s**。
 
-| 功能 | GPIO | 连接 |
+| 功能 | ESP32-S3 GPIO | 连接 |
 | --- | --- | --- |
-| CAN 发送 / 接收 | **4 / 5** | SN65HVD230 CTX / CRX |
+| CAN TX / RX | **4 / 5** | SN65HVD230 CTX / CRX；模块使用 3.3 V |
+| 外部 UART TX / RX | **43 / 44** | 接外部单片机 RX / TX，3.3 V TTL，共地 |
+| 原生 USB D− / D+ | **19 / 20** | 原生 USB 接口；与 GPIO43 / 44 的 UART 独立 |
 | BT1 / BT2 / BT3 | **1 / 2 / 7** | 按键另一端接 GND，内部上拉 |
-| 通信绿灯 | **3** | 经 1kΩ 接 0805 LED 阳极，阴极 GND；GPIO3 经 10kΩ 下拉 |
+| 通信绿灯 | **3** | 经 1 kΩ 接 LED 阳极，阴极接 GND；GPIO3 经 10 kΩ 下拉 |
 | 背光 PWM | **6** | 背光 MOSFET 栅极 |
 | LCD RESET / D-C / CS | **8 / 9 / 10** | 屏幕复位、命令、片选 |
 | LCD MOSI / SCLK | **11 / 12** | SPI 数据与时钟 |
 | 有源蜂鸣器 | **13** | 蜂鸣器 MOSFET 栅极 |
 
-CAN 终端电阻按总线两端布置。完整供电、插座引脚顺序及面板适配说明见 [硬件文档](hardware/README.md) 和 [本机面板操作](docs/LOCAL_PANEL.md)。
+CAN 端口按 **CANH / CANL 信号名**接线：当前设计中 CN6 的 1 / 2 脚是 CANH / CANL，CN5 的顺序相反。供电、屏幕适配及完整接线见 [硬件文档](hardware/README.md) 和 [本机面板](docs/LOCAL_PANEL.md)。原理图与 PCB 原始工程尚未纳入仓库。
 
 <a id="build"></a>
 
 ## 从源码构建
 
-在仓库根目录执行下面的命令。
+以下命令均在仓库根目录执行。桌面源码运行见 [下载与运行](#download)，独立打包见 [桌面打包说明](desktop/README.md#打包)。
 
-### ESP32-S3 固件
+<details>
+<summary><strong>ESP32-S3 固件 · ESP-IDF v6.0.2</strong></summary>
 
-当前固件源码版本 **1.24.2** 提供中文界面、切换动画和四方向设置，菜单选择随屏幕方向映射；亮度编辑统一为上方或左侧按键增加、下方或右侧按键减少；方向编辑固定 BT1 顺时针、BT3 逆时针；声音合并为关闭/低/中/高，声音、通信模式与数据选择均由中键直接切换。本机报文页已移除，完整安装包与烧录包见上方下载表。
-
-新增屏幕按键配对的“双机A端”（绿色）和“双机B端”（黄色），两端各接独立 CAN 总线，通过 ESP-NOW 双向转发，无需 App。配对步骤、1 Mbit/s 默认 CAN 配置和测试范围见 [双机 CAN 转发](docs/DUAL_CAN.md)。
-
-已验证工具链：**ESP-IDF v6.0.2**。先安装 ESP-IDF 并激活环境，再执行：
+先安装并激活 ESP-IDF，然后执行；将环境与串口路径换成实际值：
 
 ```bash
 source /path/to/esp-idf/export.sh
@@ -165,39 +216,28 @@ bash firmware/idf.sh -p /dev/ttyACM0 -b 115200 flash
 bash firmware/idf.sh -p /dev/ttyACM0 monitor
 ```
 
-默认构建目录位于 `${XDG_CACHE_HOME:-$HOME/.cache}/can-scope-firmware/<项目路径哈希>/esp32s3`；缓存实际路径含非 ASCII 字符时自动改用 `/tmp/can-scope-$UID`，避免工具链路径解析错误。可用 `CAN_IDF_BUILD_DIR` 指定目录。首次迁移会保留旧 `firmware/build/esp32s3.sdkconfig`；同一构建目录拒绝并发运行。不需要 PSRAM。屏幕偏移、色序和本机面板开关可通过 `bash firmware/idf.sh menuconfig` 调整。升级无需全片擦除，保留 NVS 中的蓝牙名称及面板设置。
+- 目标为 ESP32-S3、4 MB Flash，不需要 PSRAM。屏幕偏移、色序等通过 `bash firmware/idf.sh menuconfig` 调整。
+- 默认构建缓存为 `${XDG_CACHE_HOME:-$HOME/.cache}/can-scope-firmware/<项目路径哈希>/esp32s3`；路径含非 ASCII 字符时回退到 `/tmp/can-scope-$UID`。可用 `CAN_IDF_BUILD_DIR` 指定纯英文路径，同一构建目录禁止并发运行。
+- 首次迁移保留旧 `firmware/build/esp32s3.sdkconfig`。升级默认不全片擦除，保留 NVS；从旧分区布局升级时需烧录对应分区表，见 [Wi-Fi 构建与升级](docs/WIFI.md#构建与升级)。
+- 默认关闭应用、NimBLE、Bootloader 日志及应用控制台，芯片 ROM 启动信息仍可能输出。旧 sdkconfig 不会自动应用新默认值，需要在 `menuconfig` 检查日志与控制台设置，或使用新构建目录。
+- VS Code 直接打开 `firmware` 时不会经过 `idf.sh`。项目真实路径含中文时，把 `idf.buildPath` 和 clangd 的 `--compile-commands-dir` 指向同一个纯英文绝对路径；符号链接解析后的路径也需满足此条件。
+- 旧 ESP32 兼容路径：`CAN_IDF_TARGET=esp32 bash firmware/idf.sh build`，使用 GPIO21 / 22，默认不启用本机屏幕；主要开发与验证目标为 ESP32-S3。
 
-**VS Code ESP-IDF 扩展**：直接打开 `firmware` 文件夹时，扩展默认使用 `firmware/build`，不会经过上述脚本。若项目的真实路径包含中文，请在工作区设置中将 `idf.buildPath` 指向纯英文绝对路径，例如 `/home/<用户名>/.cache/can-scope-vscode/esp32s3`，并将 `clangd.arguments` 中的 `--compile-commands-dir` 指向同一目录；确认该目录经符号链接解析后的真实路径也不含中文。继续使用现有 `firmware/sdkconfig`，重新构建即可。`cannot read spec file .../picolibc.specs` 且错误路径中出现换行或 `\x0a` 时，应先检查构建路径。
+</details>
 
-固件默认关闭应用、NimBLE 和 Bootloader 日志，CAN 接收任务不格式化串口日志；App 和本机屏幕仍正常显示报文及统计。芯片 ROM 的启动信息仍可能输出。已有构建配置不会被 `sdkconfig.defaults` 覆盖，需在 `menuconfig` 中将应用、NimBLE 和 Bootloader 的日志级别设为 `None`，或使用新的构建目录。
+<a id="build-android"></a>
 
-保留旧 ESP32 目标兼容路径：`CAN_IDF_TARGET=esp32 bash firmware/idf.sh build`；旧目标使用 GPIO21/22，默认不启用本机屏幕。本次发布主要验证 ESP32-S3。
+<details>
+<summary><strong>Android App · JDK 17 + Android SDK 35</strong></summary>
 
-### Android App
-
-需要 **JDK 17、Android SDK Platform 35、Build Tools 35.0.0、Python 3**。当前项目使用命令行 SDK 构建脚本，不依赖 Gradle。
+需要 JDK 17、Android SDK Platform 35、Build Tools 35.0.0 和 Python 3；构建脚本不依赖 Gradle。
 
 ```bash
 export ANDROID_HOME="$HOME/Android/Sdk"
 bash android/build.sh
 ```
 
-产物：`android/dist/CAN-Scope-debug.apk`。脚本在本机生成开发签名，密钥不随源码分发。自行构建 APK 的签名与作者 APK 不同，可能无法直接覆盖安装；如需卸载旧版本，请先在 App 内导出配置。
-
-Android 默认缓存为 `${XDG_CACHE_HOME:-$HOME/.cache}/can-scope-android/<项目路径哈希>`，可用 `CAN_ANDROID_BUILD_DIR` 指定目录。同一目录拒绝并发构建；每次清理旧 class/dex，签名验证通过后原子替换 APK。当前源码 App 版本为 **1.21.0**，包含[采样、绘图和首页更新优化](docs/PERFORMANCE.md)。完整安装包与烧录包见上方下载表。
-
-<details>
-<summary><strong>目录结构</strong></summary>
-
-```text
-BLE-CAN-Scope/
-├── firmware/     ESP-IDF 工程与 ESP32-S3 固件
-├── android/      Android Java + WebView App
-├── hardware/     接线说明（尚未纳入 PCB 原始工程）
-├── docs/         协议、型号、面板说明与预览素材
-├── tests/        C / Java / JavaScript / 浏览器测试
-└── scripts/      主机测试脚本
-```
+产物为 `android/dist/CAN-Scope-debug.apk`。脚本在本机生成开发签名，密钥不随源码分发。默认缓存为 `${XDG_CACHE_HOME:-$HOME/.cache}/can-scope-android/<项目路径哈希>`，可用 `CAN_ANDROID_BUILD_DIR` 指定；每次构建清理旧 class / dex，APK 签名验证通过后才替换产物。
 
 </details>
 
@@ -205,43 +245,51 @@ BLE-CAN-Scope/
 
 ## 文档导航
 
-| 我想了解… | 文档 |
+| 主题 | 文档 |
 | --- | --- |
-| 蓝牙数据包、页面订阅与统计协议 | [BLE 通信协议](docs/PROTOCOL.md) |
-| 电机帧格式、型号和参数量程 | [电机协议](docs/MOTOR_PROTOCOLS.md) · [型号目录](docs/MOTOR_CATALOG.md) |
-| 达妙 IMU 的 CAN 数据解析 | [DM-IMU-L1](docs/DM_IMU_L1.md) |
-| 屏幕、按键、亮度与声音设置 | [本机面板](docs/LOCAL_PANEL.md) |
-| 编译检查、测试方法与验证结果 | [测试指南](tests/README.md) · [发布验证](docs/VALIDATION.md) |
-| 外部框架和协议资料来源 | [依赖与来源](docs/DEPENDENCIES.md) |
+| 桌面安装、连接与打包 | [Desktop](desktop/README.md) |
+| 蓝牙配网与局域网通信 | [Wi-Fi](docs/WIFI.md) · [Linux 终端配网](docs/WIFI_PROVISION.md) |
+| USB 与远程设置 | [USB](docs/USB.md) |
+| 外部单片机串口接线与数据收发 | [UART](docs/UART.md) |
+| 无上位机双机转发 | [ESP-NOW A / B](docs/DUAL_CAN.md) |
+| 硬件、屏幕与指示灯 | [接线](hardware/README.md) · [本机面板](docs/LOCAL_PANEL.md) · [状态灯](docs/STATUS_LED.md) |
+| 数据包、订阅与设置字段 | [通信协议](docs/PROTOCOL.md) |
+| 电机与 IMU | [电机协议](docs/MOTOR_PROTOCOLS.md) · [型号目录](docs/MOTOR_CATALOG.md) · [DM-IMU-L1](docs/DM_IMU_L1.md) |
+| 测试、性能与实测边界 | [测试指南](tests/README.md) · [性能说明](docs/PERFORMANCE.md) · [发布验证](docs/VALIDATION.md) |
+| 依赖与发行 | [依赖来源](docs/DEPENDENCIES.md) · [Release 交付要求](docs/RELEASING.md) |
 
 ## 使用范围
 
-- **经典 CAN**：不支持 CAN FD。接口正常参与 ACK，并非纯监听分析仪。
-- **状态监测**：App 不提供电机运动控制界面；固件保留历史原始发帧及受限控制协议，本机按键不会触发这些控制指令。
-- **频率与带宽**：查询和采样配置上限不代表实际吞吐，高频 CAN 经 BLE 转发不保证逐帧无损。
-- **估算负载**：`LOAD EST.` 使用成功收发帧的基础位数，不包含位填充、错误帧或失败尝试，不是精确物理占用率。
-- **验证范围**：已完成构建、相关回归及 ESP32-S3 启动/CAN 接收检查；实体屏幕、全部电机型号和手机尚未逐项实测。Release 中重新构建的镜像验证范围以发布说明为准。
+- **经典 CAN**：支持标准帧、扩展帧、数据帧与远程帧，不支持 CAN FD；接口正常参与 ACK，并非纯监听模式。
+- **监控与查询**：提供状态监测、反馈查询和桌面端单次发帧；App 不提供电机运动控制界面。本机按键不会触发电机运动控制。
+- **吞吐与记录**：查询频率和 UART 波特率是配置值，不代表端到端吞吐；高负载可能丢帧 / 丢字节，界面与 CSV 仅保留有界记录。
+- **估算负载**：`LOAD EST.` 不包含位填充、错误帧或失败尝试，不能作为精确物理占用率。
+- **双机桥接**：转发数据帧 / 字节，不能延伸 CAN 逐位仲裁或 ACK 时序；无线吞吐和距离需在实际环境验证。
+- **验证范围**：主机模拟、界面预览、构建与打包检查分别验证对应的软件行为；真实 BLE / Wi-Fi / USB、屏幕及电机联调结果以相应文档和发布说明为准。
 
-## 参与开发
+## 开发与反馈
 
-运行 `bash scripts/test-host.sh` 检查主机测试。界面改动可按 [测试指南](tests/README.md) 执行 Playwright 回归；反馈问题时附上固件/App 版本、设备型号、CAN 波特率与复现步骤。
+按 [测试指南](tests/README.md) 安装 C 编译器、OpenSSL 开发库、Python 依赖、Node.js、Playwright 浏览器和 JDK 17，再运行：
+
+```bash
+PATH="$PWD/desktop/.venv/bin:$PATH" bash scripts/test-host.sh
+desktop/.venv/bin/python -m unittest discover -s desktop/tests -v
+```
+
+以上假设已用桌面启动脚本建立 `desktop/.venv`；仅运行主机测试也可按测试指南使用独立虚拟环境。测试使用驱动桩、模拟数据或本机回环服务器，不连接真实 CAN / BLE 硬件。
+
+欢迎通过 [Issues](https://github.com/QianmoNai/Wireless-CAN-Analyzer/issues) 提交问题或建议，或通过 [Pull requests](https://github.com/QianmoNai/Wireless-CAN-Analyzer/pulls) 改进代码与文档。反馈时请附上固件 / 客户端版本、操作系统、连接方式、设备型号、CAN / UART 速率及复现步骤，并移除日志中的密码和连接凭据。
 
 ## 许可证
 
 [GNU GPL v3.0](LICENSE) · `GPL-3.0-only` · Copyright © 2026 QianmoNai。
 
-嵌入的中文点阵字形子集采用 [SIL OFL 1.1](firmware/fonts/OFL-SourceHanSans.txt)，来源及生成说明见 [字库说明](firmware/fonts/README.md)。
-
-外部依赖和协议资料遵守各自许可。本项目不隶属于大疆、达妙或乐鑫，品牌与型号用于说明兼容设备。
+嵌入的中文点阵字形子集采用 [SIL OFL 1.1](firmware/fonts/OFL-SourceHanSans.txt)，来源与生成方法见 [字库说明](firmware/fonts/README.md)。外部依赖与协议资料遵守各自许可。本项目不隶属于大疆、达妙或乐鑫，品牌与型号仅用于说明兼容设备。
 
 ---
 
 <p align="center">
   <a href="https://github.com/QianmoNai/Wireless-CAN-Analyzer">GitHub</a> ·
   <a href="https://gitee.com/qianmonai/Wireless-CAN-Analyzer">Gitee</a> ·
-  <a href="https://github.com/QianmoNai/Wireless-CAN-Analyzer/releases/tag/desktop-v1.0.0">Release</a>
+  <a href="https://github.com/QianmoNai/Wireless-CAN-Analyzer/releases">Releases</a>
 </p>
-
-从已有构建目录升级时，应使用新构建目录或将控制台设为 None；旧 sdkconfig 不会自动应用新的默认控制台配置。
-
-USB直连（红色屏幕）支持 CAN / UART 两种数据选择，配套 Windows/Linux Desktop 1.2.0，应用日志与控制台关闭。接线及连接步骤见 [USB 使用说明](docs/USB.md)。
