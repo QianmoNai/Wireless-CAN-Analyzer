@@ -108,8 +108,16 @@ static esp_err_t start_station_radio(void){
   atomic_store(&radio_on,true);
  }
  // Same 32 quarter-dBm request as the working 8 dBm TX test; after start,
- // before either active scanning or association, including an already-on radio.
- return esp_wifi_set_max_tx_power(32);
+ // before active scanning, association or ESP-NOW, including an already-on radio.
+ esp_err_t err=esp_wifi_set_max_tx_power(32);
+ int8_t power=INT8_MAX;
+ if(err==ESP_OK)err=esp_wifi_get_max_tx_power(&power);
+ if(err==ESP_OK&&power>32)err=ESP_FAIL;
+ if(err!=ESP_OK){
+  // Do not leave an unchecked radio running after a failed cap/readback.
+  if(esp_wifi_stop()==ESP_OK)atomic_store(&radio_on,false);
+ }
+ return err;
 }
 static bool release_ble_for_wifi(void){
  uint32_t until=millis()+2000;
@@ -321,8 +329,8 @@ static void manager_task(void *arg){
     esp_wifi_disconnect();if(atomic_load(&radio_on))esp_wifi_stop();
     atomic_store(&online,false);atomic_store(&station_ip,0);atomic_store(&radio_on,false);
     xQueueReset(requests);xSemaphoreTake(lock,portMAX_DELAY);busy=false;network_assembly_reset(&assembly);xSemaphoreGive(lock);
-    esp_err_t e=esp_wifi_start();
-    if(e==ESP_OK){atomic_store(&radio_on,true);e=esp_wifi_set_channel(DUAL_CHANNEL,WIFI_SECOND_CHAN_NONE);}
+    esp_err_t e=start_station_radio();
+    if(e==ESP_OK)e=esp_wifi_set_channel(DUAL_CHANNEL,WIFI_SECOND_CHAN_NONE);
     if(e==ESP_OK)e=esp_wifi_set_ps(WIFI_PS_NONE);
     if(e!=ESP_OK||!dual_link_start(wanted)){set_status(4,9);dual_retry=millis()+1000;}
     else{set_status(0,0);dual_role=wanted;dual_retry=0;}

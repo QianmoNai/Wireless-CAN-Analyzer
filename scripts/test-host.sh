@@ -35,6 +35,8 @@ cc -std=c11 -Wall -Wextra -Werror -Ifirmware/main tests/test_dual_protocol.c tes
 "$test_build_dir/test_dual_protocol"
 cc -std=c11 -Wall -Wextra -Werror -Itests/dual_stubs -Ifirmware/main tests/test_dual_runtime.c tests/dual_runtime_a.c tests/dual_runtime_b.c tests/dual_crypto_host.c firmware/main/dual_protocol.c firmware/main/dual_session.c -lcrypto -o "$test_build_dir/test_dual_runtime"
 "$test_build_dir/test_dual_runtime"
+cc -std=c11 -Wall -Wextra -Werror -DCAN_DUAL_UART_LOOPBACK_TEST=1 -Itests/dual_stubs -Ifirmware/main tests/test_dual_runtime.c tests/dual_runtime_a.c tests/dual_runtime_b.c tests/dual_crypto_host.c firmware/main/dual_protocol.c firmware/main/dual_session.c -lcrypto -o "$test_build_dir/test_dual_uart_loopback"
+"$test_build_dir/test_dual_uart_loopback"
 compile_run test_firmware -DCONFIG_IDF_TARGET_ESP32S3=1
 compile_run test_home_status firmware/main/home_status.c
 compile_run test_home_temperatures firmware/main/home_status.c
@@ -49,6 +51,7 @@ cc -std=c11 -Itests/name_stubs -Ifirmware/main tests/test_name_store.c firmware/
 "$test_build_dir/test_name_store"
 python3 tests/test_query_tx_filter.py
 python3 tests/test_uart_downstream.py
+python3 scripts/dual-uart-measure.py --self-test
 python3 tests/test_build_scripts.py
 python3 tests/test_asset_routes.py
 python3 tests/test_panel_font.py

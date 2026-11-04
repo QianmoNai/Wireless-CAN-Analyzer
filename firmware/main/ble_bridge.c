@@ -738,10 +738,7 @@ void ble_bridge_init(QueueHandle_t commands, QueueHandle_t queries)
     control_notify_queue = xQueueCreate(16, sizeof(notify_item_t));
     ESP_ERROR_CHECK(ack_notify_queue && notify_queue && control_notify_queue ? ESP_OK : ESP_ERR_NO_MEM);
     esp_err_t err = nvs_flash_init();
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        err = nvs_flash_init();
-    }
+    // Preserve pairing/settings on app-only updates; fail instead of erasing NVS.
     ESP_ERROR_CHECK(err);
     bridge_name_load(saved_name);
     ESP_ERROR_CHECK(nimble_port_init());

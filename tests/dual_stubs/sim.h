@@ -17,6 +17,8 @@ typedef unsigned nvs_handle_t;
 #define portMAX_DELAY UINT32_MAX
 #define pdMS_TO_TICKS(x) (x)
 #define ESP_OK 0
+#define ESP_ERR_TIMEOUT 1
+#define portTICK_PERIOD_MS 10
 #define ESP_ERR_NVS_NOT_FOUND 1
 #define ESP_MAC_WIFI_STA 0
 #define WIFI_IF_STA 0
@@ -41,6 +43,8 @@ typedef void (*send_cb_t)(const esp_now_send_info_t *, esp_now_send_status_t);
 QueueHandle_t xQueueCreate(unsigned n, size_t size);
 int xQueueSend(QueueHandle_t q, const void *p, unsigned wait);
 int xQueueReceive(QueueHandle_t q, void *p, unsigned wait);
+int xQueuePeek(QueueHandle_t q, void *p, unsigned wait);
+extern void (*sim_queue_after_receive)(QueueHandle_t q);
 void xQueueReset(QueueHandle_t q);
 unsigned uxQueueMessagesWaiting(QueueHandle_t q);
 unsigned uxQueueSpacesAvailable(QueueHandle_t q);
@@ -51,6 +55,8 @@ int xTaskCreate(void (*task)(void *), const char *name, unsigned stack,
                 void *arg, unsigned priority, TaskHandle_t *handle);
 void xTaskNotifyGive(TaskHandle_t t);
 unsigned ulTaskNotifyTake(int clear, unsigned wait);
+void vTaskDelay(unsigned ticks);
+void taskYIELD(void);
 int64_t esp_timer_get_time(void);
 void esp_read_mac(uint8_t *mac, int type);
 int esp_now_init(void);

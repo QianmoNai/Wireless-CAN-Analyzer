@@ -3,6 +3,7 @@
 #define dual_link_start dual_b_start
 #define dual_link_stop dual_b_stop
 #define dual_link_request_mode dual_b_request_mode
+#define dual_link_set_uart_owner dual_b_set_uart_owner
 #define dual_link_set_owner dual_b_set_owner
 #define dual_link_button dual_b_button
 #define dual_link_view dual_b_view

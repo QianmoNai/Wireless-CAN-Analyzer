@@ -3,6 +3,7 @@
 #define dual_link_start dual_a_start
 #define dual_link_stop dual_a_stop
 #define dual_link_request_mode dual_a_request_mode
+#define dual_link_set_uart_owner dual_a_set_uart_owner
 #define dual_link_set_owner dual_a_set_owner
 #define dual_link_button dual_a_button
 #define dual_link_view dual_a_view
@@ -22,3 +23,14 @@ void dual_a_tick(void) {
     tick(now_ms());
 }
 void dual_a_destroy(void) { dual_link_stop(); }
+#include "dual_uart_coalescing_tests.h"
+
+// Reproduce an admitted block whose first wake ran before the online gate.
+void dual_a_test_uart_online_wake(void) {
+  assert(bound && session.online && !uxQueueMessagesWaiting(uart_in));
+  uart_message_t m={.size=3,.created=now_ms(),.generation=atomic_load(&generation),.data={1,2,3}};
+  assert(xQueueSend(uart_in,&m,0)==pdTRUE);
+  atomic_store(&accepting,false);
+  tick(now_ms());
+  assert(dual_link_connected());
+}

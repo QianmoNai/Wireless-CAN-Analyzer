@@ -117,21 +117,13 @@
 
 ### 使用发行包
 
-**[下载完整套件 →](https://github.com/QianmoNai/Wireless-CAN-Analyzer/releases/tag/desktop-v1.0.0)**
+**[下载最新完整套件 →](https://github.com/QianmoNai/Wireless-CAN-Analyzer/releases/tag/suite-2026.11.05)** · [Gitee 国内下载](https://gitee.com/qianmonai/Wireless-CAN-Analyzer/releases/suite-2026.11.05)
 
-已发布的完整套件是一个固定版本快照，**版本与当前 `main` 源码不同**。需要 USB 直连、UART 等后续功能时，请使用对应的新版本源码构建；不要把下表历史包当成当前源码的运行包。
+本次完整套件包含固件 **1.24.2**、Android **1.21.0** 和 Desktop **1.2.4**（Windows / Linux x64）。各组件独立编号，下载后按 Release 中的 SHA256SUMS 校验。
 
-| 组件 | 已发布版本 | 下载与环境 |
-| --- | --- | --- |
-| Android | **1.20.0** | [APK](https://github.com/QianmoNai/Wireless-CAN-Analyzer/releases/download/desktop-v1.0.0/BLE-CAN-Scope-Android-1.20.0-debug.apk) · Android 8.0+，支持 BLE |
-| Linux 桌面端 | **1.0.0** | [TAR.GZ](https://github.com/QianmoNai/Wireless-CAN-Analyzer/releases/download/desktop-v1.0.0/CAN-Scope-Desktop-1.0.0-Linux-x64.tar.gz) · x64，Ubuntu 24.04 兼容运行库 |
-| Windows 桌面端 | **1.0.0** | [ZIP](https://github.com/QianmoNai/Wireless-CAN-Analyzer/releases/download/desktop-v1.0.0/CAN-Scope-Desktop-1.0.0-Windows-x64.zip) · Windows 10 / 11 x64 |
-| ESP32-S3 固件 | **1.21.0** | [烧录包](https://github.com/QianmoNai/Wireless-CAN-Analyzer/releases/download/desktop-v1.0.0/BLE-CAN-Scope-ESP32-S3-1.21.0.zip) · 本项目 ESP32-S3，4 MB Flash |
-| 文件校验 | 同次发行 | [SHA256SUMS](https://github.com/QianmoNai/Wireless-CAN-Analyzer/releases/download/desktop-v1.0.0/SHA256SUMS) |
+Android 需 Android 8.0+；Windows 支持 Windows 10 / 11 x64；Linux 桌面包以 Ubuntu 24.04 构建。桌面包完整解压后运行 `CAN-Scope` / `CAN-Scope.exe`，无需另装 Python。固件适用于本项目 ESP32-S3 / 4 MB Flash，按包内 README.txt 烧录。
 
-桌面包完整解压后运行 `CAN-Scope` / `CAN-Scope.exe`，无需另装 Python；固件按包内 `README.txt` 烧录。[Gitee 同步发行页](https://gitee.com/qianmonai/Wireless-CAN-Analyzer/releases/desktop-v1.0.0) 提供相同 APK 与固件，桌面分卷按附件说明合并。
-
-仓库当前为私有，下载需要有访问权限的账号。Android APK 使用开发签名，Windows 程序未代码签名；自行构建 APK 若因签名不同而需要卸载旧版，请先导出配置。
+仓库公开。Android APK 使用开发签名，Windows 程序未代码签名；若签名不同需要卸载旧版，请先导出配置。构建与自动测试通过不代表已完成全部实机兼容性、距离或持续吞吐验证，详见发行说明。
 
 ### 使用当前源码
 

@@ -9,6 +9,8 @@ void dual_link_request_mode(unsigned mode);
 bool dual_link_start(unsigned role);
 void dual_link_stop(void);
 void dual_link_set_owner(TaskHandle_t owner);
+// Physical UART output notification; the B test loopback queue does not use it.
+void dual_link_set_uart_owner(TaskHandle_t owner);
 void dual_link_button(int button);
 void dual_link_view(dual_view_t *out);
 bool dual_link_connected(void);

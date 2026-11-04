@@ -8,6 +8,16 @@
 #include "nvs.h"
 #include <stdatomic.h>
 
+#ifndef CAN_DUAL_UART_LOOPBACK_TEST
+#define CAN_DUAL_UART_LOOPBACK_TEST 0
+#endif
+#ifndef CAN_DUAL_UART_RETRY_MS
+#define CAN_DUAL_UART_RETRY_MS 25
+#endif
+#ifndef CAN_DUAL_UART_TTL_MS
+#define CAN_DUAL_UART_TTL_MS 1000
+#endif
+
 #define RADIO_QUEUE 24
 #define CAN_QUEUE 128
 #define UART_QUEUE 32
@@ -34,7 +44,7 @@ typedef struct {
 } candidate_t;
 static SemaphoreHandle_t lock;
 static QueueHandle_t radio_in, can_out, can_in, uart_out, uart_in, buttons;
-static TaskHandle_t worker, can_owner;
+static TaskHandle_t worker, can_owner, uart_owner;
 static atomic_bool accepting, radio_busy, requested_uart, reset_data;
 static bool live_uart;
 static atomic_uint uart_drop_count;
@@ -59,6 +69,7 @@ static void wake_worker(void) {
 static void purge(void) {
   atomic_store(&accepting, false);
   atomic_fetch_add(&generation, 1);
+  if (uart_owner) xTaskNotifyGive(uart_owner);
   atomic_fetch_add(&drop_count, uxQueueMessagesWaiting(can_out) +
                                     uxQueueMessagesWaiting(can_in) +
                                     (pending_type==DUAL_DATA?pending_count:0));
@@ -286,9 +297,17 @@ static void consume_radio(const radio_message_t *m, uint32_t now) {
     }
     uart_message_t chunk={.size=size,.created=now,.generation=atomic_load(&generation)};
     memcpy(chunk.data,plain,size);
-    if (xQueueSend(uart_in,&chunk,0)!=pdTRUE) return;
+    QueueHandle_t destination=uart_in;
+#if CAN_DUAL_UART_LOOPBACK_TEST
+    // Test B only: admit directly to the ordinary wireless TX queue. ACK only
+    // after admission, so congestion/retry/dedup/TTL retain their usual meaning.
+    // A still delivers the return bytes to its physical UART. No wire change.
+    if (role==DUAL_B) destination=uart_out;
+#endif
+    if (xQueueSend(destination,&chunk,0)!=pdTRUE) return;
     session.rx_sequence=seq;session.last_seen=now;ack_sequence=seq;
     atomic_fetch_add(&received_count,size);
+    if (destination==uart_in && uart_owner) xTaskNotifyGive(uart_owner);
     return;
   }
   if (live_uart) return;
@@ -358,22 +377,67 @@ static void prepare_can(uint32_t now) {
   attempts = 0;
   next_retry = 0;
 }
+static bool uart_prepare_current(uint32_t epoch) {
+  return session.online && live_uart && atomic_load(&requested_uart) &&
+         !atomic_load(&reset_data) && dual_link_connected() &&
+         epoch == atomic_load(&generation);
+}
 static void prepare_uart(uint32_t now) {
+  _Static_assert(DUAL_UART_CHUNK <= 190 && DUAL_UART_CHUNK + 60 <= DUAL_MAX_PACKET,
+                 "UART payload must fit the session and ESP-NOW packet limits");
   if (pending_size || !session.online) return;
-  uart_message_t m;
-  while (xQueueReceive(uart_out,&m,0)==pdTRUE) {
-    if (m.generation!=atomic_load(&generation) || (uint32_t)(now-m.created)>=DUAL_UART_TTL_MS) {
-      atomic_fetch_add(&uart_drop_count,m.size);continue;
+  const uint32_t epoch = atomic_load(&generation);
+  uart_message_t combined = {0}, next;
+  // Snapshot the work budget: never wait for, or chase, newly arriving bytes.
+  unsigned queued = uxQueueMessagesWaiting(uart_out);
+  while (queued-- && uart_prepare_current(epoch) &&
+         xQueuePeek(uart_out, &next, 0) == pdTRUE) {
+    // Peek leaves a non-fitting item at the head, preserving FIFO order.
+    // A generation boundary ends this packet even if later items match again.
+    if (combined.size && (next.generation != epoch ||
+                          next.size > DUAL_UART_CHUNK - combined.size))
+      break;
+    if (xQueueReceive(uart_out, &next, 0) != pdTRUE) break;
+    if (!uart_prepare_current(epoch)) {
+      atomic_fetch_add(&uart_drop_count, next.size);
+      break;
     }
-    if (session.tx_sequence==UINT32_MAX) {
-      atomic_fetch_add(&uart_drop_count,m.size);restore_bound();return;
+    if (next.generation != epoch || !next.size || next.size > DUAL_UART_CHUNK ||
+        (uint32_t)(now - next.created) >= CAN_DUAL_UART_TTL_MS) {
+      atomic_fetch_add(&uart_drop_count, next.size);
+      if (combined.size) break;
+      continue;
     }
-    pending_sequence=++session.tx_sequence;
-    pending_size=dual_session_encode(&session,DUAL_UART,pending_sequence,m.data,m.size,pending);
-    if (!pending_size) {atomic_fetch_add(&uart_drop_count,m.size);return;}
-    pending_type=DUAL_UART;pending_count=m.size;pending_at=m.created;attempts=0;next_retry=0;
+    if (!combined.size || (uint32_t)(now - next.created) >
+                          (uint32_t)(now - combined.created))
+      combined.created = next.created;
+    memcpy(combined.data + combined.size, next.data, next.size);
+    combined.size += next.size;
+    if (combined.size == DUAL_UART_CHUNK) break;
+  }
+  if (!combined.size) return;
+  if (!uart_prepare_current(epoch)) {
+    atomic_fetch_add(&uart_drop_count, combined.size);
     return;
   }
+  if (session.tx_sequence == UINT32_MAX) {
+    atomic_fetch_add(&uart_drop_count, combined.size);
+    restore_bound();
+    return;
+  }
+  pending_sequence = ++session.tx_sequence;
+  size_t encoded = dual_session_encode(&session, DUAL_UART, pending_sequence,
+                                      combined.data, combined.size, pending);
+  if (!encoded || !uart_prepare_current(epoch)) {
+    atomic_fetch_add(&uart_drop_count, combined.size);
+    return;
+  }
+  pending_type = DUAL_UART;
+  pending_count = combined.size;
+  pending_at = combined.created;
+  attempts = 0;
+  next_retry = 0;
+  pending_size = encoded;
 }
 static void tick(uint32_t now) {
   if (atomic_exchange(&reset_data,false) || live_uart!=atomic_load(&requested_uart)) {
@@ -421,9 +485,12 @@ static void tick(uint32_t now) {
     restore_bound();
   bool forwarding =
       bound && session.online && (!pair.active || pair_saved) && !show_unbind;
-  atomic_store(&accepting, forwarding);
+  bool was_forwarding=atomic_exchange(&accepting, forwarding);
+  // Admission can precede the online gate in this same radio turn. Re-wake
+  // output after opening the gate, so that earlier notification cannot be lost.
+  if (forwarding && !was_forwarding && uart_owner) xTaskNotifyGive(uart_owner);
   if (pending_size &&
-      ((uint32_t)(now - pending_at) >= (pending_type==DUAL_UART?DUAL_UART_TTL_MS:DUAL_FRAME_TTL_MS) ||
+      ((uint32_t)(now - pending_at) >= (pending_type==DUAL_UART?CAN_DUAL_UART_TTL_MS:DUAL_FRAME_TTL_MS) ||
        (attempts >= (pending_type==DUAL_UART?20:RETRIES) && (int32_t)(now - next_retry) >= 0))) {
     atomic_fetch_add(pending_type==DUAL_UART?&uart_drop_count:&drop_count, pending_count);
     pending_size = 0;
@@ -461,7 +528,7 @@ static void tick(uint32_t now) {
   if (pending_size && (!next_retry || (int32_t)(now - next_retry) >= 0) &&
       send_packet(record + 5, pending, pending_size)) {
     attempts++;
-    next_retry = now + RETRY_MS;
+    next_retry = now + (pending_type==DUAL_UART?CAN_DUAL_UART_RETRY_MS:RETRY_MS);
   }
 }
 static void task(void *arg) {
@@ -499,6 +566,7 @@ void dual_link_request_mode(unsigned mode) {
   if (atomic_exchange(&requested_role, wanted) != wanted) {
     atomic_store(&accepting, false);
     atomic_fetch_add(&generation, 1);
+    if (uart_owner) xTaskNotifyGive(uart_owner);
     wake_worker();
   }
 }
@@ -545,6 +613,7 @@ void dual_link_stop(void) {
   xSemaphoreGive(lock);
 }
 void dual_link_set_owner(TaskHandle_t owner) { can_owner = owner; }
+void dual_link_set_uart_owner(TaskHandle_t owner) { uart_owner = owner; }
 void dual_link_button(int value) {
   if (buttons && xQueueSend(buttons, &value, 0) == pdTRUE)
     wake_worker();
@@ -634,6 +703,7 @@ void dual_link_set_uart(bool enabled) {
   if (atomic_exchange(&requested_uart,enabled)!=enabled) {
     atomic_store(&accepting,false);
     atomic_fetch_add(&generation,1);
+    if (uart_owner) xTaskNotifyGive(uart_owner);
     wake_worker();
   }
 }
@@ -652,7 +722,7 @@ bool dual_link_uart_take(uint8_t *data,size_t *size) {
   uart_message_t m;
   while (xQueueReceive(uart_in,&m,0)==pdTRUE) {
     if (!atomic_load(&requested_uart) || !dual_link_connected() ||
-        m.generation!=atomic_load(&generation) || (uint32_t)(now_ms()-m.created)>=DUAL_UART_TTL_MS) {
+        m.generation!=atomic_load(&generation) || (uint32_t)(now_ms()-m.created)>=CAN_DUAL_UART_TTL_MS) {
       atomic_fetch_add(&uart_drop_count,m.size);continue;
     }
     memcpy(data,m.data,m.size);*size=m.size;return true;
@@ -660,4 +730,4 @@ bool dual_link_uart_take(uint8_t *data,size_t *size) {
   return false;
 }
 
-void dual_link_reset_data(void){atomic_store(&accepting,false);atomic_fetch_add(&generation,1);atomic_store(&reset_data,true);wake_worker();}
+void dual_link_reset_data(void){atomic_store(&accepting,false);atomic_fetch_add(&generation,1);atomic_store(&reset_data,true);if(uart_owner)xTaskNotifyGive(uart_owner);wake_worker();}

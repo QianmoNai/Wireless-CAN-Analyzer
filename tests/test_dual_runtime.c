@@ -2,6 +2,12 @@
 #include "dual_view.h"
 #include "sim.h"
 #include <stdio.h>
+#ifndef CAN_DUAL_UART_RETRY_MS
+#define CAN_DUAL_UART_RETRY_MS 25
+#endif
+#ifndef CAN_DUAL_UART_TTL_MS
+#define CAN_DUAL_UART_TTL_MS 1000
+#endif
 #define DECLARE(n)                                                             \
   bool dual_##n##_init(void);                                                  \
   bool dual_##n##_start(unsigned role);                                        \
@@ -12,6 +18,7 @@
   bool dual_##n##_connected(void);                                             \
   void dual_##n##_can_rx(const uint8_t p[20]);                                 \
   bool dual_##n##_can_take(uint8_t p[20]);                                     \
+  void dual_##n##_set_uart_owner(TaskHandle_t owner);                          \
   void dual_##n##_set_uart(bool enabled);                                      \
   void dual_##n##_reset_data(void);                                           \
   bool dual_##n##_uart_rx(const uint8_t *data,size_t size);                     \
@@ -25,7 +32,7 @@ static send_cb_t tx[2];
 static bool active[2];
 static const uint8_t macs[2][6] = {{2, 1, 2, 3, 4, 5}, {2, 1, 2, 3, 4, 6}};
 static uint8_t storage[2][48];
-static bool stored[2], fail_nvs[2], cut_radio;
+static bool stored[2], fail_nvs[2], cut_radio, cut_b_uart;
 static unsigned drop_ack;
 struct queue {
   unsigned count, limit;
@@ -34,6 +41,7 @@ struct queue {
 };
 static struct queue *queues[16];
 static unsigned queue_count;
+void (*sim_queue_after_receive)(QueueHandle_t q);
 QueueHandle_t xQueueCreate(unsigned n, size_t size) {
   struct queue *q = calloc(1, sizeof(*q));
   q->limit = n;
@@ -55,6 +63,13 @@ int xQueueReceive(QueueHandle_t q, void *p, unsigned wait) {
     return 0;
   memcpy(p, q->data, q->size);
   memmove(q->data, q->data + q->size, --q->count * q->size);
+  if (sim_queue_after_receive) sim_queue_after_receive(q);
+  return 1;
+}
+int xQueuePeek(QueueHandle_t q, void *p, unsigned wait) {
+  assert(wait == 0);
+  if (!q->count) return 0;
+  memcpy(p, q->data, q->size);
   return 1;
 }
 void xQueueReset(QueueHandle_t q) { q->count = 0; }
@@ -77,7 +92,11 @@ int xTaskCreate(void (*f)(void *), const char *n, unsigned st, void *a,
   *h = (void *)1;
   return 1;
 }
-void xTaskNotifyGive(TaskHandle_t t) { (void)t; }
+static unsigned uart_wakes[2];
+void xTaskNotifyGive(TaskHandle_t t) {
+  if(t==(void*)2)uart_wakes[0]++;
+  if(t==(void*)3)uart_wakes[1]++;
+}
 unsigned ulTaskNotifyTake(int c, unsigned w) {
   (void)c;
   (void)w;
@@ -131,6 +150,8 @@ int esp_now_send(const uint8_t *mac, const uint8_t *p, size_t n) {
   assert(n <= 250 && !air[current].pending);
   transmissions[p[4]]++;
   bool drop = cut_radio;
+  if (cut_b_uart && current == 1 && p[4] == DUAL_UART)
+    drop = true;
   if (p[4] == DUAL_ACK && drop_ack) {
     drop = true;
     drop_ack--;
@@ -355,8 +376,97 @@ int main(void) {
   // Typed UART packets preserve binary bytes and cannot enter the CAN queue.
   current=0;dual_a_set_uart(true);current=1;dual_b_set_uart(true);ticks(1600);
   assert(dual_a_connected()&&dual_b_connected());
+  void dual_a_test_uart_coalescing(void);
+  current=0;dual_a_test_uart_coalescing();
   uint8_t serial[DUAL_UART_CHUNK],received_serial[DUAL_UART_CHUNK];size_t serial_size=0;
   for(unsigned i=0;i<sizeof(serial);i++)serial[i]=(uint8_t)i;
+  // Exercise merged packets through real encryption, ACK loss/retry and dedup.
+  uint8_t stream[192];for(unsigned i=0;i<sizeof(stream);i++)stream[i]=(uint8_t)i;
+  dual_a_set_uart_owner((void*)2);dual_b_set_uart_owner((void*)3);
+  unsigned wakes_a=uart_wakes[0],wakes_b=uart_wakes[1];
+  void dual_a_test_uart_online_wake(void);
+  current=0;dual_a_test_uart_online_wake();
+  assert(uart_wakes[0]==wakes_a+1 && uart_wakes[1]==wakes_b);
+  assert(dual_a_uart_take(received_serial,&serial_size) && serial_size==3 &&
+         received_serial[0]==1 && received_serial[1]==2 && received_serial[2]==3);
+  dual_a_tick();assert(uart_wakes[0]==wakes_a+1);
+  wakes_a=uart_wakes[0];
+  unsigned merged_before=transmissions[DUAL_UART];
+  drop_ack=1;current=0;
+  for(unsigned i=0;i<3;i++)assert(dual_a_uart_rx(stream+i*64,64));
+  ticks(120);
+#if CAN_DUAL_UART_LOOPBACK_TEST
+  assert(uart_wakes[0]>wakes_a && uart_wakes[1]==wakes_b);
+#else
+  assert(uart_wakes[0]==wakes_a && uart_wakes[1]>wakes_b);
+#endif
+#if CAN_DUAL_UART_LOOPBACK_TEST
+  current=0;
+#else
+  current=1;
+#endif
+  unsigned stream_size=0;
+  while(current==0 ? dual_a_uart_take(received_serial,&serial_size) :
+                    dual_b_uart_take(received_serial,&serial_size)) {
+    assert(stream_size+serial_size<=sizeof(stream));
+    assert(!memcmp(stream+stream_size,received_serial,serial_size));
+    stream_size+=serial_size;
+  }
+  assert(stream_size==sizeof(stream) && transmissions[DUAL_UART]>=merged_before+3);
+#if CAN_DUAL_UART_LOOPBACK_TEST
+  // A remains a physical-UART endpoint even when built with the test switch.
+  // B echoes a full binary chunk through the real encrypted/reliable runtime.
+  current=0;assert(dual_a_uart_rx(serial,sizeof(serial)));ticks(80);
+  current=1;assert(!dual_b_uart_take(received_serial,&serial_size));
+  current=0;assert(dual_a_uart_take(received_serial,&serial_size)&&serial_size==sizeof(serial)&&!memcmp(serial,received_serial,serial_size));
+  assert(!dual_a_uart_take(received_serial,&serial_size));
+  // Losing the initial ACK must not echo the same payload twice.
+  unsigned uart_before=transmissions[DUAL_UART];
+  drop_ack=1;assert(dual_a_uart_rx(serial,37));ticks(100);
+  assert(transmissions[DUAL_UART]>=uart_before+3);
+  current=0;assert(dual_a_uart_take(received_serial,&serial_size)&&serial_size==37&&!memcmp(serial,received_serial,37));
+  assert(!dual_a_uart_take(received_serial,&serial_size));
+  current=1;assert(!dual_b_uart_take(received_serial,&serial_size));
+  assert(!take(0,p)&&!take(1,p));
+  // A full echo TX queue withholds ACK (and does not advance RX sequence).
+  // Once the return radio recovers, the retry is admitted and echoed once.
+  cut_b_uart=true;
+  uint8_t filler=0xa5;
+  current=1;assert(dual_b_uart_rx(&filler,1));ticks(2);
+  current=1;
+  for(unsigned i=0;i<32;i++)assert(dual_b_uart_rx(&filler,1));
+  assert(!dual_b_uart_rx(&filler,1));
+  unsigned received_before=view(1).received;
+  current=0;assert(dual_a_uart_rx(serial,37));ticks(80);
+  assert(view(1).received==received_before);
+  cut_b_uart=false;
+  unsigned returned=0;
+  uint8_t expected[70];memset(expected,filler,33);memcpy(expected+33,serial,37);
+  for(unsigned i=0;i<200;i++){
+    ticks(2);current=0;
+    while(dual_a_uart_take(received_serial,&serial_size)){
+      assert(returned+serial_size<=sizeof(expected));
+      assert(!memcmp(expected+returned,received_serial,serial_size));returned+=serial_size;
+    }
+  }
+  assert(returned==sizeof(expected) && view(1).received==received_before+37);
+#else
+  // Check the actual UART retry boundary, then receive-side TTL expiry.
+  current=0;
+  unsigned retry_before=transmissions[DUAL_UART];
+  drop_ack=1;assert(dual_a_uart_rx(serial,37));
+  ticks(CAN_DUAL_UART_RETRY_MS);
+  assert(transmissions[DUAL_UART]==retry_before+1);
+  ticks(1);
+  assert(transmissions[DUAL_UART]==retry_before+2);
+  ticks(10);current=1;
+  assert(dual_b_uart_take(received_serial,&serial_size)&&serial_size==37);
+  assert(!dual_b_uart_take(received_serial,&serial_size));
+  current=0;assert(dual_a_uart_rx(serial,37));ticks(20);
+  unsigned expiry_before=dual_b_uart_dropped();
+  ticks(CAN_DUAL_UART_TTL_MS);current=1;
+  assert(!dual_b_uart_take(received_serial,&serial_size));
+  assert(dual_b_uart_dropped()==expiry_before+37);
   current=0;assert(dual_a_uart_rx(serial,sizeof(serial)));
   current=1;assert(dual_b_uart_rx(serial,13));ticks(40);
   current=1;assert(dual_b_uart_take(received_serial,&serial_size)&&serial_size==sizeof(serial)&&!memcmp(serial,received_serial,serial_size));
@@ -365,8 +475,11 @@ int main(void) {
   drop_ack=1;current=0;assert(dual_a_uart_rx(serial,37));ticks(80);
   current=1;assert(dual_b_uart_take(received_serial,&serial_size)&&serial_size==37);
   assert(!dual_b_uart_take(received_serial,&serial_size));
+#endif
+  wakes_a=uart_wakes[0];wakes_b=uart_wakes[1];
   current=0;assert(dual_a_uart_rx(serial,20));dual_a_set_uart(false);
   current=1;dual_b_set_uart(false);ticks(1600);
+  assert(uart_wakes[0]>wakes_a && uart_wakes[1]>wakes_b);
   assert(!take(1,p));current=1;assert(!dual_b_uart_take(received_serial,&serial_size));
   input(0,0x601,0,8);ticks(40);assert(take(1,p)&&dual_u32(p+4)==0x601);
   // Leaving the management page must not tear down an established bridge.
