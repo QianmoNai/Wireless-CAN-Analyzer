@@ -154,3 +154,27 @@ TLS WANT为0不代表TLS写调用无内部耗时；P0调用累计/最大另列�
 最后old16/0a1f3c1（SHA256 c533b413e031e2d92321763eb4f9549ca203ae9fb4a1672e04c4cc825fc1b66a）于08:51:43独立verify成功并保留；恢复后没有另做TLS门槛、串口QUERY或负载，不冒称复位后立即TLS就绪。串口、TCP及测试进程全部关闭；无网络设置、BLE、CAN TX、sudo、NVS擦除或push。3项空载观测离线单元测试、外部副本py_compile、八样本一致性断言及diff检查通过。仓库只记文档，不提交原始日志/镜像/外部脚本/秘密。
 
 完整比较、就绪时长、所有P0层计数与限制追加于`~/grokbot/wifi-uart-p5-result.md`第9节，安全原始证据在`~/grokbot/wifi-uart-p5-ready-hardware/`。按授权做到这里停止。
+
+
+## 测试环境前提与烧录后的就绪门槛
+
+被测设备所在的同一局域网/广播域只能有一个DHCP服务器。经用户确认，此次测试环境的问题是PC网口的NetworkManager shared与路由器DHCP并存，导致设备地址漂移和丢包；后续由用户将enp3s0改为DHCP客户端，取消PC侧10.42共享/DHCP，设备与PC统一接入路由器提供地址的192.168.1.0/24，才进行新的匹配路径对照。本轮仅记录该环境结论，不修改PC或路由器网络。
+
+本次有效对照路径是PC enp3s0 192.168.1.131→路由器→ESP32 192.168.1.221（STA MAC90:da:72:73:72:2c），默认上网仍走wlan0。每轮开始前后核对目标IP、MAC、路由出口和源地址；路径不一致则停止，不能混用旧10.42网段或wlan0路径的数据。保留现有32 quarter-dBm发射功率限制、NODELAY=0及控制/协议/池/reserve配置。
+
+每次烧录并独立verify-flash后，先运行`scripts/wifi-tls-check.py`做单次空载连接：以约30秒为首个时点，之后每60秒一次，不在失败后立即补连。只有连续3次完整固定证书TLS认证、QUERY和P0成功且PC TCP_INFO重传为0，才开始UART负载；失败或UDP身份预检未通过均将连续成功计数清零。记录boot_id、设备P0实读uptime及达标所用主机时间，不用固定“启动后30秒”代替就绪验证。30分钟仍未就绪则记未就绪并跳过该档负载，不通过重试拼凑结果。
+
+曾在一次重启后约16分钟的观察窗口内看到TLS握手不通、随后恢复的现象，保留为**待查问题**。当时是离散采样，不能证明整个窗口每一秒都失败，且verify日志推算的开机时长与P0实读约差62秒，不能据此规定精确恢复阈值；后来未再复现同样约16分钟的持续异常。后续b16约154秒、b32/b64约274秒即通过门槛，说明“必须等16分钟”不是已证实的启动规律。双DHCP环境问题与该TLS现象分别记录，不能仅凭先后关联认定其内部机制；不擅自修改握手超时或固件参数。
+
+收尾选择已实测的新b16镜像`wifi-uart-p5-b16-b852aa9-app.bin`，仍仅app@0x10000写入且独立校验，不擦NVS；过相同门槛后只做一次USB只读QUERY确认Wi-Fi/UART/115200，不运行负载、不打开CH340。当前main固件源码与b852aa9相同，源码默认16帧/NODELAY=0；旧构建缓存若曾指定32/64或NODELAY=ON，必须检查缓存，不能把缓存覆盖值称为源码默认值。最终构建/设备验收/提交审查证据另记`~/grokbot/wifi-uart-p5-prepush-checklist.md`；不执行push，不rebase或squash既有提交。
+
+
+### 2026-11-04 本地收尾验收（尚未推送）
+
+设备已切换至既有b16/b852aa9镜像（1129488 B，SHA256 `11cb9e42655bd8f98a154c4cce96343e00efc6e24641a0b4c4eb91d220bf9374`），只写app@0x10000，写后hash及独立verify-flash均通过，不擦NVS。就绪序列为TLS超时、UDP身份预检未回复、随后连续3次完整成功且零PC TCP重传；三个成功时点P0实读uptime为154.103/214.108/274.107秒，verify结束至门槛完成274.549秒。最终USB只读QUERY为result=0/network_mode=1/data_mode=1/baudrate=115200。没有负载、CH340打开或网络配置改动，所有TLS和串口已关闭，设备保留b16。
+
+完整桌面单元测试124项通过，`bash scripts/test-host.sh`全套C/Python/Node/Java回归通过（含60秒共享UART渲染测试及本机回环TLS）；ESP-IDF v6.0.2在仓库外全新目录的`bash firmware/idf.sh app`默认构建通过，大小1126448 B，适配2 MiB app分区。第一次桌面运行因umask077影响权限测试失败，普通umask022重跑全套通过；第一次构建缺ESP_IDF_VERSION，补齐6.0.2后通过。未为通过测试修改任何测试或生产代码，首次记录保留在仓库外。
+
+HEAD的firmware树与b852aa9完全一致，fresh CMake缓存确认TLS_BATCH=16、TCP_NODELAY=OFF、PANEL_BENCHMARK=OFF。但**全新默认构建与既有b16完整配置不完全一致**：仓库sdkconfig.defaults.esp32s3关闭控制台（CONFIG_ESP_CONSOLE_NONE=y），b16既有sdkconfig启用了USB Serial/JTAG控制台；共6个控制台及派生配置键不同。IDF v6.0.2、esp32s3、DIO/40m/4MB及分区表相同。fresh app SHA256为`3a651a68ccf932b967dbfbb25976c23199d380c8f62d7aae8194b46dac5ae910`，不等于b16；除控制台配置外构建时间、Git版本和构建目录也不同，不能仅凭差异归因全部二进制变化。没有擅自修默认配置、替换既有镜像或烧入fresh app。批次/NODELAY默认确认一致，完整镜像不能冒称一致。
+
+本轮只补文档。检查8de4589之后每个本地提交涉及的历史文件版本，未发现镜像、构建产物、原始日志或真实密码/私钥/令牌提交；认证代码中的字段名和测试用合成数据不等于真实凭据。扫描不打开用户secret或密码文件。推送前完整hash＋标题清单、测试日志位置、配置差异与设备验收见`~/grokbot/wifi-uart-p5-prepush-checklist.md`。保留已有历史，不rebase/squash/force，不push；远端状态仅引用现有本地跟踪引用，不声称已在线同步。
