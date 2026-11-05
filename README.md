@@ -129,9 +129,9 @@ Android 需 Android 8.0+；Windows 支持 Windows 10 / 11 x64；Linux 桌面包�
 
 | 组件 | 源码版本 | 入口 |
 | --- | --- | --- |
-| ESP32-S3 固件 | **1.24.4** | [构建与烧录](#build) |
+| ESP32-S3 固件 | **1.24.5** | [构建与烧录](#build) |
 | Android App | **1.21.5** | [Android 构建](#build-android) |
-| CAN Scope Desktop | **1.2.15** | [桌面使用说明](desktop/README.md) |
+| CAN Scope Desktop | **1.2.16** | [桌面使用说明](desktop/README.md) |
 
 这些源码版本尚未包含在上方完整发行套件中。新增 CAN 批量接收、首页摘要和曲线开销优化；Android 修复局域网发现重试、TLS 断开闪退及返回操作；桌面修复 USB 取消清理竞态；固件增加物理 USB 自主配对并修复双机队列误判过期。具体实机条件、有效结果与未通过的候选见 [性能与验证记录](docs/PERFORMANCE.md)。双路模拟器源码见 [STM32H723 台架](fixtures/stm32-h723/README.md)。
 

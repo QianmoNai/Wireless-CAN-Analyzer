@@ -50,6 +50,12 @@ static bool live_uart;
 static atomic_uint uart_drop_count;
 static atomic_uint requested_role, live_role;
 static atomic_uint generation, drop_count, sent_count, received_count;
+// Lifetime diagnostics distinguish expiry, retry loss and local congestion.
+// Counts are observations, not extra retries or permission to replay old CAN.
+enum { CAN_QUEUE_EXPIRED, CAN_PENDING_EXPIRED, CAN_RETRIES_EXHAUSTED,
+       RADIO_SEND_FAILED, RADIO_SUBMIT_REJECTED, CAN_DELIVERY_EXPIRED,
+       RADIO_QUEUE_FULL, CAN_QUEUE_FULL, CAN_ADMISSION_EXPIRED, DIAG_COUNT };
+static atomic_uint diagnostics[DIAG_COUNT];
 static uint8_t mac[6], role, record[48];
 static bool running, bound, pair_saved, clear_selected, show_unbind, show_error;
 static candidate_t candidates[CANDIDATES];
@@ -93,7 +99,15 @@ static bool add_peer(const uint8_t address[6]) {
   esp_now_peer_info_t peer = {
       .channel = DUAL_CHANNEL, .ifidx = WIFI_IF_STA, .encrypt = false};
   memcpy(peer.peer_addr, address, 6);
-  return esp_now_add_peer(&peer) == ESP_OK;
+  if (esp_now_add_peer(&peer) != ESP_OK) return false;
+#if defined(CAN_DUAL_RATE_6M) && CAN_DUAL_RATE_6M
+  esp_now_rate_config_t rate = {.phymode=WIFI_PHY_MODE_11G,.rate=WIFI_PHY_RATE_6M};
+  if (esp_now_set_peer_rate_config(address,&rate) != ESP_OK) {
+    esp_now_del_peer(address);
+    return false;
+  }
+#endif
+  return true;
 }
 static bool send_packet(const uint8_t address[6], const uint8_t *data,
                         size_t n) {
@@ -101,6 +115,7 @@ static bool send_packet(const uint8_t address[6], const uint8_t *data,
     return false;
   atomic_store(&radio_busy, true);
   if (esp_now_send(address, data, n) != ESP_OK) {
+    atomic_fetch_add(&diagnostics[RADIO_SUBMIT_REJECTED], 1);
     atomic_store(&radio_busy, false);
     return false;
   }
@@ -113,14 +128,17 @@ static void received(const esp_now_recv_info_t *info, const uint8_t *data,
   radio_message_t m = {.size = len};
   memcpy(m.mac, info->src_addr, 6);
   memcpy(m.data, data, len);
-  if (xQueueSend(radio_in, &m, 0) != pdTRUE)
+  if (xQueueSend(radio_in, &m, 0) != pdTRUE) {
+    atomic_fetch_add(&diagnostics[RADIO_QUEUE_FULL], 1);
     atomic_fetch_add(&drop_count, 1);
+  }
   wake_worker();
 }
 static void sent(const esp_now_send_info_t *info,
                  esp_now_send_status_t status) {
   (void)info;
-  (void)status;
+  if (status != ESP_NOW_SEND_SUCCESS)
+    atomic_fetch_add(&diagnostics[RADIO_SEND_FAILED], 1);
   atomic_store(&radio_busy, false);
   wake_worker();
 }
@@ -356,6 +374,8 @@ static void prepare_can(uint32_t now) {
     now = now_ms();
     if (m.generation != atomic_load(&generation) ||
         (uint32_t)(now - m.created) >= DUAL_FRAME_TTL_MS) {
+      if (m.generation == atomic_load(&generation))
+        atomic_fetch_add(&diagnostics[CAN_QUEUE_EXPIRED], 1);
       atomic_fetch_add(&drop_count, 1);
       continue;
     }
@@ -501,6 +521,9 @@ static void tick(uint32_t now) {
   if (pending_size &&
       ((uint32_t)(now - pending_at) >= (pending_type==DUAL_UART?CAN_DUAL_UART_TTL_MS:DUAL_FRAME_TTL_MS) ||
        (attempts >= (pending_type==DUAL_UART?20:RETRIES) && (int32_t)(now - next_retry) >= 0))) {
+    if (pending_type == DUAL_DATA)
+      atomic_fetch_add(&diagnostics[(uint32_t)(now-pending_at)>=DUAL_FRAME_TTL_MS
+                        ? CAN_PENDING_EXPIRED : CAN_RETRIES_EXHAUSTED], pending_count);
     atomic_fetch_add(pending_type==DUAL_UART?&uart_drop_count:&drop_count, pending_count);
     pending_size = 0;
     pending_count = 0;
@@ -625,10 +648,10 @@ void dual_link_stop(void) {
 }
 
 int dual_link_usb_command(const uint8_t p[20], uint8_t out[20]) {
-  if (p[0]!=1 || p[1]!=DUAL_USB_COMMAND || p[2]>6 || p[10] || p[11] ||
+  if (p[0]!=1 || p[1]!=DUAL_USB_COMMAND || p[2]>9 || p[10] || p[11] ||
       !dual_u32(p+16)) return 0x13;
   unsigned op=p[2]; uint32_t token=dual_u32(p+16), code=dual_u32(p+12);
-  bool read=op==0 || op==5 || op==6;
+  bool read=op==0 || op>=5;
   static const uint8_t zero[6]={0};
   if ((read && (p[3] || memcmp(p+4,zero,6) || code)) ||
       (!read && (p[3]<DUAL_A || p[3]>DUAL_B || (p[4]&1) ||
@@ -679,6 +702,10 @@ int dual_link_usb_command(const uint8_t p[20], uint8_t out[20]) {
     dual_put32(out+8,atomic_load(&received_count));
     dual_put32(out+12,atomic_load(&drop_count));
   }
+  if (op>=7) {
+    for (unsigned i=0;i<3;++i)
+      dual_put32(out+4+4*i,atomic_load(&diagnostics[(op-7)*3+i]));
+  }
   dual_put32(out+16,token);
   xSemaphoreGive(lock);wake_worker();return result;
 }
@@ -700,6 +727,7 @@ void dual_link_can_rx(const uint8_t p[20]) {
   can_message_t m = {.created = dual_u32(p + 16),
                      .generation = atomic_load(&generation)};
   if ((uint32_t)(now_ms() - m.created) >= DUAL_FRAME_TTL_MS) {
+    atomic_fetch_add(&diagnostics[CAN_ADMISSION_EXPIRED], 1);
     atomic_fetch_add(&drop_count, 1);
     return;
   }
@@ -708,8 +736,12 @@ void dual_link_can_rx(const uint8_t p[20]) {
   memcpy(m.data + 2, p + 4, 4);
   if (!(p[2] & 2))
     memcpy(m.data + 6, p + 8, p[3] <= 8 ? p[3] : 8);
-  if (!dual_can_valid(m.data) || xQueueSend(can_out, &m, 0) != pdTRUE)
+  if (!dual_can_valid(m.data))
     atomic_fetch_add(&drop_count, 1);
+  else if (xQueueSend(can_out, &m, 0) != pdTRUE) {
+    atomic_fetch_add(&diagnostics[CAN_QUEUE_FULL], 1);
+    atomic_fetch_add(&drop_count, 1);
+  }
   else
     wake_worker();
 }
@@ -720,6 +752,8 @@ bool dual_link_can_take(uint8_t p[20]) {
   while (xQueueReceive(can_in, &m, 0) == pdTRUE) {
     if (!dual_link_connected() || m.generation != atomic_load(&generation) ||
         (uint32_t)(now_ms() - m.created) >= DUAL_FRAME_TTL_MS) {
+      if (dual_link_connected() && m.generation == atomic_load(&generation))
+        atomic_fetch_add(&diagnostics[CAN_DELIVERY_EXPIRED], 1);
       atomic_fetch_add(&drop_count, 1);
       continue;
     }

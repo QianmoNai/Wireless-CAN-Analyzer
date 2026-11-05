@@ -8,6 +8,7 @@ Run after dual-can-pair.py --keep-dual. Always attempts USB+CAN restoration.
 import argparse
 import asyncio
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import re
@@ -117,6 +118,46 @@ class Fixture:
                                 destination_state=self.read(dest,13))
         raise TimeoutError('Expected frame not observed on destination physical CAN')
 
+    def transfer_pair(self,identifier,dlc,flags,sequence):
+        """Start both physical controllers without waiting for either delivery."""
+        bases=[self.symbols['can_bench']+bus*52 for bus in range(2)]
+        before=[self.read(base+48)[0] for base in bases]
+        frames=[]
+        remote=bool(flags&2)
+        for bus,base in enumerate(bases):
+            data=bytes(8) if remote else bytes((sequence*17+bus*61+i*29)&255 for i in range(dlc))+bytes(8-dlc)
+            frame=struct.pack('<IBB8sBB',identifier,flags&1,dlc,data,int(remote),0)
+            frames.append(frame)
+            self.write(base,list(struct.unpack('<IIII',frame)))
+        self.active_case=dict(simultaneous=True,id=hex(identifier),dlc=dlc,flags=flags,
+                              expected_frames=[frame.hex() for frame in frames])
+        started=time.monotonic()
+        for base in bases:
+            self.write(base+16,[sequence])
+        rows=[None,None]
+        while time.monotonic()-started<2:
+            for bus in range(2):
+                state=self.read(bases[bus]+20,3)
+                if state[0]!=sequence:
+                    continue
+                if state[1]:
+                    raise RuntimeError('STM32 CAN enqueue failed')
+                dest=1-bus
+                actual=struct.pack('<IIII',*self.read(bases[dest]+32,4))
+                count=self.read(bases[dest]+48)[0]
+                if count>before[dest] and actual[:15]==frames[bus][:15]:
+                    if count!=before[dest]+1:
+                        raise RuntimeError('Unexpected extra/duplicate simultaneous delivery')
+                    if rows[bus] is None:
+                        rows[bus]=dict(direction=f'{bus+1}->{2-bus}',id=hex(identifier),dlc=dlc,
+                                       flags=flags,exact_frame=True,received_delta=1,simultaneous=True,
+                                       observer_upper_bound_ms=round((time.monotonic()-started)*1000,3))
+            if all(rows):
+                return rows
+            time.sleep(.005)
+        self.active_case['states']=[self.read(base,13) for base in bases]
+        raise TimeoutError('Simultaneous frame not observed on destination physical CAN')
+
 
 def main():
     ap=argparse.ArgumentParser(description=__doc__)
@@ -126,6 +167,8 @@ def main():
     ap.add_argument('--b',required=True)
     ap.add_argument('--output',type=Path,required=True)
     ap.add_argument('--repeat',type=int,default=1,help='Repeat the 50-case physical matrix (1..100)')
+    ap.add_argument('--simultaneous',action='store_true',help='Start both controllers before awaiting physical delivery')
+    ap.add_argument('--connect-stored',action='store_true',help='Quiet fixture first, then enter A/B mode with the saved binding')
     args=ap.parse_args()
     if not 1<=args.repeat<=100:
         ap.error('--repeat must be 1..100')
@@ -141,13 +184,47 @@ def main():
         fixture.quiet(0)
         time.sleep(.3)
         report['dual_before']=[]
+        report['diagnostics_before']=[]
+        identities=[]
         for device in [args.a,args.b]:
+            usb=LocalUsb(device)
+            try:
+                identities.append(usb.identity())
+            finally:
+                usb.close()
+        if identities[0]==identities[1]:
+            raise ValueError('Two independent USB identities are required')
+        report['identities']=[m.hex(':') for m in identities]
+        if args.connect_stored:
+            spec=importlib.util.spec_from_file_location('pair_setup',Path(__file__).with_name('dual-can-pair.py'))
+            pairing=importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(pairing)
+            asyncio.run(pairing.select(args.b,3))
+            asyncio.run(pairing.select(args.a,2))
+            deadline=time.monotonic()+15
+            while True:
+                online=[]
+                for device in [args.a,args.b]:
+                    usb=LocalUsb(device)
+                    try:
+                        online.append(usb.dual()['state']==3)
+                    finally:
+                        usb.close()
+                if all(online):
+                    break
+                if time.monotonic()>=deadline:
+                    raise TimeoutError('Stored dual binding did not reconnect')
+                time.sleep(.1)
+        for index,device in enumerate([args.a,args.b]):
             usb=LocalUsb(device)
             try:
                 state=usb.dual()
                 if state['state']!=3 or not state['bound'] or state['uart']:
                     raise RuntimeError('Both devices must be paired and online in CAN mode')
+                if state['role']!=index+2 or state['peer']!=identities[1-index]:
+                    raise RuntimeError('Stored peer/role differs from the attached fixture')
                 report['dual_before'].append(usb.dual(6))
+                report['diagnostics_before'].append(usb.diagnostics())
             finally:
                 usb.close()
         sequence=secrets.randbelow(0xffff)+1
@@ -155,6 +232,14 @@ def main():
         vectors+=[(0,0,0),(0x7ff,8,0),(0x1fffffff,8,1),
                   (0x610,0,2),(0x611,8,2),(0x1abcd00,0,3),(0x1abcd01,8,3)]
         for repeat in range(args.repeat):
+            if args.simultaneous:
+                for identifier,dlc,flags in vectors:
+                    sequence+=1
+                    rows=fixture.transfer_pair(identifier,dlc,flags,sequence)
+                    for row in rows:
+                        row['round']=repeat+1
+                        report['cases'].append(row)
+                continue
             for bus in range(2):
                 for identifier,dlc,flags in vectors:
                     sequence+=1
@@ -162,6 +247,13 @@ def main():
                     row['round']=repeat+1
                     report['cases'].append(row)
         report['after']=fixture.health()
+        report['diagnostics_after']=[]
+        for device in [args.a,args.b]:
+            usb=LocalUsb(device)
+            try:
+                report['diagnostics_after'].append(usb.diagnostics())
+            finally:
+                usb.close()
         if any(report['after'].values()):
             raise RuntimeError('Fixture CAN error during physical delivery')
         expected=len(vectors)*args.repeat
@@ -190,10 +282,12 @@ def main():
             try:
                 report['failure_health']=fixture.health()
                 report['dual_failure']=[]
+                report['diagnostics_failure']=[]
                 for device in [args.a,args.b]:
                     usb=LocalUsb(device)
                     try:
                         report['dual_failure'].append(usb.dual(6))
+                        report['diagnostics_failure'].append(usb.diagnostics())
                     finally:
                         usb.close()
             except Exception as capture_error:
@@ -217,4 +311,6 @@ def main():
 
 
 if __name__=='__main__':
-    main()
+    from hardware_bench_lock import hardware_bench_lock
+    with hardware_bench_lock():
+        main()

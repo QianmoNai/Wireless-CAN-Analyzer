@@ -22,6 +22,7 @@ if not 5 <= a.seconds <= 300:
 root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(root / 'desktop'))
 from can_scope.connection_store import connection_folder, load_connection
+from hardware_bench_lock import hardware_bench_lock
 saved = load_connection(a.profile_folder / f'connection-{a.channel}.json')
 spec = importlib.util.spec_from_file_location('can_bench', root / 'scripts/test-can-hardware.py')
 bench = importlib.util.module_from_spec(spec)
@@ -31,87 +32,88 @@ a.output.parent.mkdir(parents=True, exist_ok=True)
 
 def save():
     a.output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n')
-try:
-    asyncio.run(bench.select(a.port, a.mode))
-    if a.mode == 'wifi':
-        time.sleep(10)
-        from can_scope.transports import discover
-        found = []
-        asyncio.run(discover(saved['id'], found.append))
-        if len(found) != 1:
-            raise RuntimeError('Expected one discovered IP for the physical analyzer identity')
-        saved['ip'] = found[0]['address'].removeprefix('wifi:')
-    source = ast.parse((root / 'desktop/tests/can_render_hardware.py').read_text())
-    setup = next((ast.literal_eval(n.value) for n in source.body if isinstance(n, ast.Assign) and any((isinstance(t, ast.Name) and t.id == 'setup' for t in n.targets))))
-    with sync_playwright() as pw:
-        b = pw.chromium.connect_over_cdp(a.cdp, no_defaults=True)
-        pages = [page for c in b.contexts for page in c.pages]
-        page = next((page for page in pages if page.url.startswith('https://app.local/' if a.channel == 1 else f'https://channel-{a.channel}.local/')))
-        home = next((page for page in pages if '/home.html' in page.url))
-        page.on('pageerror', lambda e: report['js_errors'].append(str(e)))
-        try:
-            home.evaluate('(channel)=>HomeAndroid.openChannel(channel)', a.channel)
-            page.wait_for_function('innerWidth>0')
-            if page.evaluate('watchedMotors.length') == 0:
-                page.evaluate(setup)
-            else:
-                page.evaluate("window.perf={batch:[],draw:[],stream:[],long:[],raf:[]};const timedDraw=drawDetail;drawDetail=()=>{let t=performance.now();timedDraw();perf.draw.push(performance.now()-t)};showTab('live')")
-            page.evaluate("()=>{window.nativeErrors=[];window.telemetryEvents=[];window.rawReceived=0;const original=onNative;onNative=(k,d)=>{original(k,d);if(k==='error')nativeErrors.push(d.message);if(k==='packets')for(const item of d.items||[]){const bytes=parsePacket(item.hex||item);if(bytes&&bytes[1]===1)rawReceived++;}if(k==='telemetryMode')telemetryEvents.push({mode:d.mode,hz:d.hz,at:performance.now()})}}")
-            if a.mode == 'ble':
-                page.evaluate("invoke('connectionMode','ble');invoke('scan')")
-                page.wait_for_function('(address)=>deviceMap.has(address)', arg=saved['address'], timeout=25000)
-                page.evaluate("address=>invoke('connect',address)", saved['address'])
-            else:
-                page.evaluate("ip=>invoke('connectLan',ip)", saved['ip'])
-            page.wait_for_function('connected', timeout=30000)
-            page.evaluate("closeDevices();showTab('live')")
-            page.wait_for_function('gotStatus', timeout=10000)
-            report['initial_device_drops'] = page.evaluate('firmwareDrops')
-            for name, action in [('raw', None), ('dji-detail', 'dashboardOpen(JSON.stringify(watchedMotors[0].config))'), ('imu-detail', 'dashboardOpen(JSON.stringify(watchedMotors[7].config))'), ('dm-detail', 'dashboardOpen(JSON.stringify(watchedMotors[3].config));setMotorPolling(JSON.stringify(watchedMotors[3].config),true)'), ('pause-filter', "showTab('live');togglePause();$('filter').value='201';renderFrames()"), ('home', "togglePause();$('filter').value='';showTab('motor')")]:
-                if action:
-                    page.evaluate(action)
-                if name == 'home':
-                    page.wait_for_function('telemetryEvents.at(-1)?.mode===1', timeout=5000)
-                    page.wait_for_timeout(1000)
-                    report['home_raw_before'] = page.evaluate('rawReceived')
-                page.evaluate('for(const key in perf)perf[key]=[]')
-                page.wait_for_timeout(a.seconds * 1000)
-                row = page.evaluate("({connected,appDrops,firmwareDrops,rawReceived,telemetryEvents:[...telemetryEvents],frames:frames.length,errors:[...nativeErrors],roster:dashboardSnapshot(),detail:detailMotor?{ready:detailReady,count:detailSamples.length,values:detailMotor.feedback&&detailMotor.feedback.values,state:$('detailState').textContent,canRate:$('detailCanRate').textContent,appRate:$('detailAppRate').textContent}:null,perf:Object.fromEntries(Object.entries(perf).map(([k,a])=>[k,{count:a.length,max:a.length?Math.max(...a):0,p95:[...a].sort((a,b)=>a-b)[Math.floor(a.length*.95)]||0}]))})")
-                row['name'] = name
-                row['device_drop_delta'] = row['firmwareDrops'] - report['initial_device_drops'] & 4294967295
-                report['phases'].append(row)
-                save()
-                print(name, row['connected'], row['appDrops'], row['firmwareDrops'], flush=True)
-                shot = a.output.with_name(a.output.stem + '-' + name + '.png')
-                subprocess.run(['adb', '-s', a.phone, 'exec-out', 'screencap', '-p'], stdout=shot.open('wb'), check=True)
-                if not row['connected']:
-                    raise ConnectionError('Phone disconnected')
-            report['home_extra_raw'] = report['phases'][-1]['rawReceived'] - report['home_raw_before']
-            report['ok'] = report['home_extra_raw'] == 0 and (not report['js_errors']) and all((r['connected'] and (not r['appDrops']) and (not r['device_drop_delta']) and (not r['errors']) for r in report['phases'])) and all(((r['detail'] or {}).get('count', 0) >= a.seconds * 60 for r in report['phases'][1:4]))
-        except Exception as e:
-            report['failure'] = type(e).__name__
-            report['ok'] = False
-            save()
-            raise
-        finally:
-            stop = time.monotonic()
-            try:
-                page.evaluate("invoke('disconnect')")
-                page.wait_for_function('!connected', timeout=5000)
-                report['disconnected'] = True
-            except Exception as e:
-                report['disconnect_failed'] = type(e).__name__
-                report['ok'] = False
-            report['disconnect_seconds'] = round(time.monotonic() - stop, 3)
-            save()
-            b.close()
-except Exception as error:
-    report.update(ok=False, failure=type(error).__name__)
-finally:
+with hardware_bench_lock():
     try:
-        asyncio.run(bench.select(a.port, 'usb'))
-        report['restored_usb_can'] = True
+        asyncio.run(bench.select(a.port, a.mode))
+        if a.mode == 'wifi':
+            time.sleep(10)
+            from can_scope.transports import discover
+            found = []
+            asyncio.run(discover(saved['id'], found.append))
+            if len(found) != 1:
+                raise RuntimeError('Expected one discovered IP for the physical analyzer identity')
+            saved['ip'] = found[0]['address'].removeprefix('wifi:')
+        source = ast.parse((root / 'desktop/tests/can_render_hardware.py').read_text())
+        setup = next((ast.literal_eval(n.value) for n in source.body if isinstance(n, ast.Assign) and any((isinstance(t, ast.Name) and t.id == 'setup' for t in n.targets))))
+        with sync_playwright() as pw:
+            b = pw.chromium.connect_over_cdp(a.cdp, no_defaults=True)
+            pages = [page for c in b.contexts for page in c.pages]
+            page = next((page for page in pages if page.url.startswith('https://app.local/' if a.channel == 1 else f'https://channel-{a.channel}.local/')))
+            home = next((page for page in pages if '/home.html' in page.url))
+            page.on('pageerror', lambda e: report['js_errors'].append(str(e)))
+            try:
+                home.evaluate('(channel)=>HomeAndroid.openChannel(channel)', a.channel)
+                page.wait_for_function('innerWidth>0')
+                if page.evaluate('watchedMotors.length') == 0:
+                    page.evaluate(setup)
+                else:
+                    page.evaluate("window.perf={batch:[],draw:[],stream:[],long:[],raf:[]};const timedDraw=drawDetail;drawDetail=()=>{let t=performance.now();timedDraw();perf.draw.push(performance.now()-t)};showTab('live')")
+                page.evaluate("()=>{window.nativeErrors=[];window.telemetryEvents=[];window.rawReceived=0;const original=onNative;onNative=(k,d)=>{original(k,d);if(k==='error')nativeErrors.push(d.message);if(k==='packets')for(const item of d.items||[]){const bytes=parsePacket(item.hex||item);if(bytes&&bytes[1]===1)rawReceived++;}if(k==='telemetryMode')telemetryEvents.push({mode:d.mode,hz:d.hz,at:performance.now()})}}")
+                if a.mode == 'ble':
+                    page.evaluate("invoke('connectionMode','ble');invoke('scan')")
+                    page.wait_for_function('(address)=>deviceMap.has(address)', arg=saved['address'], timeout=25000)
+                    page.evaluate("address=>invoke('connect',address)", saved['address'])
+                else:
+                    page.evaluate("ip=>invoke('connectLan',ip)", saved['ip'])
+                page.wait_for_function('connected', timeout=30000)
+                page.evaluate("closeDevices();showTab('live')")
+                page.wait_for_function('gotStatus', timeout=10000)
+                report['initial_device_drops'] = page.evaluate('firmwareDrops')
+                for name, action in [('raw', None), ('dji-detail', 'dashboardOpen(JSON.stringify(watchedMotors[0].config))'), ('imu-detail', 'dashboardOpen(JSON.stringify(watchedMotors[7].config))'), ('dm-detail', 'dashboardOpen(JSON.stringify(watchedMotors[3].config));setMotorPolling(JSON.stringify(watchedMotors[3].config),true)'), ('pause-filter', "showTab('live');togglePause();$('filter').value='201';renderFrames()"), ('home', "togglePause();$('filter').value='';showTab('motor')")]:
+                    if action:
+                        page.evaluate(action)
+                    if name == 'home':
+                        page.wait_for_function('telemetryEvents.at(-1)?.mode===1', timeout=5000)
+                        page.wait_for_timeout(1000)
+                        report['home_raw_before'] = page.evaluate('rawReceived')
+                    page.evaluate('for(const key in perf)perf[key]=[]')
+                    page.wait_for_timeout(a.seconds * 1000)
+                    row = page.evaluate("({connected,appDrops,firmwareDrops,rawReceived,telemetryEvents:[...telemetryEvents],frames:frames.length,errors:[...nativeErrors],roster:dashboardSnapshot(),detail:detailMotor?{ready:detailReady,count:detailSamples.length,values:detailMotor.feedback&&detailMotor.feedback.values,state:$('detailState').textContent,canRate:$('detailCanRate').textContent,appRate:$('detailAppRate').textContent}:null,perf:Object.fromEntries(Object.entries(perf).map(([k,a])=>[k,{count:a.length,max:a.length?Math.max(...a):0,p95:[...a].sort((a,b)=>a-b)[Math.floor(a.length*.95)]||0}]))})")
+                    row['name'] = name
+                    row['device_drop_delta'] = row['firmwareDrops'] - report['initial_device_drops'] & 4294967295
+                    report['phases'].append(row)
+                    save()
+                    print(name, row['connected'], row['appDrops'], row['firmwareDrops'], flush=True)
+                    shot = a.output.with_name(a.output.stem + '-' + name + '.png')
+                    subprocess.run(['adb', '-s', a.phone, 'exec-out', 'screencap', '-p'], stdout=shot.open('wb'), check=True)
+                    if not row['connected']:
+                        raise ConnectionError('Phone disconnected')
+                report['home_extra_raw'] = report['phases'][-1]['rawReceived'] - report['home_raw_before']
+                report['ok'] = report['home_extra_raw'] == 0 and (not report['js_errors']) and all((r['connected'] and (not r['appDrops']) and (not r['device_drop_delta']) and (not r['errors']) for r in report['phases'])) and all(((r['detail'] or {}).get('count', 0) >= a.seconds * 60 for r in report['phases'][1:4]))
+            except Exception as e:
+                report['failure'] = type(e).__name__
+                report['ok'] = False
+                save()
+                raise
+            finally:
+                stop = time.monotonic()
+                try:
+                    page.evaluate("invoke('disconnect')")
+                    page.wait_for_function('!connected', timeout=5000)
+                    report['disconnected'] = True
+                except Exception as e:
+                    report['disconnect_failed'] = type(e).__name__
+                    report['ok'] = False
+                report['disconnect_seconds'] = round(time.monotonic() - stop, 3)
+                save()
+                b.close()
     except Exception as error:
-        report.update(ok=False, restore_failed=type(error).__name__)
-    save()
-raise SystemExit(0 if report['ok'] else 1)
+        report.update(ok=False, failure=type(error).__name__)
+    finally:
+        try:
+            asyncio.run(bench.select(a.port, 'usb'))
+            report['restored_usb_can'] = True
+        except Exception as error:
+            report.update(ok=False, restore_failed=type(error).__name__)
+        save()
+    raise SystemExit(0 if report['ok'] else 1)

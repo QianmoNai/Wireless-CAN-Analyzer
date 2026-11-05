@@ -5,7 +5,7 @@ import json
 import time
 from .protocol import packet, u32, setting_command, can_command, secret, device_settings_command, device_settings_status
 from .transports import BleTransport, LanTransport, scan_ble, discover
-from .usb_transport import UsbTransport, scan_usb
+from .usb_transport import UsbTransport, scan_usb, usb_identity, resolve_usb
 
 
 UART_ACK_TIMEOUT = 3.0
@@ -198,8 +198,12 @@ class Channel:
                 self.devices = await scan_ble(lambda d: self.emit('device', d))
             self.state('idle', '搜索完成；可选择设备连接')
         elif name in ('connect', 'connectLan', 'reconnect'):
+            expected_usb_identity = None
             if name == 'reconnect':
                 target = 'wifi:'+self.saved.get('ip', '') if self.mode == 'wifi' else 'usb:'+self.saved.get('usb_port', '') if self.mode == 'usb' else self.address
+                if self.mode == 'usb' and self.saved.get('usb_identity') is not None:
+                    expected_usb_identity = self.saved['usb_identity']
+                    target = 'usb:'+await resolve_usb(expected_usb_identity)
             else:
                 target = ('wifi:' if name == 'connectLan' else '') + args[0]
             if not target or target in ('wifi:', 'usb:'):
@@ -219,7 +223,14 @@ class Channel:
                     self.mode = 'usb'
                     self.transport = UsbTransport(received, lost)
                     await self.transport.connect(target[4:])
+                    identity = await usb_identity(target[4:])
+                    if expected_usb_identity is not None and identity != expected_usb_identity:
+                        raise ConnectionError('USB 设备在连接过程中发生变化，请重新扫描')
                     self.saved['usb_port'] = target[4:]
+                    if identity is not None:
+                        self.saved['usb_identity'] = identity
+                    else:
+                        self.saved.pop('usb_identity', None)
                 elif target.startswith('wifi:'):
                     self.mode = 'wifi'
                     # Association/DHCP and the embedded TLS accept loop may

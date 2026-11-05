@@ -56,8 +56,12 @@ def main():
     parser.add_argument('--display', default=':1')
     parser.add_argument('--niri-socket', help='Optional compositor IPC socket for focus on a Niri/Xwayland desktop')
     parser.add_argument('--screenshots', action='store_true', help='Capture native dialogs using ffmpeg')
+    parser.add_argument('--reset-usb-reconnect',type=Path,metavar='ESPTOOL',
+                        help='USB only: watchdog-reset this analyzer and test packaged identity reconnect')
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
+    if args.reset_usb_reconnect and args.mode!='usb':
+        parser.error('--reset-usb-reconnect requires --mode usb')
     import asyncio
     bench = module('can_bench', ROOT/'scripts/test-can-hardware.py')
     fixture = module('dual_fixture', ROOT/'scripts/test-dual-can-hardware.py').Fixture(args.elf)
@@ -105,6 +109,28 @@ def main():
                     page.evaluate(setup)
                     page.evaluate("target=>invoke('connect',target)", target)
                     page.wait_for_function('connected&&gotStatus&&frames.length>20', timeout=35000)
+                    if args.reset_usb_reconnect:
+                        cache=folder/'Qianmo/CAN Scope Desktop/connection-1.json'
+                        initial=load_connection(cache)
+                        identity=initial.get('usb_identity')
+                        if not identity or (identity['vid'],identity['pid'])!=(0x303a,0x1001):
+                            raise ValueError('Expected a saved native USB hardware identity')
+                        original=str(Path(args.port).resolve(strict=True))
+                        page.evaluate("invoke('disconnect')")
+                        page.wait_for_function('!connected')
+                        # A single ROM read plus watchdog reset returns directly
+                        # to the application. No Flash/NVS or CAN command write.
+                        subprocess.run([str(args.reset_usb_reconnect),'--chip','esp32s3','--port',
+                            args.port,'--before','usb-reset','--after','watchdog-reset','--no-stub','read-mac'],
+                            check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=25)
+                        wait_until(lambda:Path(args.port).exists(),15)
+                        page.evaluate("invoke('reconnect')")
+                        page.wait_for_function('connected&&gotStatus&&frames.length>20',timeout=35000)
+                        after=load_connection(cache)
+                        if after.get('usb_identity')!=identity or after['usb_port']!=str(Path(args.port).resolve(strict=True)):
+                            raise AssertionError('Packaged reconnect used a different hardware identity or port')
+                        report['usb_reconnect']=dict(before_port=original,after_port=after['usb_port'],
+                                                     same_identity=True,ready=True)
                     base = fixture.symbols['can_bench']+(args.bus-1)*52
                     for identifier, extended, remote, dlc in [(0x6a0, False, False, 8),
                             (0x1abcde, True, False, 8), (0x6a1, False, True, 8), (0x1abcdf, True, True, 0)]:
@@ -161,13 +187,17 @@ def main():
                                     raise RuntimeError('Expected one compositor dialog for this process')
                                 subprocess.run(['niri','msg','action','focus-window','--id',str(matches[0]['id'])],
                                     env=ipc_env,check=True,stdout=subprocess.DEVNULL,timeout=5)
-                            key('key', '--clearmodifiers', 'alt+n', 'ctrl+a')
-                            key('type', '--clearmodifiers', '--delay', '1', str(path))
+                                wanted_id=matches[0]['id']
+                                wait_until(lambda:any(w.get('id')==wanted_id and w.get('is_focused')
+                                    for w in json.loads(subprocess.check_output(
+                                        ['niri','msg','-j','windows'],env=ipc_env))),3)
+                            key('key', '--window', windows[0], '--clearmodifiers', '--delay', '80', 'alt+n', 'ctrl+a')
+                            key('type', '--window', windows[0], '--clearmodifiers', '--delay', '1', str(path))
                             if args.screenshots:
                                 subprocess.run(['ffmpeg','-hide_banner','-loglevel','error','-f','x11grab',
                                     '-window_id',windows[0],'-i',args.display,'-frames:v','1','-y',str(args.output.with_suffix('.dialog.png'))],
                                     check=True,timeout=5,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-                            key('key', '--clearmodifiers', 'Return')
+                            key('key', '--window', windows[0], '--clearmodifiers', 'Return')
                             print('native-dialog-submitted', button, flush=True)
                         # Qt's modal dialog can hold the originating WebChannel
                         # callback. Handle it concurrently with the browser click.
@@ -211,7 +241,7 @@ def main():
                     browser.close()
                     browser = None
     except Exception as exc:
-        report.update(ok=False, failure=type(exc).__name__)
+        report.update(ok=False, failure=type(exc).__name__, failure_message=str(exc)[:1200])
     finally:
         if proc:
             proc.terminate()
@@ -231,4 +261,6 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    from hardware_bench_lock import hardware_bench_lock
+    with hardware_bench_lock():
+        main()

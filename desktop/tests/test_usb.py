@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from can_scope.usb_protocol import Decoder, encode, HELLO, PING
-from can_scope.usb_transport import UsbTransport, prepare_usb, scan_usb
+from can_scope.usb_transport import UsbTransport, prepare_usb, scan_usb, resolve_usb, usb_identity
 from can_scope.protocol import packet, u32
 from can_scope.engine import Channel
 
@@ -172,6 +172,43 @@ class UsbTests(unittest.IsolatedAsyncioTestCase):
                 c.receive(bytes([1,21,int(uart)])+bytes(17))
                 self.assertEqual(c.uart,uart)
         finally: await c.close()
+
+    async def test_reconnect_follows_hardware_identity_after_port_reuse(self):
+        identity=dict(vid=0x303a,pid=0x1001,serial='bench-B')
+        ports=[SimpleNamespace(device='OLD',vid=0x303a,pid=0x1001,serial_number='other'),
+               SimpleNamespace(device='NEW',vid=0x303a,pid=0x1001,serial_number='bench-B')]
+        c=Channel(lambda *args:None,dict(mode='usb',usb_port='OLD',usb_identity=identity))
+        try:
+            with patch('serial.tools.list_ports.comports',return_value=ports):
+                await c.handle('reconnect',[])
+            self.assertTrue(c.ready)
+            self.assertEqual(c.transport.port.port,'NEW')
+            self.assertEqual(c.saved['usb_port'],'NEW')
+            self.assertEqual(c.saved['usb_identity'],identity)
+        finally: await c.close()
+
+    async def test_reconnect_refuses_missing_or_ambiguous_identity_before_open(self):
+        identity=dict(vid=0x303a,pid=0x1001,serial='bench-B')
+        other=SimpleNamespace(device='OLD',vid=0x303a,pid=0x1001,serial_number='other')
+        matching=lambda name:SimpleNamespace(device=name,vid=0x303a,pid=0x1001,serial_number='bench-B')
+        for ports in ([other],[matching('A'),matching('B')]):
+            c=Channel(lambda *args:None,dict(mode='usb',usb_port='OLD',usb_identity=identity))
+            try:
+                with patch('serial.tools.list_ports.comports',return_value=ports), patch('can_scope.usb_transport.open_port',side_effect=AssertionError('Opened a guessed device')):
+                    with self.assertRaises(ValueError):await c.handle('reconnect',[])
+                self.assertFalse(c.ready)
+            finally:await c.close()
+
+    async def test_identity_change_during_connect_closes_without_saving(self):
+        identity=dict(vid=0x303a,pid=0x1001,serial='bench-B')
+        c=Channel(lambda *args:None,dict(mode='usb',usb_port='OLD',usb_identity=identity))
+        try:
+            with patch('can_scope.engine.resolve_usb',return_value='NEW'),patch('can_scope.engine.usb_identity',return_value=dict(identity,serial='other')):
+                with self.assertRaises(ConnectionError):await c.handle('reconnect',[])
+            self.assertFalse(c.ready)
+            self.assertEqual(c.saved['usb_port'],'OLD')
+            self.assertEqual(c.saved['usb_identity'],identity)
+        finally:await c.close()
 
 
 class BootstrapTests(unittest.IsolatedAsyncioTestCase):

@@ -2,11 +2,41 @@
 import asyncio
 import secrets
 import time
+from pathlib import Path
 from .usb_protocol import Decoder, encode, HELLO, PING, BYE
 from .protocol import device_settings_command, device_settings_status
 
 HANDSHAKE_TIMEOUT = 4.0
 HANDSHAKE_INTERVAL = 0.5
+
+
+def _port_identity(port):
+    vid, pid = getattr(port, 'vid', None), getattr(port, 'pid', None)
+    serial = getattr(port, 'serial_number', None)
+    if type(vid) is int and type(pid) is int and isinstance(serial, str) and serial:
+        return dict(vid=vid, pid=pid, serial=serial)
+    return None
+
+
+async def usb_identity(device):
+    from serial.tools import list_ports
+    ports = await asyncio.to_thread(list_ports.comports)
+    matches = [p for p in ports if Path(p.device).resolve() == Path(device).resolve()]
+    return _port_identity(matches[0]) if len(matches) == 1 else None
+
+
+async def resolve_usb(identity):
+    """Resolve only one exact hardware identity; never guess from a reused port."""
+    if (not isinstance(identity, dict) or set(identity) != {'vid', 'pid', 'serial'} or
+            type(identity['vid']) is not int or type(identity['pid']) is not int or
+            not isinstance(identity['serial'], str) or not identity['serial']):
+        raise ValueError('保存的 USB 设备身份无效，请重新扫描选择设备')
+    from serial.tools import list_ports
+    ports = await asyncio.to_thread(list_ports.comports)
+    matches = [p.device for p in ports if _port_identity(p) == identity]
+    if len(matches) != 1:
+        raise ValueError('未找到唯一匹配的 USB 设备，请检查连接或重新扫描')
+    return matches[0]
 
 
 def open_port(device):

@@ -126,4 +126,6 @@ def main():
 
 
 if __name__=='__main__':
-    main()
+    from hardware_bench_lock import hardware_bench_lock
+    with hardware_bench_lock():
+        main()

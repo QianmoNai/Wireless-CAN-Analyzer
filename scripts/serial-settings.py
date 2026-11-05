@@ -88,6 +88,8 @@ def main():
 
 if __name__ == '__main__':
     try:
-        main()
+        from hardware_bench_lock import hardware_bench_lock
+        with hardware_bench_lock():
+            main()
     except (OSError, ValueError, TimeoutError) as exc:
         sys.exit(str(exc))

@@ -371,4 +371,6 @@ if __name__ == '__main__':
         parser.error('--duration must be 5..3600 seconds')
     if not 0 <= options.failure_observe_seconds <= 30:
         parser.error('--failure-observe-seconds must be 0..30')
-    sys.exit(0 if asyncio.run(main(options)) else 1)
+    from hardware_bench_lock import hardware_bench_lock
+    with hardware_bench_lock():
+        sys.exit(0 if asyncio.run(main(options)) else 1)

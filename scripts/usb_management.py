@@ -71,3 +71,15 @@ class LocalUsb:
         r = self.exchange(p, 24)
         code = struct.unpack_from('<I', r, 4)[0]
         return f'{code:06d}' if r[2] == 1 and code <= 999999 else None
+
+    def diagnostics(self):
+        result = {}
+        names = [('can_queue_expired', 'can_pending_expired', 'can_retries_exhausted'),
+                 ('radio_send_failed', 'radio_submit_rejected', 'can_delivery_expired'),
+                 ('radio_queue_full', 'can_queue_full', 'can_admission_expired')]
+        for op, fields in enumerate(names, 7):
+            p = bytearray((1, 0x1a, op)) + bytearray(17)
+            struct.pack_into('<I', p, 16, secrets.randbelow(0xffffffff)+1)
+            reply = self.exchange(p, 23)
+            result.update(zip(fields, struct.unpack_from('<III', reply, 4)))
+        return result

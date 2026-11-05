@@ -21,9 +21,21 @@ void dual_a_test_fresh_queue_time(void) {
     live_uart=false;atomic_store(&requested_uart,false);
   }
   // The expiry boundary still drops genuinely stale CAN data.
+  uint32_t expired_before=atomic_load(&diagnostics[CAN_QUEUE_EXPIRED]);
   can_message_t expired={.created=now_ms()-DUAL_FRAME_TTL_MS,.generation=epoch,.data={0,0}};
   assert(xQueueSend(can_out,&expired,0)==pdTRUE);
   prepare_can(now_ms());
   assert(!pending_size && atomic_load(&drop_count)==can_drops+1);
+  assert(atomic_load(&diagnostics[CAN_QUEUE_EXPIRED])==expired_before+1);
+  uint8_t request[20]={1,DUAL_USB_COMMAND,7},reply[20];
+  dual_put32(request+16,123);
+  assert(!dual_link_usb_command(request,reply));
+  assert(dual_u32(reply+4)==expired_before+1 && dual_u32(reply+16)==123);
+  uint32_t failed_before=atomic_load(&diagnostics[RADIO_SEND_FAILED]);
+  sent(NULL,ESP_NOW_SEND_FAIL);
+  request[2]=8;assert(!dual_link_usb_command(request,reply));
+  assert(dual_u32(reply+4)==failed_before+1);
+  request[3]=DUAL_A;assert(dual_link_usb_command(request,reply)==0x13);
+  request[3]=0;request[2]=10;assert(dual_link_usb_command(request,reply)==0x13);
   atomic_store(&drop_count,can_drops);pending_type=0;session=saved;
 }
