@@ -27,7 +27,8 @@ bool dual_link_can_take(uint8_t packet[20]) {
 }
 bool dual_link_connected(void) {return simulated_dual;}
 bool network_dual_mode(void) {return simulated_dual;}
-uint32_t dual_link_dropped(void) {return 0;}
+static uint32_t simulated_dual_drops,simulated_bridge_drops;
+uint32_t dual_link_dropped(void) {return simulated_dual_drops;}
 struct queue {size_t size;unsigned count,limit;uint8_t data[4096];};
 static struct queue *allocated[8];static unsigned allocated_count;
 QueueHandle_t xQueueCreate(unsigned n,size_t size){struct queue*q=calloc(1,sizeof(*q));q->size=size;q->limit=n;assert(n*size<=sizeof(q->data));allocated[allocated_count++]=q;return q;}
@@ -143,7 +144,7 @@ void ble_bridge_publish(const bridge_packet_t*p){
  if(p->bytes[1]==8){last_poll_reason=p->bytes[2];last_poll_detail=p->bytes[3];if(wire_u32(p->bytes+16)){assert(query_ack_count<16);query_acks[query_ack_count++]=*p;}}
  if(p->bytes[1]==6&&p->bytes[2]!=1){final_stage=p->bytes[2];final_count++;assert(wire_u32(p->bytes+16)==42);}
 }
-uint32_t ble_bridge_dropped(void){return 0;}
+uint32_t ble_bridge_dropped(void){return simulated_bridge_drops;}
 bool ble_bridge_connected(void){return link_up;}
 unsigned ble_bridge_take_stop(void){bool v=stop_flag;stop_flag=false;return v?(scenario>=22?BLE_STOP_SESSION:BLE_STOP_EXPLICIT):0;}
 void ble_bridge_set_motor_busy(bool value){busy=value;}
@@ -155,6 +156,11 @@ void ble_bridge_set_motor_busy(bool value){busy=value;}
 static void test_log(const char *format){if(!strncmp(format,"TX ",3))tx_uart_logs++;}
 #include "../firmware/main/can_demo.c"
 int main(void){
+ uint32_t drop_counters[3];simulated_bridge_drops=17;atomic_store(&rx_dropped,23);simulated_dual_drops=29;
+ can_monitor_drop_counters(drop_counters);
+ assert(drop_counters[0]==17&&drop_counters[1]==23&&drop_counters[2]==29);
+ assert(atomic_load(&rx_dropped)==23&&simulated_bridge_drops==17&&simulated_dual_drops==29);
+ simulated_bridge_drops=simulated_dual_drops=0;atomic_store(&rx_dropped,0);
  for(scenario=0;scenario<=12;scenario++){
   last_poll_reason=last_poll_detail=0;now_ms=tx_num=final_stage=final_count=rate_changes=driver_state=0;link_up=true;timer_active=false;busy=false;stop_flag=false;inflight=NULL;tx_count=tx_failed=tx_arbitration=0;completed_tx_bits=0;
   raw_tx_events=raw_tx_success_events=raw_tx_failure_events=raw_tx_arbitration_events=raw_query_events=tx_uart_logs=query_ack_count=emitted_load_count=0;

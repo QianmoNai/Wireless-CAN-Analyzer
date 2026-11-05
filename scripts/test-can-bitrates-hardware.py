@@ -41,6 +41,19 @@ async def main(args):
     link=None
     errors=[]
     received=[]
+    def capture_monitor(phase):
+        if not args.monitor_diagnostics:return
+        usb=LocalUsb(args.port)
+        try:
+            if usb.identity().hex()!=saved['id']:
+                raise ValueError('USB diagnostics identity differs from selected analyzer')
+            components=usb.monitor_drops()
+        finally:usb.close()
+        rows=report.setdefault('monitor_diagnostics',[])
+        baseline=rows[0]['components'] if rows else components
+        delta={key:(value-baseline[key])&0xffffffff for key,value in components.items()}
+        rows.append(dict(phase=phase,components=components,delta=delta))
+        if any(delta.values()):raise AssertionError('CAN monitor drops increased during '+phase)
     def rx(p):
         received.append(bytes(p))
         if len(received)>1000:del received[:500]
@@ -66,8 +79,10 @@ async def main(args):
         if any(fixture.health().values()):raise RuntimeError('Existing fixture errors')
         fixture.quiet(0);await asyncio.sleep(.1)
         saved=load_connection(connection_folder()/f'connection-{args.channel}.json')
+        capture_monitor('before-mode-selection')
         for mode in args.modes:
             await bench.select(args.port,mode)
+            capture_monitor(mode+'-selected')
             link={'usb':UsbTransport,'ble':BleTransport,'wifi':LanTransport}[mode](rx,errors.append)
             if mode=='usb':await link.connect(args.port)
             elif mode=='ble':await link.connect(saved['address'])
@@ -112,8 +127,12 @@ async def main(args):
                 health=fixture.health()
                 if any(health.values())or errors:raise AssertionError('CAN/link error at requested rate')
                 report['cases'].append(dict(mode=mode,bitrate=rate,frames=physical,health=health))
+                # The USB data transport owns the port until close. Wireless
+                # phases permit read-only management without HELLO or a reset.
+                if mode!='usb':capture_monitor(mode+'-'+str(rate))
                 args.output.write_text(json.dumps(report,indent=2)+'\n')
             await link.close();link=None
+            capture_monitor(mode+'-closed')
         report['ok']=True
         report.pop('active',None)
     except Exception as error:
@@ -131,6 +150,7 @@ async def main(args):
             finally:await link.close();link=None
             change_fixture(1000000);fixture.quiet(1)
             report['restored_usb_can_1mbps']=True
+            capture_monitor('after-usb-restore')
         except Exception as error:
             report.update(restored_usb_can_1mbps=False,cleanup_error=type(error).__name__,ok=False)
         report['after']=fixture.health();report['errors']=errors
@@ -150,6 +170,7 @@ if __name__=='__main__':
     parser.add_argument('--channel',type=int,choices=range(1,5),required=True)
     parser.add_argument('--modes',nargs='+',choices=['usb','ble','wifi'],default=['usb','ble','wifi'])
     parser.add_argument('--output',type=Path,required=True)
+    parser.add_argument('--monitor-diagnostics',action='store_true',help='Require firmware 1.24.7 drop components across setup, wireless traffic and cleanup')
     args=parser.parse_args();args.output.parent.mkdir(parents=True,exist_ok=True)
     with hardware_bench_lock():
         raise SystemExit(0 if asyncio.run(main(args))else 1)

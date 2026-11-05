@@ -83,3 +83,13 @@ class LocalUsb:
             reply = self.exchange(p, 23)
             result.update(zip(fields, struct.unpack_from('<III', reply, 4)))
         return result
+
+    def monitor_drops(self):
+        """Read the three existing lifetime counter components; no reset."""
+        p=bytearray((1,0x1c))+bytearray(18)
+        struct.pack_into('<I',p,16,secrets.randbelow(0xffffffff)+1)
+        reply=self.exchange(p,27)
+        if reply[2]!=1 or reply[3]:
+            raise ValueError('Unsupported CAN monitor counter version')
+        fields=('bridge_delivery_dropped','can_rx_queue_dropped','dual_dropped')
+        return dict(zip(fields,struct.unpack_from('<III',reply,4)))

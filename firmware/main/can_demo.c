@@ -18,6 +18,7 @@
 #include "uart_bridge.h"
 #include "dual_link.h"
 #include "network_link.h"
+#include "can_monitor.h"
 static void publish_local_and_ble(const bridge_packet_t *packet)
 {
     board_ui_observe(packet);
@@ -39,6 +40,12 @@ static void poll_wake(void *arg) { xTaskNotifyGive(owner_task); }
 static const char *TAG = "can_demo";
 static QueueHandle_t rx_queue, tx_done_queue, command_queue, query_command_queue;
 static atomic_uint rx_count, rx_dropped;
+void can_monitor_drop_counters(uint32_t counters[3])
+{
+    counters[0] = ble_bridge_dropped();
+    counters[1] = atomic_load(&rx_dropped);
+    counters[2] = dual_link_dropped();
+}
 static can_load_t bus_load;
 static _Atomic uint32_t inflight_frame_bits;
 static uint32_t tx_count, tx_failed, tx_arbitration;
@@ -380,7 +387,8 @@ void app_main(void)
             wire_put_u32(packet.bytes + 4, atomic_load(&rx_count));
             wire_put_u32(packet.bytes + 8, tx_count);
             wire_put_u32(packet.bytes + 12, tx_failed);
-            wire_put_u32(packet.bytes + 16, ble_bridge_dropped() + atomic_load(&rx_dropped) + dual_link_dropped());
+            uint32_t drops[3];can_monitor_drop_counters(drops);
+            wire_put_u32(packet.bytes + 16, drops[0] + drops[1] + drops[2]);
             publish_local_and_ble(&packet);
             publish_config(bitrate, 0, 0);
             next_status = now + 1000;

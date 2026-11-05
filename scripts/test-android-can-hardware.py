@@ -19,6 +19,7 @@ p.add_argument('--mode', choices=['ble', 'wifi'], default='ble')
 p.add_argument('--restore-wifi-trust', action='store_true', help='BLE only: use the actual settings read button to recover local TLS trust after config import')
 p.add_argument('--verify-import-guard', action='store_true', help='Require native config import to refuse an active connection without disconnecting it')
 p.add_argument('--history-limit',type=int,choices=[300,10000],default=300,help='Independent RX/TX retention in the bench app')
+p.add_argument('--monitor-diagnostics',action='store_true',help='Require firmware 1.24.7 read-only USB drop components, including setup and cleanup')
 a = p.parse_args()
 if not 5 <= a.seconds <= 300:
     p.error('--seconds must be 5..300')
@@ -37,9 +38,31 @@ a.output.parent.mkdir(parents=True, exist_ok=True)
 
 def save():
     a.output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n')
+
+def capture_monitor(phase):
+    if not a.monitor_diagnostics:
+        return
+    from usb_management import LocalUsb
+    usb=LocalUsb(a.port)
+    try:
+        if usb.identity().hex()!=saved['id']:
+            raise ValueError('USB diagnostics identity differs from the selected wireless analyzer')
+        components=usb.monitor_drops()
+    finally:
+        usb.close()
+    rows=report.setdefault('monitor_diagnostics',[])
+    baseline=rows[0]['components'] if rows else components
+    delta={key:(value-baseline[key])&0xffffffff for key,value in components.items()}
+    rows.append(dict(phase=phase,components=components,delta=delta))
+    save()
+    if any(delta.values()):
+        raise AssertionError('CAN monitor drop component increased during '+phase)
+
 with hardware_bench_lock():
     try:
+        capture_monitor('before-mode-selection')
         asyncio.run(bench.select(a.port, a.mode))
+        capture_monitor('after-mode-selection')
         if a.mode == 'wifi':
             time.sleep(10)
             from can_scope.transports import discover
@@ -59,6 +82,14 @@ with hardware_bench_lock():
             try:
                 home.evaluate('(channel)=>HomeAndroid.openChannel(channel)', a.channel)
                 page.wait_for_function('innerWidth>0')
+                if page.evaluate('connected'):
+                    raise RuntimeError('Bench channel must be disconnected before installing observers')
+                # Earlier rounds must not remain in the observer call chain or
+                # multiply raw counts/draw timers. Reload only while detached;
+                # the native ready message follows stored-config restoration.
+                page.reload(wait_until='load')
+                page.wait_for_function("document.body.textContent.includes('准备连接 ESP32-CAN')",polling=100,timeout=10000)
+                report['page_reloaded_before_instrumentation']=True
                 if page.evaluate('watchedMotors.length') == 0:
                     page.evaluate(setup)
                 else:
@@ -71,8 +102,10 @@ with hardware_bench_lock():
                 else:
                     page.evaluate("ip=>invoke('connectLan',ip)", saved['ip'])
                 page.wait_for_function('connected', timeout=30000)
+                capture_monitor('wireless-ready')
                 page.evaluate("closeDevices();showTab('live')")
                 page.wait_for_function('gotStatus', timeout=10000)
+                capture_monitor('first-can-status')
                 if a.restore_wifi_trust:
                     report['wifi_trust_before'] = page.evaluate("$('wifiKnown').textContent.includes('已保存')")
                     page.evaluate("showTab('settings')")
@@ -90,9 +123,11 @@ with hardware_bench_lock():
                     if any('documentsui'in line.lower()for line in focus.splitlines()if 'mCurrentFocus'in line):
                         raise AssertionError('Import guard opened the system file picker')
                     report['connected_import_blocked']=True
+                capture_monitor('before-history-settings')
                 page.evaluate("limit=>{$('rxLimit').value=limit;$('txLimit').value=limit;applyHistoryLimits()}",a.history_limit)
                 report['history_limit']=a.history_limit
                 report['initial_device_drops'] = page.evaluate('firmwareDrops')
+                capture_monitor('connected-before-phases')
                 for name, action in [('raw', None), ('dji-detail', 'dashboardOpen(JSON.stringify(watchedMotors[0].config))'), ('imu-detail', 'dashboardOpen(JSON.stringify(watchedMotors[7].config))'), ('dm-detail', 'dashboardOpen(JSON.stringify(watchedMotors[3].config));setMotorPolling(JSON.stringify(watchedMotors[3].config),true)'), ('pause-filter', "showTab('live');togglePause();$('filter').value='201';renderFrames()"), ('home', "togglePause();$('filter').value='';showTab('motor')")]:
                     if action:
                         page.evaluate(action)
@@ -108,6 +143,7 @@ with hardware_bench_lock():
                     row['name'] = name
                     row['device_drop_delta'] = row['firmwareDrops'] - report['initial_device_drops'] & 4294967295
                     report['phases'].append(row)
+                    capture_monitor(name)
                     save()
                     print(name, row['connected'], row['appDrops'], row['firmwareDrops'], flush=True)
                     shot = a.output.with_name(a.output.stem + '-' + name + '.png')
@@ -138,14 +174,19 @@ with hardware_bench_lock():
                     report['disconnect_failed'] = type(e).__name__
                     report['ok'] = False
                 report['disconnect_seconds'] = round(time.monotonic() - stop, 3)
+                try:
+                    capture_monitor('after-wireless-disconnect')
+                except Exception as e:
+                    report.update(ok=False,monitor_disconnect_error=type(e).__name__)
                 save()
                 b.close()
     except Exception as error:
-        report.update(ok=False, failure=type(error).__name__)
+        report.update(ok=False, failure=type(error).__name__,failure_message=str(error)[:300])
     finally:
         try:
             asyncio.run(bench.select(a.port, 'usb'))
             report['restored_usb_can'] = True
+            capture_monitor('after-usb-restore')
         except Exception as error:
             report.update(ok=False, restore_failed=type(error).__name__)
         save()

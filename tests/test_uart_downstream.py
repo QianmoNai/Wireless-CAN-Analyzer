@@ -63,6 +63,7 @@ int ble_bridge_command(const uint8_t p[20]){(void)p;return 0;}
 int ble_bridge_settings_command(const uint8_t p[20],bridge_packet_t*r){(void)p;(void)r;return 0;}
 void network_display(uint8_t *state,char ip[16],uint32_t *pin){*state=0;ip[0]=0;*pin=UINT32_MAX;}
 int dual_link_usb_command(const uint8_t p[20],uint8_t reply[20]){(void)p;(void)reply;return 0x13;}
+void can_monitor_drop_counters(uint32_t counters[3]){memset(counters,0,3*sizeof(*counters));}
 static atomic_uint drop_total,dropped;
 #define ud_add(word,n) ((void)0)
 '''

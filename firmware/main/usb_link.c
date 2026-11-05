@@ -5,6 +5,7 @@
 #include "network_link.h"
 #include "settings_protocol.h"
 #include "dual_link.h"
+#include "can_monitor.h"
 #include "sdkconfig.h"
 #if CONFIG_IDF_TARGET_ESP32S3
 #include "driver/usb_serial_jtag.h"
@@ -55,6 +56,21 @@ static bool send_packet(uint32_t session,const uint8_t payload[20]){
 }
 static bool incoming(uint32_t session,uint8_t p[20]){
     if(!session||p[0]!=1)return true;
+    if(p[1]==CAN_MONITOR_USB_QUERY){
+        // A physical read never claims a data session or changes mode. An
+        // existing data session still excludes another host/session ID.
+        if(atomic_load(&session_id)&&session!=atomic_load(&session_id))return true;
+        bool valid=wire_u32(p+16)!=0;
+        for(unsigned i=2;i<16;i++)if(p[i])valid=false;
+        uint8_t ack[20]={1,18,valid?0:0x13,CAN_MONITOR_USB_QUERY};memcpy(ack+4,p+16,4);
+        if(!send_packet(session,ack))return false;
+        if(!valid)return true;
+        uint32_t counters[3];can_monitor_drop_counters(counters);
+        uint8_t reply[20]={1,CAN_MONITOR_USB_EVENT,1,0};
+        for(unsigned i=0;i<3;i++)wire_put_u32(reply+4+4*i,counters[i]);
+        memcpy(reply+16,p+16,4);
+        return send_packet(session,reply);
+    }
     if(p[1]==0x1b){
         // Mirror only the active local BLE pairing display over the attached
         // physical USB cable. Never expose Wi-Fi credentials or TLS keys.
@@ -124,7 +140,13 @@ static void service(const uint8_t *bytes,int n){
             // packets are owned here; queue rejection is owned by the caller.
             if(!ok || q.session!=atomic_load(&session_id))uart_bridge_drop_packet(&q.packet);
         }
-        if(!ok){clear_session();ble_bridge_reset_session();}
+        if(!ok){
+            // A management reply outside a USB data session owns no BLE/TLS
+            // queues or polling leases. Drop its decoder state, not theirs.
+            bool owned=atomic_load(&session_id)!=0;
+            clear_session();
+            if(owned)ble_bridge_reset_session();
+        }
     }
     xSemaphoreGive(guard);
 }

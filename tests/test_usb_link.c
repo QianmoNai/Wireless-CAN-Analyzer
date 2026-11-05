@@ -13,6 +13,7 @@ int xSemaphoreTake(SemaphoreHandle_t q,unsigned w){(void)q;(void)w;return 1;}
 int xSemaphoreGive(SemaphoreHandle_t q){(void)q;return 1;}
 int xTaskCreate(void(*f)(void*),const char*n,unsigned s,void*a,unsigned p,void*h){(void)f;(void)n;(void)s;(void)a;(void)p;*(TaskHandle_t*)h=(void*)2;return 1;}
 static uint32_t now=10;static bool selected=true,physical=true,short_write=false;
+static unsigned write_calls,short_write_call;
 static unsigned notifications,notify_waits,delays,write_cost_us,notify_block_us;
 static usj_select_notif_callback_t rx_callback;
 static int64_t work_us;
@@ -35,7 +36,7 @@ int64_t esp_timer_get_time(void){return (int64_t)now*1000+work_us;}
 bool network_usb_mode(void){return selected;}
 bool usb_serial_jtag_is_connected(void){return physical;}
 int usb_serial_jtag_driver_install(const usb_serial_jtag_driver_config_t*c){assert(c->tx_buffer_size==8192&&c->rx_buffer_size==4096);return 0;}
-int usb_serial_jtag_write_bytes(const void*p,size_t n,uint32_t w){(void)w;assert(sent_count+n<=sizeof(sent));memcpy(sent+sent_count,p,n);sent_count+=n;work_us+=write_cost_us;return short_write?3:(int)n;}
+int usb_serial_jtag_write_bytes(const void*p,size_t n,uint32_t w){(void)w;assert(sent_count+n<=sizeof(sent));memcpy(sent+sent_count,p,n);sent_count+=n;work_us+=write_cost_us;write_calls++;return short_write||write_calls==short_write_call?3:(int)n;}
 int usb_serial_jtag_read_bytes(void*p,uint32_t n,uint32_t w){assert(w==0&&n>=input_size);unsigned size=input_size;memcpy(p,input,size);input_size=0;return (int)size;}
 void ble_bridge_reset_session(void){resets++;}
 int ble_bridge_command(const uint8_t p[20]){assert(p[0]==1);commands_received++;return command_status;}
@@ -47,6 +48,10 @@ int ble_bridge_settings_command(const uint8_t p[20],bridge_packet_t *reply){
 bool bridge_packet_is_raw(const bridge_packet_t*p){return p->bytes[1]==1||p->bytes[1]==19;}
 void network_display(uint8_t *state,char ip[16],uint32_t *pin){*state=2;ip[0]=0;*pin=314159;}
 static unsigned local_dual_commands;
+static unsigned monitor_reads;
+void can_monitor_drop_counters(uint32_t counters[3]){
+ monitor_reads++;counters[0]=17;counters[1]=23;counters[2]=29;
+}
 int dual_link_usb_command(const uint8_t p[20],uint8_t reply[20]){
  local_dual_commands++;memset(reply,0,20);reply[0]=1;reply[1]=DUAL_USB_EVENT;
  wire_put_u32(reply+16,wire_u32(p+16));return command_status;
@@ -101,6 +106,26 @@ int main(void){
  feed(703,dual);assert(local_dual_commands==1&&sent_count==before);
  feed(702,dual);assert(local_dual_commands==2&&sent_count==before+64);
  feed(702,bye);
+ // Read lifetime components outside USB mode without changing ownership,
+ // settings or queues; reject malformed reads and another active session.
+ selected=false;sent_count=0;unsigned monitor_resets=resets,monitor_commands=commands_received;
+ uint8_t monitor[20]={1,CAN_MONITOR_USB_QUERY};wire_put_u32(monitor+16,800);
+ feed(801,monitor);
+ assert(monitor_reads==1&&sent_count==64&&!usb_link_connected());
+ assert(sent[41]==CAN_MONITOR_USB_EVENT&&sent[42]==1&&sent[43]==0);
+ assert(wire_u32(sent+44)==17&&wire_u32(sent+48)==23&&wire_u32(sent+52)==29&&wire_u32(sent+56)==800);
+ for(unsigned i=2;i<16;i++){
+  monitor[i]=1;before=sent_count;feed(801,monitor);
+  assert(sent_count==before+32&&sent[before+10]==0x13&&monitor_reads==1);monitor[i]=0;
+ }
+ wire_put_u32(monitor+16,0);before=sent_count;feed(801,monitor);
+ assert(sent_count==before+32&&sent[before+10]==0x13&&monitor_reads==1);
+ assert(resets==monitor_resets&&commands_received==monitor_commands);
+ wire_put_u32(monitor+16,800);selected=true;hello(802);before=sent_count;
+ feed(803,monitor);assert(sent_count==before&&monitor_reads==1);
+ assert(usb_link_send(&raw));unsigned queued=raw_out->count;monitor_resets=resets;
+ assert(incoming(802,monitor));assert(monitor_reads==2&&usb_link_connected()&&raw_out->count==queued&&resets==monitor_resets);
+ feed(802,bye);
  // Non-USB mode keeps the decoder across reads and only admits bootstrap.
  selected=false;sent_count=0;command_status=0;
  uint8_t query[20]={1,SETTINGS_COMMAND};wire_put_u32(query+16,123);
@@ -163,6 +188,24 @@ int main(void){
  for(unsigned i=0;i<4;i++){assert(usb_link_send(&raw));worker_step(&busy_us);assert(busy_us==0);}
  assert(delays==delays_before);notify_block_us=0;
  write_cost_us=0;usb_link_reset();
+ // Failed physical management replies must not reset another transport's
+ // shared bridge. Exercise both the ACK and the event write, all four reads,
+ // fragmented input, no implicit replay, and recovery with a fresh request.
+ selected=false;command_status=0;
+ const uint8_t *reads[]={monitor,pairing_display,dual,query};
+ for(unsigned kind=0;kind<4;kind++)for(unsigned part=1;part<=2;part++){
+  sent_count=0;short_write_call=write_calls+part;reset_before=resets;
+  feed(900+kind,reads[kind]);
+  assert(resets==reset_before&&!atomic_load(&session_id)&&!decoder.used);
+  unsigned writes_after=write_calls;service(NULL,0);assert(write_calls==writes_after);
+  short_write_call=0;before=sent_count;feed(900+kind,reads[kind]);
+  assert(sent_count==before+64&&resets==reset_before&&!atomic_load(&session_id));
+ }
+ // The same write failure inside an owned USB data session still terminates
+ // that session and resets its queues/polling exactly once.
+ selected=true;sent_count=0;hello(950);reset_before=resets;short_write_call=write_calls+2;
+ feed(950,monitor);assert(!usb_link_connected()&&resets==reset_before+1);
+ short_write_call=0;service(NULL,0);assert(resets==reset_before+1);
  free(raw_out->data);free(raw_out);free(control_out->data);free(control_out);
  puts("USB firmware: sessions, priority/backpressure, short write, worker wake, input fairness, frame/time budgets and starvation protection PASS");
 }
