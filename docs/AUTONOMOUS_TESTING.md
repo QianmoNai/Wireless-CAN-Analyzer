@@ -12,7 +12,7 @@
 | 双机传输与重启 | SWD 双控制器逐帧核对，USB ROM/看门狗复位 | 1.24.6候选5000组及离线帧不补发通过；默认速率失败与候选结果分别保留 |
 | USB 编号变化后重连 | VID/PID/序列号解析，握手后复核 | Desktop 1.2.16 源码跨 ACM1/ACM2 重连并收到 CAN；发行包页面重启重连通过，该轮编号未变 |
 | USB管理回压与无线隔离 | 临时接管指定USB CDC接口，暂停读回复，实际无线静默监控 | 1.24.7修复前蓝牙出现1750条意外原始帧；修复后两台BLE/Wi-Fi四场景均为零，恢复监控与USB通过 |
-| 桌面文件与操作 | 实际发行包、Qt 原生文件对话框、Niri 焦点 | 1.2.18三种传输配置/上限导出导入、超过10000行CSV、四类手动帧、四档速率及六阶段各20秒通过；60秒观察证据为1.2.17，双实物9组合63段及50次离线Qt全屏证据为1.2.16 |
+| 桌面文件与操作 | 实际发行包、Qt 原生文件对话框、Niri 焦点 | 1.2.19三种传输配置/上限导出导入、超过10000行CSV、四类手动帧、四档速率及六阶段各20秒通过；新版双实物9组合63段原始流＋63次实际DJI详情X11全屏通过，两台分项无新增。60秒观察证据为1.2.17 |
 | Android 文件与操作 | ADB 原生界面＋实际 WebView | 1.21.8两台BLE/Wi-Fi共24阶段通过，B端Wi-Fi填满10000 RX，暂停DOM不变时CAN继续到达；在线导入被拦截且保持连接。1.21.7另有A端BLE填满10000证据。断开后SAF导入16配置证据为1.21.6，旋转/返回/前后台为1.21.5 |
 | Windows | GitHub Actions 原生构建和测试 | 92563bd 的CI通过；没有本机Windows物理台架，不能代替硬件验证 |
 | CAN四档速率 | SWD停控制器，协议改分析仪速率，再启动同速率 | 1.24.6两台各12组合、四种帧双向唯一ID/载荷复验通过，CAN错误零；桌面三种连接下实际界面四档切换、双机16种独立速率组合800帧通过 |
@@ -29,9 +29,9 @@
 - `scripts/test-dual-can-recovery.py`：保存绑定的重启恢复、离线帧不补发。
 - `scripts/test-usb-reconnect-hardware.py`：桌面按 USB 身份跨复位重连；必须指定模拟器台架、已核对设备端口及esptool路径。
 - `scripts/test-android-config-import-hardware.py`：独立台架包的原生SAF键盘导入；核对ADB/CDP进程、已有数字文件名备份及断开状态，只确认一次。导入清除网络信任，随后`test-android-can-hardware.py --mode ble --restore-wifi-trust`从实际设置按钮重新认证；首次配对由`android_pairing.py`读取身份核对的物理USB当前临时码并操作原生通知/确认，仅内存处理。
-- `desktop/tests/multichannel_hardware.py`：实际发行包两路实物并存，原生标签切换、隐藏流静默、独有测试帧归属；端口按顺序对应已保存通道1/2及STM32 CAN1/2。
+- `desktop/tests/multichannel_hardware.py`：实际发行包两路实物并存，原生标签切换、隐藏流静默、独有测试帧归属；端口按顺序对应已保存通道1/2及STM32 CAN1/2，写入前核对物理身份与保存身份一致；要求固件1.24.7并比较两台只读三项丢弃。`--detail-fullscreen`在每轮原始流后打开物理DJI反馈详情、核对X11全屏属性及隐藏通道退出，需要xprop及实际X11窗口管理器。
 - `scripts/test-android-can-hardware.py`：Android台架包实际WebView、六阶段CAN显示和清理；`--verify-import-guard`通过真实原生桥接确认在线导入被拒绝且保持连接；`--history-limit 10000 --seconds 20`填满RX历史，并检查暂停DOM不变时CAN仍持续到达。
-- `desktop/tests/can_operations_hardware.py`：发行包原生文件操作与实际CAN发送核对；`--all-bitrates`在速率台架上通过界面应用四档并收取物理CAN；`--monitor-seconds 5..60`加入六阶段参数/曲线观察，`--detail-window 60`扩大可见历史，不修改采样；`--history-limit 10000 --monitor-seconds 20`检查填满RX、暂停及大历史CSV导出逐格核对。
+- `desktop/tests/can_operations_hardware.py`：发行包原生文件操作与实际CAN发送核对；有界保存最近24条查询/错误事件、关闭前后状态及失败位置，超时保留原报告；`--all-bitrates`在速率台架上通过界面应用四档并收取物理CAN；`--monitor-seconds 5..60`加入六阶段参数/曲线观察，`--detail-window 60`扩大可见历史，不修改采样；`--history-limit 10000 --monitor-seconds 20`检查填满RX、暂停及大历史CSV导出逐格核对。
 
 主要物理测试入口共用进程锁，第二个测试会在改变模式前被拒绝，防止两个测试互相干扰。锁在正常结束或进程退出时释放。
 

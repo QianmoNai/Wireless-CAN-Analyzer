@@ -1,4 +1,9 @@
-"""Opt-in two real analyzer channels in the installed Qt package; no motion."""
+"""Opt-in two real analyzer channels in the installed Qt package; no motion.
+
+Requires firmware 1.24.7 read-only drop diagnostics. Native fullscreen checks
+additionally require an X11 window manager and xprop. Identity mismatches stop
+before mode changes or restoration writes.
+"""
 import argparse
 import ast
 import asyncio
@@ -34,20 +39,26 @@ def main(a):
     report = dict(ok=False, modes=a.modes, scope='installed Qt package, two physical analyzers and independent STM32 CAN controllers', binary_sha256=hashlib.sha256(a.binary.read_bytes()).hexdigest(), fixture_image_sha256=fixture.image_sha256, phases=[], js_errors=[])
     a.output.parent.mkdir(parents=True, exist_ok=True)
     proc = None
+    verified = False
     try:
         if any(fixture.health().values()):
             raise RuntimeError('Existing CAN errors')
         identities = []
+        report['monitor_before']=[]
         saved = []
         for i, port in enumerate(a.ports):
             usb = LocalUsb(port)
             try:
                 identities.append(usb.identity().hex(':'))
+                report['monitor_before'].append(usb.monitor_drops())
             finally:
                 usb.close()
             saved.append(load_connection(connection_folder() / f'connection-{i + 1}.json'))
+            if identities[-1].replace(':','')!=saved[-1].get('id'):
+                raise ValueError('USB identity differs from the saved channel')
         if identities[0] == identities[1]:
             raise ValueError('Expected distinct analyzers')
+        verified = True
         report['identities'] = identities
         for port, mode in zip(a.ports, a.modes):
             asyncio.run(bench.select(port, mode))
@@ -115,6 +126,8 @@ def main(a):
                         if turn:
                             subprocess.run(['xdotool', 'windowfocus', '--sync', window[0]], env=env, check=True, timeout=5)
                             subprocess.run(['xdotool', 'key', '--window', window[0], '--clearmodifiers', 'ctrl+Tab'], env=env, check=True, timeout=5)
+                        if a.detail_fullscreen:
+                            pages[active].evaluate("showTab('live')")
                         pages[active].wait_for_function('!document.hidden&&modes.at(-1)===0', timeout=8000, polling=100)
                         pages[hidden].wait_for_function('document.hidden&&modes.at(-1)===3', timeout=8000, polling=100)
                         pages[active].wait_for_timeout(1000)
@@ -134,8 +147,28 @@ def main(a):
                         if not all((s['connected'] and (not s['appDrops']) and (not s['errors']) and (s['firmwareDrops'] == baseline[i]) and all((x['id'] == 0x6c1 + i for x in s['sentinels'])) for i, s in enumerate(states))) or delta[active] < 300 or delta[hidden] != 0:
                             raise AssertionError('Channel switch did not isolate and resume physical telemetry')
                         report['phases'].append(dict(turn=turn, active_channel=active + 1, raw_delta=delta, states=states))
+                        if a.detail_fullscreen:
+                            page=pages[active]
+                            page.evaluate('dashboardOpen(JSON.stringify(watchedMotors[0].config))')
+                            page.wait_for_function('detailReady&&detailSamples.length-detailSampleHead>=50',timeout=8000,polling=100)
+                            page.evaluate('openDetailChart(detailSeries[0].key)')
+                            page.wait_for_function('detailChartKey!==null',timeout=5000,polling=100)
+                            deadline=time.monotonic()+3
+                            while True:
+                                state=subprocess.check_output(['xprop','-id',window[0],'_NET_WM_STATE'],env=env,text=True)
+                                if '_NET_WM_STATE_FULLSCREEN' in state:break
+                                if time.monotonic()>deadline:raise AssertionError('Native X11 window did not enter fullscreen')
+                                time.sleep(.05)
+                            page.wait_for_timeout(500)
+                            detail=page.evaluate('({connected,ready:detailReady,count:detailSamples.length-detailSampleHead,key:detailChartKey,values:detailMotor.feedback&&detailMotor.feedback.values,appDrops,firmwareDrops})')
+                            if not detail['connected']or not detail['ready']or not detail['values']or detail['appDrops']or detail['firmwareDrops']!=baseline[active]:
+                                raise AssertionError('Physical fullscreen detail lost feedback')
+                            if pages[hidden].evaluate('detailChartKey!==null'):
+                                raise AssertionError('Hidden channel retained its fullscreen chart')
+                            report['phases'][-1]['fullscreen_detail']=dict(detail,native_x11_fullscreen=True)
                         a.output.write_text(json.dumps(report, indent=2) + '\n')
                     for p in pages:
+                        if a.detail_fullscreen:p.evaluate('closeMotorDetail()')
                         p.evaluate("invoke('disconnect')")
                         p.wait_for_function('!connected', polling=100)
                     if report['js_errors']:
@@ -153,7 +186,7 @@ def main(a):
                 proc.kill()
                 proc.wait()
         report['restored_usb_can'] = []
-        for port in a.ports:
+        for port in a.ports if verified else []:
             try:
                 asyncio.run(bench.select(port, 'usb'))
                 report['restored_usb_can'].append(True)
@@ -161,6 +194,20 @@ def main(a):
                 report['restored_usb_can'].append(False)
                 report['ok'] = False
         report['health'] = fixture.health()
+        report['monitor_after']=[]
+        report['monitor_delta']=[]
+        for i,port in enumerate(a.ports if verified else []):
+            usb=None
+            try:
+                usb=LocalUsb(port)
+                current=usb.monitor_drops();report['monitor_after'].append(current)
+                delta={key:(value-report['monitor_before'][i][key])&0xffffffff for key,value in current.items()}
+                report['monitor_delta'].append(delta)
+                if any(delta.values()):report['ok']=False
+            except Exception as error:
+                report['ok']=False;report['monitor_failure']=type(error).__name__
+            finally:
+                if usb:usb.close()
         if any(report['health'].values()):
             report['ok'] = False
         a.output.write_text(json.dumps(report, indent=2) + '\n')
@@ -174,6 +221,7 @@ if __name__ == '__main__':
     p.add_argument('--ports', nargs=2, required=True)
     p.add_argument('--modes', nargs=2, required=True, choices=['usb', 'ble', 'wifi'])
     p.add_argument('--switches', type=int, default=6)
+    p.add_argument('--detail-fullscreen',action='store_true',help='Also receive physical DJI details in native X11 fullscreen and verify tab handoff')
     p.add_argument('--output', required=True, type=Path)
     a = p.parse_args()
     if not 2 <= a.switches <= 30:

@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 import urllib.request
 
 from playwright.sync_api import sync_playwright
@@ -118,6 +119,11 @@ def main():
                     setup = next(ast.literal_eval(n.value) for n in tree.body if isinstance(n, ast.Assign)
                                  and any(isinstance(t, ast.Name) and t.id == 'setup' for t in n.targets))
                     page.evaluate(setup)
+                    page.evaluate("""()=>{window.queryAudit=[];const prior=onNative;onNative=(kind,data)=>{
+                        if(kind==='queryState'||kind==='error'){
+                            queryAudit.push({kind,data,at:Date.now()});if(queryAudit.length>24)queryAudit.shift();
+                        }return prior(kind,data)
+                    }}""")
                     page.evaluate("target=>invoke('connect',target)", target)
                     page.wait_for_function('connected&&gotStatus&&frames.length>20', timeout=35000)
                     if args.all_bitrates:
@@ -207,8 +213,16 @@ def main():
                                     raise AssertionError('Paused filter changed its display or stopped receiving physical CAN')
                                 row['frozen_display_with_live_can']=True
                             args.output.write_text(json.dumps(report,indent=2)+'\n')
+                        report['active_operation']='stop-motor-query'
+                        report['query_stop_before']=page.evaluate("({polling:watchedMotors[3].polling,message:watchedMotors[3].queryMessage,events:queryAudit})")
                         page.evaluate('setMotorPolling(JSON.stringify(watchedMotors[3].config),false)')
-                        page.wait_for_function('!watchedMotors[3].polling',timeout=5000)
+                        try:
+                            page.wait_for_function('!watchedMotors[3].polling',timeout=5000)
+                        except Exception:
+                            # Capture before Playwright's context closes its connection.
+                            report['query_failure_state']=page.evaluate("({connected,hidden:document.hidden,focused:document.hasFocus(),events:queryAudit,motors:watchedMotors.map(m=>({id:m.config.id,profile:m.config.profile,polling:m.polling,message:m.queryMessage}))})")
+                            raise
+                        report['query_stop_after']=page.evaluate("({polling:watchedMotors[3].polling,message:watchedMotors[3].queryMessage,events:queryAudit})")
                         page.wait_for_timeout(200)
                         page.evaluate("showTab('live')")
                     base = fixture.symbols['can_bench']+(args.bus-1)*52
@@ -328,6 +342,14 @@ def main():
                     browser = None
     except Exception as exc:
         report.update(ok=False, failure=type(exc).__name__, failure_message=str(exc)[:1200])
+        report['failure_location']=[dict(file=Path(frame.filename).name,line=frame.lineno,function=frame.name)
+                                    for frame in traceback.extract_tb(exc.__traceback__)
+                                    if Path(frame.filename).resolve()==Path(__file__).resolve()]
+        if page and 'query_failure_state' not in report:
+            try:
+                report['query_failure_state']=page.evaluate("({connected,events:window.queryAudit||[],motors:watchedMotors.map(m=>({id:m.config.id,profile:m.config.profile,polling:m.polling,message:m.queryMessage}))})")
+            except Exception:
+                pass
     finally:
         if proc:
             proc.terminate()
