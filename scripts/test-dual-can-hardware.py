@@ -1,0 +1,220 @@
+#!/usr/bin/env python3
+"""Opt-in physical dual CAN acceptance using the explicit STM32H723 SWD fixture.
+
+Two independent STM32 controllers send/observe actual CAN frames. USB admission
+or ESP-NOW ACK alone cannot pass a case. No motor control commands are issued.
+Run after dual-can-pair.py --keep-dual. Always attempts USB+CAN restoration.
+"""
+import argparse
+import asyncio
+import hashlib
+import json
+from pathlib import Path
+import re
+import secrets
+import socket
+import struct
+import subprocess
+import tempfile
+import time
+
+from usb_management import LocalUsb
+from can_scope.usb_transport import prepare_usb
+
+
+class Fixture:
+    def __init__(self, elf):
+        output=subprocess.check_output(['arm-none-eabi-nm','-n',str(elf)],text=True)
+        self.symbols={p[2]:int(p[0],16) for line in output.splitlines()
+                      if len(p:=line.split())==3 and re.fullmatch('[0-9a-fA-F]+',p[0])}
+        for key in ['can_bench','can1_periodic','can2_periodic','fatal_error']:
+            if key not in self.symbols:
+                raise ValueError('Expected instrumented dual-bus fixture ELF')
+        image=elf.with_suffix('.bin').read_bytes()
+        with tempfile.TemporaryDirectory(prefix='can-fixture-verify-') as d:
+            target=Path(d)/'running.bin'
+            self.command(f'dump_image {{{target}}} 0x08000000 {len(image)}')
+            if target.read_bytes()!=image:
+                raise ValueError('Running STM32 image differs from fixture ELF/bin')
+        self.image_sha256=hashlib.sha256(image).hexdigest()
+
+    @staticmethod
+    def command(command):
+        with socket.create_connection(('127.0.0.1',6666),2) as link:
+            link.settimeout(5)
+            link.sendall(command.encode()+b'\x1a')
+            reply=b''
+            while b'\x1a' not in reply:
+                block=link.recv(8192)
+                if not block:
+                    raise ConnectionError('SWD control disconnected')
+                reply+=block
+        return reply.decode().rstrip('\x1a')
+
+    def read(self,address,count=1):
+        text=self.command(f'capture {{mdw 0x{address:x} {count}}}')
+        words=[]
+        for line in text.splitlines():
+            if re.match(r'0x[0-9a-f]+:',line):
+                words.extend(int(x,16) for x in line.split(':',1)[1].split())
+        if len(words)!=count:
+            raise ValueError('SWD response length mismatch')
+        return words
+
+    def write(self,address,values):
+        for i,value in enumerate(values):
+            self.command(f'mww 0x{address+4*i:x} 0x{value:x}')
+
+    def quiet(self,value):
+        for symbol in ['can1_periodic','can2_periodic']:
+            self.write(self.symbols[symbol],[value])
+
+    def health(self):
+        names=['fatal_error','can_bus_off','can_errors','can_rx_lost',
+               'can2_bus_off','can2_errors','can2_rx_lost']
+        return {key:self.read(self.symbols[key])[0] for key in names}
+
+    def transfer(self,bus,identifier,dlc,flags,sequence):
+        source=self.symbols['can_bench']+bus*52
+        dest=self.symbols['can_bench']+(1-bus)*52
+        before=self.read(dest+48)[0]
+        remote=bool(flags&2)
+        data=bytes(8) if remote else bytes((sequence*17+i*29)&255 for i in range(dlc))+bytes(8-dlc)
+        frame=struct.pack('<IBB8sBB',identifier,flags&1,dlc,data,int(remote),0)
+        self.active_case=dict(bus=bus,id=hex(identifier),dlc=dlc,flags=flags,
+                              expected_frame=frame.hex())
+        words=list(struct.unpack('<IIII',frame))
+        self.write(source,words)
+        if self.read(source,4)!=words:
+            raise RuntimeError('SWD request was not written intact')
+        started=time.monotonic()
+        self.write(source+16,[sequence])
+        deadline=started+2
+        delivered=False
+        while time.monotonic()<deadline:
+            state=self.read(source+20,3)
+            if state[0]==sequence:
+                if state[1]:
+                    raise RuntimeError('STM32 CAN enqueue failed')
+                delivered=True
+                break
+            time.sleep(.005)
+        if not delivered:
+            raise TimeoutError('STM32 source did not accept fixture request')
+        while time.monotonic()<deadline:
+            actual=struct.pack('<IIII',*self.read(dest+32,4))
+            received=self.read(dest+48)[0]
+            # Byte 15 is C struct alignment padding, not part of a CAN frame.
+            if received>before and actual[:15]==frame[:15]:
+                if received!=before+1:
+                    raise RuntimeError('Unexpected extra/duplicate CAN delivery')
+                return dict(direction=f'{bus+1}->{2-bus}',id=hex(identifier),
+                            dlc=dlc,flags=flags,exact_frame=True,
+                            received_delta=received-before,
+                            observer_upper_bound_ms=round((time.monotonic()-started)*1000,3))
+            time.sleep(.005)
+        self.active_case.update(source_state=self.read(source,8),
+                                destination_state=self.read(dest,13))
+        raise TimeoutError('Expected frame not observed on destination physical CAN')
+
+
+def main():
+    ap=argparse.ArgumentParser(description=__doc__)
+    ap.add_argument('--fixture',required=True,choices=['stm32h723-dual'])
+    ap.add_argument('--elf',type=Path,required=True)
+    ap.add_argument('--a',required=True)
+    ap.add_argument('--b',required=True)
+    ap.add_argument('--output',type=Path,required=True)
+    ap.add_argument('--repeat',type=int,default=1,help='Repeat the 50-case physical matrix (1..100)')
+    args=ap.parse_args()
+    if not 1<=args.repeat<=100:
+        ap.error('--repeat must be 1..100')
+    report=dict(ok=False,scope='physical independent STM32 CAN1/CAN2 and two ESP32 analyzers',
+                cases=[],latency_scope='SWD observer upper bound; not pure wireless latency')
+    fixture=None
+    try:
+        fixture=Fixture(args.elf)
+        report['fixture_image_sha256']=fixture.image_sha256
+        report['before']=fixture.health()
+        if any(report['before'].values()):
+            raise RuntimeError('Fixture has existing CAN errors; no counters cleared')
+        fixture.quiet(0)
+        time.sleep(.3)
+        report['dual_before']=[]
+        for device in [args.a,args.b]:
+            usb=LocalUsb(device)
+            try:
+                state=usb.dual()
+                if state['state']!=3 or not state['bound'] or state['uart']:
+                    raise RuntimeError('Both devices must be paired and online in CAN mode')
+                report['dual_before'].append(usb.dual(6))
+            finally:
+                usb.close()
+        sequence=secrets.randbelow(0xffff)+1
+        vectors=[(0x6a0+n,n,0) for n in range(9)]+[(0x1abc000+n,n,1) for n in range(9)]
+        vectors+=[(0,0,0),(0x7ff,8,0),(0x1fffffff,8,1),
+                  (0x610,0,2),(0x611,8,2),(0x1abcd00,0,3),(0x1abcd01,8,3)]
+        for repeat in range(args.repeat):
+            for bus in range(2):
+                for identifier,dlc,flags in vectors:
+                    sequence+=1
+                    row=fixture.transfer(bus,identifier,dlc,flags,sequence)
+                    row['round']=repeat+1
+                    report['cases'].append(row)
+        report['after']=fixture.health()
+        if any(report['after'].values()):
+            raise RuntimeError('Fixture CAN error during physical delivery')
+        expected=len(vectors)*args.repeat
+        deadline=time.monotonic()+1
+        while True:
+            report['dual_after']=[]
+            for device in [args.a,args.b]:
+                usb=LocalUsb(device)
+                try:
+                    report['dual_after'].append(usb.dual(6))
+                finally:
+                    usb.close()
+            report['dual_delta']=[{k:(end[k]-begin[k])&0xffffffff
+                for k in ['sent','received','dropped']} for begin,end in
+                zip(report['dual_before'],report['dual_after'])]
+            if all(d==dict(sent=expected,received=expected,dropped=0) for d in report['dual_delta']):
+                break
+            if time.monotonic()>=deadline:
+                raise AssertionError('Dual CAN accounting differs from physical deliveries')
+            time.sleep(.05)
+        report['ok']=True
+    except Exception as e:
+        report['failure']=type(e).__name__
+        if fixture:
+            report['failed_case']=getattr(fixture,'active_case',None)
+            try:
+                report['failure_health']=fixture.health()
+                report['dual_failure']=[]
+                for device in [args.a,args.b]:
+                    usb=LocalUsb(device)
+                    try:
+                        report['dual_failure'].append(usb.dual(6))
+                    finally:
+                        usb.close()
+            except Exception as capture_error:
+                report['failure_capture_error']=type(capture_error).__name__
+    finally:
+        restored=[]
+        for device in [args.a,args.b]:
+            try:
+                asyncio.run(prepare_usb(device,data=0));restored.append(True)
+            except Exception:
+                restored.append(False)
+        report['restored_usb_can']=restored
+        if fixture and all(restored):
+            fixture.quiet(1)
+            report['periodic_restored']=True
+        args.output.parent.mkdir(parents=True,exist_ok=True)
+        args.output.write_text(json.dumps(report,indent=2)+'\n')
+    print(json.dumps(dict(ok=report['ok'],cases=len(report['cases']),
+                          failure=report.get('failure'),restored=restored)))
+    raise SystemExit(0 if report['ok'] and all(restored) else 1)
+
+
+if __name__=='__main__':
+    main()

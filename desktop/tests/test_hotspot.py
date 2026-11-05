@@ -435,6 +435,7 @@ class HotspotTests(unittest.TestCase):
             owner = dict(uid=os.getuid(), gid=os.getgid(), home=directory)
             secret = parent / 'secret'
             secret.mkdir(mode=0o755)
+            secret.chmod(0o755)  # Deliberately insecure even under umask 077.
             with self.assertRaises(hotspot.HotspotError):
                 hotspot.prepare_secret_directory(owner)
             self.assertEqual(secret.stat().st_mode & 0o777, 0o755)

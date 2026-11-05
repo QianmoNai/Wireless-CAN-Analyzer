@@ -128,7 +128,9 @@ void dual_a_test_uart_coalescing(void) {
   assert(xQueueReceive(uart_out, &m, 0));m.created = wrap_now - 8;
   xQueueReset(uart_out);assert(xQueueSend(uart_out, &m, 0));
   m.created = wrap_now - 15;assert(xQueueSend(uart_out, &m, 0));
-  prepare_uart(wrap_now);assert(coalesce_plain(data) == 40 && pending_at == wrap_now - 15);
+  uint32_t saved_now=now_ms();sim_clock_set(wrap_now);
+  prepare_uart(now_ms());assert(coalesce_plain(data) == 40 && pending_at == wrap_now - 15);
+  sim_clock_set(saved_now);
   // Reset, UART cancellation, role exit, offline, or epoch change during collection.
   for (unsigned action = 0; action < 5; action++) {
     coalesce_reset();epoch = atomic_load(&generation);

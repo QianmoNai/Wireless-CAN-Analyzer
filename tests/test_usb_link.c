@@ -45,6 +45,12 @@ int ble_bridge_settings_command(const uint8_t p[20],bridge_packet_t *reply){
  wire_put_u32(reply->bytes+16,wire_u32(p+16));return command_status;
 }
 bool bridge_packet_is_raw(const bridge_packet_t*p){return p->bytes[1]==1||p->bytes[1]==19;}
+void network_display(uint8_t *state,char ip[16],uint32_t *pin){*state=2;ip[0]=0;*pin=314159;}
+static unsigned local_dual_commands;
+int dual_link_usb_command(const uint8_t p[20],uint8_t reply[20]){
+ local_dual_commands++;memset(reply,0,20);reply[0]=1;reply[1]=DUAL_USB_EVENT;
+ wire_put_u32(reply+16,wire_u32(p+16));return command_status;
+}
 static void feed(uint32_t id,const uint8_t*p){uint8_t frame[32];usb_encode(frame,id,p);service(frame,13);service(frame+13,19);}
 static void hello(uint32_t id){uint8_t p[20]={1,USB_HELLO};memcpy(p+4,"CANUSB1",7);feed(id,p);}
 int main(void){
@@ -77,6 +83,24 @@ int main(void){
  hello(13);feed(13,bye);assert(!usb_link_connected());
  hello(14);short_write=true;feed(14,ping);assert(!usb_link_connected());short_write=false;
  hello(15);usb_link_reset();assert(!usb_link_connected());feed(15,command);assert(commands_received==2);
+ // Active local pairing display can be read only through physical USB.
+ selected=false;sent_count=0;
+ uint8_t pairing_display[20]={1,0x1b};wire_put_u32(pairing_display+16,600);
+ feed(601,pairing_display);
+ assert(sent_count==64&&sent[41]==24&&sent[42]==1&&wire_u32(sent+44)==314159);
+ pairing_display[5]=1;feed(601,pairing_display);
+ assert(sent_count==96&&sent[74]==0x13);pairing_display[5]=0;
+ selected=true;hello(602);before=sent_count;
+ feed(603,pairing_display);assert(sent_count==before);
+ feed(602,bye);
+ // USB-only management works in dual mode without claiming a CAN session.
+ selected=false;sent_count=0;command_status=0;
+ uint8_t dual[20]={1,DUAL_USB_COMMAND};wire_put_u32(dual+16,700);
+ feed(701,dual);assert(local_dual_commands==1&&sent_count==64&&!usb_link_connected());
+ selected=true;hello(702);before=sent_count;
+ feed(703,dual);assert(local_dual_commands==1&&sent_count==before);
+ feed(702,dual);assert(local_dual_commands==2&&sent_count==before+64);
+ feed(702,bye);
  // Non-USB mode keeps the decoder across reads and only admits bootstrap.
  selected=false;sent_count=0;command_status=0;
  uint8_t query[20]={1,SETTINGS_COMMAND};wire_put_u32(query+16,123);

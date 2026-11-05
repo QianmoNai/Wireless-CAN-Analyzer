@@ -4,6 +4,7 @@
 #include "uart_bridge.h"
 #include "network_link.h"
 #include "settings_protocol.h"
+#include "dual_link.h"
 #include "sdkconfig.h"
 #if CONFIG_IDF_TARGET_ESP32S3
 #include "driver/usb_serial_jtag.h"
@@ -54,6 +55,27 @@ static bool send_packet(uint32_t session,const uint8_t payload[20]){
 }
 static bool incoming(uint32_t session,uint8_t p[20]){
     if(!session||p[0]!=1)return true;
+    if(p[1]==0x1b){
+        // Mirror only the active local BLE pairing display over the attached
+        // physical USB cable. Never expose Wi-Fi credentials or TLS keys.
+        if(atomic_load(&session_id)&&session!=atomic_load(&session_id))return true;
+        bool valid=wire_u32(p+16)!=0;
+        for(unsigned i=2;i<16;i++)if(p[i])valid=false;
+        uint8_t ack[20]={1,18,valid?0:0x13,0x1b};memcpy(ack+4,p+16,4);
+        if(!send_packet(session,ack))return false;
+        if(!valid)return true;
+        uint8_t state;char ip[16];uint32_t pin;
+        network_display(&state,ip,&pin);
+        uint8_t reply[20]={1,24,pin<=999999,state};
+        wire_put_u32(reply+4,pin);memcpy(reply+16,p+16,4);
+        return send_packet(session,reply);
+    }
+    if(p[1]==DUAL_USB_COMMAND){
+        if(atomic_load(&session_id)&&session!=atomic_load(&session_id))return true;
+        uint8_t reply[20];int status=dual_link_usb_command(p,reply);
+        uint8_t ack[20]={1,18,(uint8_t)status,p[1]};memcpy(ack+4,p+16,4);
+        return send_packet(session,ack)&&(status||send_packet(session,reply));
+    }
     if(p[1]==SETTINGS_COMMAND){
         // A physical bootstrap can only query or select USB. It never grants
         // a data session, and an existing session still excludes other IDs.

@@ -13,6 +13,10 @@ void dual_link_set_owner(TaskHandle_t owner);
 void dual_link_set_uart_owner(TaskHandle_t owner);
 void dual_link_button(int button);
 void dual_link_view(dual_view_t *out);
+// Physical USB management only. Never dispatch this from BLE or LAN commands.
+// No session keys are exported. Confirm binds target MAC, fresh host token and SAS.
+enum { DUAL_USB_COMMAND=0x1a, DUAL_USB_EVENT=23 };
+int dual_link_usb_command(const uint8_t request[20], uint8_t reply[20]);
 bool dual_link_connected(void);
 void dual_link_can_rx(const uint8_t packet[20]);
 bool dual_link_can_take(uint8_t packet[20]);

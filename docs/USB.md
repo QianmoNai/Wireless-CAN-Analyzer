@@ -63,3 +63,27 @@ XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 QT_QPA_PLATFORM=wayland
 编译、主机协议测试、桌面界面测试与物理收发证据分别记录。本次 ESP32-S3 双串口实机验证已覆盖 USB 会话及 UART 115200/230400 的 HEX、UTF-8 双向字节比对；CAN 单次发送得到 type3 / ACK error，未观察到 CAN RX，因此没有证明真实 CAN 总线双向通信成功。断线恢复与桌面验证的具体覆盖范围以交付测试日志、结果文件为准。
 
 Linux 1.2.14 的原生 USB 打开入口将 DTR/RTS 在一次 ioctl 中同时清除。实体 ESP32-S3 台架曾在分步清除两线时报告 USB UART reset；仅设置两个布尔值为 false 不足以避免过渡状态。设置脚本与桌面传输复用 `can_scope.serial_port.open_native_port`；不需要修改系统网络或设备保存的配置。
+
+桌面 1.2.15 在取消 USB 设置或数据写入时等待当前有超时限制的 OS 写入结束，再关闭串口或释放写锁；重复取消不提前释放，也不重发设置或 CAN 命令。取消后已提交的设置结果仍可能未知，应重新读取确认。
+
+## 物理 USB 管理（固件 1.24.4）
+
+以下入口仅由原生 USB CUSB 解析器处理，在蓝牙、Wi-Fi、双机和 USB 模式均可使用，无需取得 CAN 数据会话。存在活动 USB 会话时仍排除其他 session ID。每个请求有非零 token，返回 type18 准入结果；状态非零时不返回事件。不会通过 BLE 或 TLS 开放这两个入口。
+
+双机命令 `0x1a`：byte0=1，byte1=`0x1a`，byte2 操作，byte3 角色，byte4–9 目标 MAC，byte10–11=0，u32 校验码在12，u32 token在16。
+
+| 操作 | 含义与约束 |
+| --- | --- |
+| 0 | 读当前状态；角色、MAC、校验码字段须为零 |
+| 1 | 开始一次本机 USB 配对授权；角色须匹配正在运行的 A=2/B=3，MAC 须为指定另一端的单播地址，校验码为零 |
+| 2 | A 选择指定 MAC 的新鲜广播候选；使用本次开始时的 token 和同一 MAC |
+| 3 | 确认当前已派生校验码；token、角色、MAC、校验码均须匹配，且配对窗口未过期 |
+| 4 | 取消本次 USB 配对；token、角色、MAC 须匹配，保留旧绑定 |
+| 5 | 读本机 STA MAC；请求其余字段与操作0相同 |
+| 6 | 读双机累计统计；请求其余字段与操作0相同 |
+
+事件23：byte2=结果，byte3=`dual_view.h` 状态；byte4–9=对端 MAC（操作5为本机 MAC），byte10 标记 bit0已绑定/bit1本机已确认/bit2配对活动/bit3 UART，byte11角色，u32校验码在12，原token在16。操作6改为 u32 sent/received/dropped 在4/8/12。配对密钥不导出。开始授权后仅接受指定 MAC 的配对报文；手动重开、取消、模式退出及超时都会使旧 USB 确认失效。
+
+本机蓝牙配对显示命令 `0x1b`：byte0=1、byte1=`0x1b`、byte2–15全零，非零token在16。事件24：byte2表示是否有活动六位码，byte3为本机网络显示状态，u32配对码在4（无活动码时为 `0xffffffff`），byte8–15零，原token在16。该入口仅把当前本机屏幕的临时蓝牙配对码提供给物理 USB 主机，以便电脑自动完成系统配对对话框；不提供 Wi-Fi 密码、TLS私钥或令牌。调用方不得记录配对码。无线配网依然要求 LE Secure Connections、加密和 MITM 认证。
+
+电脑配对示例见 [双机指南](DUAL_CAN.md#电脑通过-usb-配对固件-1244)。

@@ -43,6 +43,7 @@ cc -std=c11 -Wall -Wextra -Werror -DCAN_DUAL_UART_LOOPBACK_TEST=1 -Itests/dual_s
 "$test_build_dir/test_dual_uart_loopback"
 compile_run test_firmware -DCONFIG_IDF_TARGET_ESP32S3=1
 compile_run test_home_status firmware/main/home_status.c
+bash fixtures/stm32-h723/tests/run.sh
 compile_run test_home_temperatures firmware/main/home_status.c
 compile_run test_can_load firmware/main/can_load.c
 compile_run test_can_rates firmware/main/can_rates.c
@@ -80,7 +81,7 @@ java_src=android/app/src/main/java/dev/qianmo/canview
 javac -encoding UTF-8 -d "$test_build_dir/java" \
     "$java_src/LanTransport.java" "$java_src/MonitorCommands.java" "$java_src/FeedbackQueries.java" "$java_src/HomeTelemetry.java" \
     "$java_src/PollingStatus.java" "$java_src/ReconnectHistory.java" "$java_src/TelemetryInbox.java" "$java_src/ConnectionPriority.java" "$java_src/BleNotifications.java" "$java_src/LanSubnet.java" tests/*Test.java
-for name in FeedbackQueriesTest HomeTelemetryTest MonitorCommandsTest PollingStatusTest ReconnectHistoryTest TelemetryInboxTest ConnectionPriorityTest BleNotificationsTest LanSubnetTest; do
+for name in FeedbackQueriesTest HomeTelemetryTest MonitorCommandsTest PollingStatusTest ReconnectHistoryTest TelemetryInboxTest ConnectionPriorityTest BleNotificationsTest LanSubnetTest LanDiscoveryTest; do
     java -cp "$test_build_dir/java" "dev.qianmo.canview.$name"
 done
 

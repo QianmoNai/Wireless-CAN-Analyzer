@@ -1,4 +1,5 @@
 // Compile the actual runtime twice to simulate two independent ESP32 devices.
+#define dual_link_usb_command dual_a_usb_command
 #define dual_link_init dual_a_init
 #define dual_link_start dual_a_start
 #define dual_link_stop dual_a_stop
@@ -18,6 +19,7 @@
 #define dual_link_uart_take dual_a_uart_take
 #define dual_link_uart_dropped dual_a_uart_dropped
 #include "../firmware/main/dual_link.c"
+#include "dual_freshness_tests.h"
 void dual_a_tick(void) {
   if (running)
     tick(now_ms());

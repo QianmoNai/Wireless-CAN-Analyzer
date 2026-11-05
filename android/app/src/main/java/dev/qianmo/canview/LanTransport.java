@@ -53,13 +53,27 @@ final class LanTransport implements AutoCloseable {
  }
  interface Discovery {void found(String ip,String id);void finished();}
  static void discover(String expectedId,Discovery listener){new Thread(()->{
-  try(DatagramSocket s=new DatagramSocket()){s.setBroadcast(true);s.setSoTimeout(400);byte[] q="CAN_SCOPE_DISCOVER_1".getBytes("US-ASCII");Set<InetAddress> addresses=new HashSet<>();addresses.add(InetAddress.getByName("255.255.255.255"));
+  try(DatagramSocket s=new DatagramSocket()){s.setBroadcast(true);Set<InetAddress> addresses=new HashSet<>();addresses.add(InetAddress.getByName("255.255.255.255"));
    Enumeration<NetworkInterface> interfaces=NetworkInterface.getNetworkInterfaces();while(interfaces.hasMoreElements())for(InterfaceAddress a:interfaces.nextElement().getInterfaceAddresses())if(a.getBroadcast()!=null)addresses.add(a.getBroadcast());
-   // Firmware before the discovery-length fix expects the 19-byte prefix.
-   // These probes contain no credentials; a reply never replaces TLS pinning.
-   for(InetAddress a:addresses)for(int size:new int[]{q.length,q.length-1})try{s.send(new DatagramPacket(q,size,a,32323));}catch(IOException ignored){}
-   long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(3);
-   while(System.nanoTime()<end){try{byte[] b=new byte[128];DatagramPacket p=new DatagramPacket(b,b.length);s.receive(p);String[] fields=new String(b,0,p.getLength(),"US-ASCII").split(" ");if(fields.length==3&&fields[0].equals("CAN_SCOPE_1")&&fields[1].equals(expectedId)&&fields[2].equals("32323"))listener.found(p.getAddress().getHostAddress(),fields[1]);}catch(SocketTimeoutException ignored){}}
+   probeDiscovery(s,addresses,expectedId,listener,32323);
   }catch(Exception ignored){}finally{listener.finished();}
  },"CAN-LAN-discover").start();}
+ static void probeDiscovery(DatagramSocket s,Collection<InetAddress> addresses,String expectedId,Discovery listener,int port)throws IOException{
+  byte[] q="CAN_SCOPE_DISCOVER_1".getBytes("US-ASCII");Set<String> seen=new HashSet<>();
+  long start=System.nanoTime(),end=start+TimeUnit.SECONDS.toNanos(3),nextProbe=start;int attempts=0;
+  while(System.nanoTime()<end){
+   long now=System.nanoTime();
+   if(attempts<3&&now>=nextProbe){
+    // Read-only probes may be lost while Wi-Fi joins. Retry within the same
+    // bounded scan; discovery never changes saved trust or sends CAN data.
+    for(InetAddress a:addresses)for(int size:new int[]{q.length,q.length-1})try{s.send(new DatagramPacket(q,size,a,port));}catch(IOException ignored){}
+    attempts++;nextProbe=start+TimeUnit.SECONDS.toNanos(attempts);
+   }
+   long waitUntil=attempts<3?Math.min(nextProbe,end):end;
+   long remaining=waitUntil-System.nanoTime();if(remaining<=0)continue;
+   s.setSoTimeout((int)Math.max(1,Math.min(400,TimeUnit.NANOSECONDS.toMillis(remaining))));
+   try{byte[] b=new byte[128];DatagramPacket p=new DatagramPacket(b,b.length);s.receive(p);String[] fields=new String(b,0,p.getLength(),"US-ASCII").split(" ");if(p.getPort()==port&&fields.length==3&&fields[0].equals("CAN_SCOPE_1")&&fields[1].equals(expectedId)&&fields[2].equals("32323")){String ip=p.getAddress().getHostAddress();if(seen.add(ip))listener.found(ip,fields[1]);}}catch(SocketTimeoutException ignored){}
+  }
+ }
+
 }

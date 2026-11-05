@@ -9,6 +9,7 @@
 #define CAN_DUAL_UART_TTL_MS 1000
 #endif
 #define DECLARE(n)                                                             \
+  int dual_##n##_usb_command(const uint8_t p[20],uint8_t out[20]);                \
   bool dual_##n##_init(void);                                                  \
   bool dual_##n##_start(unsigned role);                                        \
   void dual_##n##_stop(void);                                                  \
@@ -26,7 +27,9 @@
   uint32_t dual_##n##_uart_dropped(void);                                      \
   void dual_##n##_tick(void);
 DECLARE(a) DECLARE(b) static int current;
+void dual_a_test_fresh_queue_time(void);
 static uint32_t time_ms;
+void sim_clock_set(uint32_t value) { time_ms=value; }
 static recv_cb_t rx[2];
 static send_cb_t tx[2];
 static bool active[2];
@@ -271,6 +274,41 @@ static void pair_devices(void) {
   ticks(2000);
   assert(dual_a_connected() && dual_b_connected());
 }
+static int usb_control(int node,unsigned op,uint32_t token,uint32_t sas,uint8_t reply[20]) {
+  uint8_t p[20]={1,0x1a,op};
+  if(op>=1 && op<=4) { p[3]=node?DUAL_B:DUAL_A;memcpy(p+4,macs[1-node],6); }
+  dual_put32(p+12,sas);dual_put32(p+16,token);current=node;
+  return node?dual_b_usb_command(p,reply):dual_a_usb_command(p,reply);
+}
+static void pair_devices_usb(void) {
+  uint8_t a[20],b[20];
+  assert(!usb_control(0,5,100,0,a) && !memcmp(a+4,macs[0],6));
+  assert(usb_control(0,3,100,0,a)==0x13); // No host pairing authorization yet.
+  uint8_t bad[20]={1,0x1a,1,DUAL_A};memcpy(bad+4,macs[1],6);dual_put32(bad+16,66);
+  bad[10]=1;current=0;assert(dual_a_usb_command(bad,a)==0x13);bad[10]=0;
+  memcpy(bad+4,macs[0],6);assert(dual_a_usb_command(bad,a)==0x13); // Self target.
+  assert(!usb_control(1,1,101,0,b));assert(!usb_control(0,1,102,0,a));
+  ticks(500);
+  assert(usb_control(0,2,99,0,a)==0x13); // Stale/wrong host token.
+  assert(!usb_control(0,2,102,0,a));ticks(1500);
+  assert(!usb_control(0,0,103,0,a));assert(!usb_control(1,0,104,0,b));
+  assert(a[3]==DUAL_UI_CHECK && b[3]==DUAL_UI_CHECK && dual_u32(a+12)==dual_u32(b+12));
+  uint32_t sas=dual_u32(a+12);
+  uint8_t wrong_peer[20]={1,0x1a,3,DUAL_A};memcpy(wrong_peer+4,macs[1],6);
+  wrong_peer[9]^=4;dual_put32(wrong_peer+12,sas);dual_put32(wrong_peer+16,102);
+  current=0;assert(dual_a_usb_command(wrong_peer,a)==0x13);
+  assert(usb_control(0,3,102,(sas+1)%1000000,a)==0x13);
+  assert(!usb_control(0,3,102,sas,a));ticks(1000);
+  assert(!dual_a_connected() && !dual_b_connected());
+  assert(!usb_control(1,3,101,sas,b));ticks(2000);
+  assert(dual_a_connected() && dual_b_connected());
+  assert(usb_control(0,3,102,sas,a)==0x13); // Completed authorization cannot be reused.
+  ticks(11000);
+  assert(!usb_control(1,1,201,0,b));assert(!usb_control(0,1,202,0,a));
+  ticks(DUAL_PAIR_MS+10);
+  assert(usb_control(0,3,202,sas,a)==0x13); // Expiry invalidates host approval.
+  ticks(2000);assert(dual_a_connected() && dual_b_connected()); // Old binding retained.
+}
 static void input(int node, uint32_t id, uint8_t flags, uint8_t dlc) {
   uint8_t p[20] = {1, 1, flags, dlc};
   dual_put32(p + 4, id);
@@ -294,7 +332,11 @@ int main(void) {
   assert(dual_b_init());
   start(0);
   start(1);
+  pair_devices_usb();
   pair_devices();
+  current=0;dual_a_test_fresh_queue_time();
+  uint32_t before_wrap=time_ms;sim_clock_set(0);
+  dual_a_test_fresh_queue_time();sim_clock_set(before_wrap);
   assert(stored[0] && stored[1] &&
          !memcmp(storage[0] + 11, storage[1] + 11, 32));
   // Bidirectional bridge preserves standard/extended IDs, RTR and DLC.

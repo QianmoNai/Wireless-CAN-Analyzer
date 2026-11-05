@@ -61,6 +61,8 @@ int usb_serial_jtag_read_bytes(void*p,uint32_t n,uint32_t w){(void)p;(void)n;(vo
 void ble_bridge_reset_session(void){resets++;}
 int ble_bridge_command(const uint8_t p[20]){(void)p;return 0;}
 int ble_bridge_settings_command(const uint8_t p[20],bridge_packet_t*r){(void)p;(void)r;return 0;}
+void network_display(uint8_t *state,char ip[16],uint32_t *pin){*state=0;ip[0]=0;*pin=UINT32_MAX;}
+int dual_link_usb_command(const uint8_t p[20],uint8_t reply[20]){(void)p;(void)reply;return 0x13;}
 static atomic_uint drop_total,dropped;
 #define ud_add(word,n) ((void)0)
 '''

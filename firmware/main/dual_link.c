@@ -56,6 +56,8 @@ static candidate_t candidates[CANDIDATES];
 static unsigned candidate_count, candidate_index;
 static dual_pair_t pair;
 static dual_session_t session;
+static uint32_t usb_pair_token;
+static uint8_t usb_pair_peer[6];
 static uint32_t next_pair, next_hello, pair_saved_at, ack_sequence;
 static uint8_t pending[DUAL_MAX_PACKET];
 static size_t pending_size;
@@ -174,6 +176,8 @@ static void restore_bound(void) {
   next_hello = 0;
 }
 static void cancel_pair(void) {
+  usb_pair_token = 0;
+  memset(usb_pair_peer, 0, sizeof(usb_pair_peer));
   if (pair.selected && (!bound || memcmp(pair.peer, record + 5, 6)))
     esp_now_del_peer(pair.peer);
   dual_pair_clear(&pair);
@@ -252,6 +256,7 @@ static void consume_radio(const radio_message_t *m, uint32_t now) {
   if (!dual_packet_valid(m->data, m->size, role))
     return;
   if (pair.active && m->data[4] <= DUAL_CONFIRM) {
+    if (usb_pair_token && memcmp(m->mac, usb_pair_peer, 6)) return;
     discover(m, now);
     unsigned before = pair.selected + 2 * pair.committed + 4 * pair.derived +
                       8 * pair.remote_confirmed;
@@ -346,6 +351,9 @@ static void prepare_can(uint32_t now) {
   can_message_t m;
   uint32_t oldest = now;
   while (plain[0] < DUAL_BATCH && xQueueReceive(can_out, &m, 0) == pdTRUE) {
+    // ISR/RX producers can enqueue after tick captured `now`. Subtracting
+    // that newer receipt time from the stale snapshot wraps to a huge age.
+    now = now_ms();
     if (m.generation != atomic_load(&generation) ||
         (uint32_t)(now - m.created) >= DUAL_FRAME_TTL_MS) {
       atomic_fetch_add(&drop_count, 1);
@@ -398,6 +406,7 @@ static void prepare_uart(uint32_t now) {
                           next.size > DUAL_UART_CHUNK - combined.size))
       break;
     if (xQueueReceive(uart_out, &next, 0) != pdTRUE) break;
+    now = now_ms();
     if (!uart_prepare_current(epoch)) {
       atomic_fetch_add(&uart_drop_count, next.size);
       break;
@@ -610,7 +619,68 @@ void dual_link_stop(void) {
   }
   role = 0;
   bound = false;
+  usb_pair_token = 0;
+  memset(usb_pair_peer, 0, sizeof(usb_pair_peer));
   xSemaphoreGive(lock);
+}
+
+int dual_link_usb_command(const uint8_t p[20], uint8_t out[20]) {
+  if (p[0]!=1 || p[1]!=DUAL_USB_COMMAND || p[2]>6 || p[10] || p[11] ||
+      !dual_u32(p+16)) return 0x13;
+  unsigned op=p[2]; uint32_t token=dual_u32(p+16), code=dual_u32(p+12);
+  bool read=op==0 || op==5 || op==6;
+  static const uint8_t zero[6]={0};
+  if ((read && (p[3] || memcmp(p+4,zero,6) || code)) ||
+      (!read && (p[3]<DUAL_A || p[3]>DUAL_B || (p[4]&1) ||
+                 !memcmp(p+4,zero,6) || (op!=3 && code)))) return 0x13;
+  if (!worker) return 0x11;
+  xSemaphoreTake(lock,portMAX_DELAY);
+  int result=0;
+  uint32_t now=now_ms();
+  if (!read && (!running || role!=p[3] || atomic_load(&requested_role)!=role ||
+                !memcmp(p+4,mac,6))) result=0x13;
+  if (!result && op==1) {
+    // A repeated BEGIN with the same live authorization is idempotent.
+    if (usb_pair_token!=token || memcmp(p+4,usb_pair_peer,6) || !pair.active || pair_saved) {
+      begin_pair(now);
+      if (!pair.active) result=0x11;
+      else { usb_pair_token=token; memcpy(usb_pair_peer,p+4,6); }
+    }
+  } else if (!result && !read) {
+    if (!pair.active || pair_saved || (uint32_t)(now-pair.started)>=DUAL_PAIR_MS ||
+        token!=usb_pair_token || memcmp(p+4,usb_pair_peer,6)) result=0x13;
+    else if (op==2) {
+      if (role!=DUAL_A || pair.selected) result=0x13;
+      else {
+        unsigned i=0;
+        while (i<candidate_count && memcmp(candidates[i].mac,usb_pair_peer,6)) ++i;
+        if (i==candidate_count || (uint32_t)(now-candidates[i].seen)>=3000 ||
+            !dual_pair_select(&pair,candidates[i].mac,candidates[i].commit)) result=0x13;
+      }
+    } else if (op==3) {
+      if (!pair.derived || memcmp(pair.peer,usb_pair_peer,6) || code!=pair.code) result=0x13;
+      else pair.local_confirmed=true;
+    } else if (op==4) cancel_pair();
+    next_pair=0;
+  }
+  memset(out,0,20);out[0]=1;out[1]=DUAL_USB_EVENT;out[2]=result;
+  out[3]=show_error?DUAL_UI_ERROR:!running?DUAL_UI_OFF:
+      pair.active&&!pair_saved?(pair.derived?DUAL_UI_CHECK:pair.selected?DUAL_UI_HANDSHAKE:
+      role==DUAL_A?DUAL_UI_SEARCH:DUAL_UI_WAIT):
+      bound?(session.online?DUAL_UI_ONLINE:DUAL_UI_OFFLINE):DUAL_UI_UNBOUND;
+  if (op==5) memcpy(out+4,mac,6);
+  else if (pair.selected) memcpy(out+4,pair.peer,6);
+  else if (usb_pair_token) memcpy(out+4,usb_pair_peer,6);
+  else if (bound) memcpy(out+4,record+5,6);
+  out[10]=(bound?1:0)|(pair.local_confirmed?2:0)|(pair.active?4:0)|(live_uart?8:0);
+  out[11]=role;dual_put32(out+12,pair.code);
+  if (op==6) {
+    dual_put32(out+4,atomic_load(&sent_count));
+    dual_put32(out+8,atomic_load(&received_count));
+    dual_put32(out+12,atomic_load(&drop_count));
+  }
+  dual_put32(out+16,token);
+  xSemaphoreGive(lock);wake_worker();return result;
 }
 void dual_link_set_owner(TaskHandle_t owner) { can_owner = owner; }
 void dual_link_set_uart_owner(TaskHandle_t owner) { uart_owner = owner; }

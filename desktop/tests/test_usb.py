@@ -2,6 +2,7 @@ import asyncio
 from pathlib import Path
 import sys
 from types import SimpleNamespace
+import threading
 import unittest
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -126,6 +127,38 @@ class UsbTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(port.is_open)
         self.assertTrue(all(t.done() for t in self.link.tasks))
         self.assertEqual(Decoder().feed(port.writes[-1])[0][1][1],0x7d)
+
+    async def test_repeated_cancel_keeps_write_lock_until_worker_finishes(self):
+        await self.link.connect('TEST')
+        started, release = threading.Event(), threading.Event()
+        original = self.link.port.write
+        payload = packet(16,x=0x7ff)
+        def blocked(frame):
+            if Decoder().feed(frame)[0][1] == payload:
+                started.set()
+                if not release.wait(2):
+                    raise TimeoutError('test did not release write')
+            return original(frame)
+        self.link.port.write = blocked
+        task = asyncio.create_task(self.link.write(payload))
+        held = False
+        try:
+            async with asyncio.timeout(1):
+                while not started.is_set():
+                    await asyncio.sleep(.005)
+            for _ in range(2):
+                task.cancel()
+                await asyncio.sleep(.02)
+            held = self.link.lock.locked() and not task.done()
+        finally:
+            release.set()
+            result = await asyncio.gather(task, return_exceptions=True)
+        self.assertTrue(held)
+        self.assertIsInstance(result[0], asyncio.CancelledError)
+        self.assertFalse(self.link.lock.locked())
+        commands = [Decoder().feed(frame)[0][1] for frame in self.link.port.writes]
+        self.assertEqual(commands.count(payload), 1)
+        self.assertFalse(self.errors)
     async def test_engine_usb_keeps_wifi_and_ble_identity(self):
         saved=dict(mode='usb',address='BLE:OLD',usb_port='TEST',token='saved',ip='192.168.1.2')
         c=Channel(lambda *args:None,saved)
@@ -142,6 +175,52 @@ class UsbTests(unittest.IsolatedAsyncioTestCase):
 
 
 class BootstrapTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cancel_waits_for_inflight_settings_write_before_closing(self):
+        for blocked_operation in (0, 1):
+            with self.subTest(operation=blocked_operation):
+                started, release = threading.Event(), threading.Event()
+                class BlockingSettings(FakeSerial):
+                    writing = False
+                    closed_during_write = False
+                    def close(self):
+                        self.closed_during_write |= self.writing
+                        super().close()
+                    def write(self, frame):
+                        self.writes.append(frame)
+                        for session, p in self.decoder.feed(frame):
+                            if p[2] == blocked_operation:
+                                self.writing = True
+                                started.set()
+                                try:
+                                    if not release.wait(2):
+                                        raise TimeoutError('test did not release write')
+                                finally:
+                                    self.writing = False
+                            if p[2] == 0:
+                                self.input.extend(encode(session,packet(22,b=4,y=115200,token=u32(p,16))))
+                        return len(frame)
+                port = BlockingSettings()
+                with patch('can_scope.serial_port.NativeUsbSerial',return_value=port):
+                    task = asyncio.create_task(prepare_usb('TEST',data=1))
+                    try:
+                        async with asyncio.timeout(1):
+                            while not started.is_set():
+                                await asyncio.sleep(.005)
+                        task.cancel()
+                        # Give cancellation a chance to reach the writer while
+                        # its worker is still blocked, then release it.
+                        await asyncio.sleep(.02)
+                        task.cancel()
+                        await asyncio.sleep(.02)
+                    finally:
+                        release.set()
+                        result = await asyncio.gather(task, return_exceptions=True)
+                self.assertIsInstance(result[0], asyncio.CancelledError)
+                self.assertFalse(port.closed_during_write)
+                self.assertFalse(port.is_open)
+                commands = [Decoder().feed(frame)[0][1][2] for frame in port.writes]
+                self.assertEqual(commands, [0] if blocked_operation == 0 else [0, 1])
+
     async def test_explicit_bootstrap_persists_once_and_releases_port(self):
         class SettingsSerial(FakeSerial):
             network = 0

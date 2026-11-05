@@ -4,14 +4,33 @@ import secrets
 import time
 from .usb_protocol import Decoder, encode, HELLO, PING, BYE
 from .protocol import device_settings_command, device_settings_status
-from .serial_port import open_native_port
 
 HANDSHAKE_TIMEOUT = 4.0
 HANDSHAKE_INTERVAL = 0.5
 
 
 def open_port(device):
+    from .serial_port import open_native_port
     return open_native_port(device)
+
+
+async def _write_serial_once(port, frame):
+    pending = asyncio.create_task(asyncio.to_thread(port.write, frame))
+    try:
+        return await asyncio.shield(pending)
+    except asyncio.CancelledError:
+        # Cancelling to_thread does not stop the bounded OS write. Even a
+        # second cancel must not release its port/lock while it is running.
+        while not pending.done():
+            try:
+                await asyncio.shield(pending)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if not pending.cancelled():
+            pending.exception()
+        raise
 
 
 async def prepare_usb(device, data=None, baud=None, timeout=8.0):
@@ -30,7 +49,8 @@ async def prepare_usb(device, data=None, baud=None, timeout=8.0):
         while time.monotonic() < deadline:
             if time.monotonic() >= due:
                 frame = encode(session, p)
-                if await asyncio.to_thread(port.write, frame) != len(frame):
+                count = await _write_serial_once(port, frame)
+                if count != len(frame):
                     raise ConnectionError('USB 设置写入不完整，结果未知')
                 due = time.monotonic() + (.25 if retry else timeout)
             for nonce, response in decoder.feed(port.read(min(4096, port.in_waiting))):
@@ -166,13 +186,7 @@ class UsbTransport:
             frame = encode(self.session, payload)
             try:
                 # Bound blocking serial writes away from the control event loop.
-                pending = asyncio.create_task(asyncio.to_thread(self.port.write, frame))
-                try:
-                    count = await asyncio.shield(pending)
-                except asyncio.CancelledError:
-                    # Keep the write lock until the bounded OS write actually ends.
-                    await asyncio.gather(pending, return_exceptions=True)
-                    raise
+                count = await _write_serial_once(self.port, frame)
                 if count != len(frame):
                     raise ConnectionError('USB 写入不完整，结果未知；请重新连接')
             except Exception:

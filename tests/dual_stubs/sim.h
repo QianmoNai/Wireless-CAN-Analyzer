@@ -58,6 +58,7 @@ unsigned ulTaskNotifyTake(int clear, unsigned wait);
 void vTaskDelay(unsigned ticks);
 void taskYIELD(void);
 int64_t esp_timer_get_time(void);
+void sim_clock_set(uint32_t value);
 void esp_read_mac(uint8_t *mac, int type);
 int esp_now_init(void);
 int esp_now_deinit(void);

@@ -1,4 +1,5 @@
 // Compile the actual runtime twice to simulate two independent ESP32 devices.
+#define dual_link_usb_command dual_b_usb_command
 #define dual_link_init dual_b_init
 #define dual_link_start dual_b_start
 #define dual_link_stop dual_b_stop
