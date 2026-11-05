@@ -18,6 +18,18 @@ public class TelemetryInboxTest{
   List<TelemetryInbox.Frame> serial=q.drain(10,true);check(serial.size()==1&&serial.get(0).data[1]==19);
   byte[] tx=packet(2,3);check(TelemetryInbox.ordinary(tx));tx[16]=1;check(!TelemetryInbox.ordinary(tx));
   q.clear();check(q.dropped()==0&&!q.pending(true));
+  // An early capability/status packet and ordinary CAN frame survive several
+  // pre-ready drain attempts, retain receipt age/session, then management wins.
+  check(q.offer(packet(5,60),12,400));check(q.offer(packet(1,61),12,401));
+  for(int attempt=0;attempt<3;attempt++){
+   check(q.drain(128,true,false).isEmpty());check(!q.pending(true,false));
+  }
+  check(q.pending(true)&&q.dropped()==0);
+  List<TelemetryInbox.Frame> early=q.drain(128,false,true);
+  check(early.size()==1&&early.get(0).data[1]==5&&early.get(0).arrived==400&&early.get(0).session==12);
+  check(q.pending(true,true)&&!q.pending(false,true));
+  check(q.drain(128,true,true).get(0).data[8]==61);q.clear();
+  check(q.offer(packet(5,62),12,402));q.clear();check(q.drain(128,true,true).isEmpty());
   for(int type:new int[]{4,5,12,13,14,16})check(!TelemetryInbox.ordinary(packet(type,0)));
   check(q.offer(packet(13,20),8,300));for(int i=0;i<100;i++)check(q.offer(packet(1,i),8,301+i));
   check(q.drain(1,false).get(0).data[1]==13);q.clear();

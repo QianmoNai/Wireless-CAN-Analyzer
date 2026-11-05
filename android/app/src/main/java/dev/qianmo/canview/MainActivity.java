@@ -543,7 +543,7 @@ public class MainActivity extends Activity {
         disconnectDevice();networkIp=ip;connectionMode="wifi";getPreferences(MODE_PRIVATE).edit().putString("network_ip_"+slot,ip).putString("connection_mode_"+slot,"wifi").apply();
         lanConnecting=true;state("connecting","正在验证设备并连接局域网…");networkState();
         LanTransport next=new LanTransport(new LanTransport.Listener(){
-            public void connected(LanTransport source){main.post(()->{if(lan!=source||closed||!foreground){source.close();return;}synchronized(transportLock){ready=true;lanConnecting=false;}state("ready","局域网已连接 · "+networkIp);networkState();});}
+            public void connected(LanTransport source){main.post(()->{if(lan!=source||closed||!foreground){source.close();return;}synchronized(transportLock){ready=true;lanConnecting=false;}state("ready","局域网已连接 · "+networkIp);networkState();scheduleReceiveDrain();});}
             public void packet(LanTransport source,byte[] packet){if(lan!=source)return;if(packet[1]==18){enqueueControl(null,packet[2]&255,null,SystemClock.elapsedRealtime());return;}receive(null,packet);}
             public void failed(LanTransport source,String message){main.post(()->{if(lan==source)fail(message);});}
         },target->LanNetwork.socket(MainActivity.this,target));lan=next;next.connect(ip,32323,networkPin,networkToken);
@@ -752,7 +752,7 @@ public class MainActivity extends Activity {
     private final Runnable drainReceived=new Runnable(){public void run(){
         if(closed){receiveDrainScheduled.set(false);return;}
         int session=generation,page=pageGeneration;JSONArray raw=new JSONArray(),samples=new JSONArray();String key=detailKey;
-        for(TelemetryInbox.Frame frame:received.drain(128,!telemetryDeliveryPending)){
+        for(TelemetryInbox.Frame frame:received.drain(128,!telemetryDeliveryPending,ready)){
             if(frame.session!=generation||!ready)continue;
             processReceived(frame,raw,samples,key);
         }
@@ -762,10 +762,10 @@ public class MainActivity extends Activity {
             JSONArray batch=samples.length()>0?samples:raw;
             JSONObject data=obj("items",batch,"dropped",uiDropped,"key",key,"packets",samples.length()>0?raw:new JSONArray(),"sentAt",System.currentTimeMillis());
             telemetryDeliveryPending=true;
-            web.evaluateJavascript("window.onNative("+JSONObject.quote(type)+","+data+")",value->{if(session!=generation||page!=pageGeneration||closed)return;telemetryDeliveryPending=false;if(received.pending(true))scheduleReceiveDrain();});
+            web.evaluateJavascript("window.onNative("+JSONObject.quote(type)+","+data+")",value->{if(session!=generation||page!=pageGeneration||closed)return;telemetryDeliveryPending=false;if(received.pending(true,ready))scheduleReceiveDrain();});
         }
         receiveDrainScheduled.set(false);
-        if(received.pending(!telemetryDeliveryPending))scheduleReceiveDrain();
+        if(received.pending(!telemetryDeliveryPending,ready))scheduleReceiveDrain();
     }};
     private JSONObject obj(Object... pairs) {
         JSONObject out = new JSONObject();
@@ -988,6 +988,7 @@ public class MainActivity extends Activity {
             synchronized(transportLock){if(g!=gatt||ready)return;ready=true;subscriptionDescriptor=null;if(history.subscribed(address,deviceName))saveReconnectHistory();}
             updatePriority();
             state("ready", "已连接 · 正在接收实时数据");
+            scheduleReceiveDrain();
         }); }
         @Override public void onCharacteristicChanged(BluetoothGatt g, BluetoothGattCharacteristic characteristic, byte[] value) {
             if(g==gatt&&notificationUuid.equals(characteristic.getUuid()))BleNotifications.dispatch(value,notificationUuid.equals(BleNotifications.BATCH),p->receive(g,p));

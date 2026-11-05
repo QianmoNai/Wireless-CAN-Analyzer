@@ -22,7 +22,11 @@ final class TelemetryInbox {
   ArrayList<Frame> out=new ArrayList<>(limit);while(out.size()<limit&&!management.isEmpty())out.add(management.removeFirst());
   if(includeData)while(out.size()<limit&&!data.isEmpty())out.add(data.removeFirst());return out;
  }
+ // Notifications may precede the CCCD completion callback. Keep them bounded
+ // until native readiness; the ready callback restarts draining explicitly.
+ synchronized List<Frame> drain(int limit,boolean includeData,boolean ready){return ready?drain(limit,includeData):Collections.emptyList();}
  synchronized boolean pending(boolean includeData){return !management.isEmpty()||(includeData&&!data.isEmpty());}
+ synchronized boolean pending(boolean includeData,boolean ready){return ready&&pending(includeData);}
  synchronized int dropped(){return dropped;}
  synchronized void discardData(){data.removeIf(frame->frame.data[1]!=19);}
  synchronized void clear(){data.clear();management.clear();dropped=0;}
