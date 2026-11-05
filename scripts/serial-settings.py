@@ -12,8 +12,8 @@ import sys
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'desktop'))
-import serial
 from can_scope.usb_protocol import Decoder, encode, HELLO, BYE
+from can_scope.serial_port import open_native_port
 
 BAUDS = (9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600)
 MODES = {'ble': 0, 'wifi': 1, 'dual-a': 2, 'dual-b': 3, 'usb': 4}
@@ -29,11 +29,7 @@ def main():
     session = secrets.randbelow(0xffffffff) + 1
     token = secrets.randbelow(0xffffff00) + 1
     decoder = Decoder()
-    with serial.Serial(port=None, baudrate=115200, timeout=.05,
-                       write_timeout=.5, exclusive=True) as port:
-        port.dtr = port.rts = False
-        port.port = args.port
-        port.open()
+    with open_native_port(args.port, timeout=.05) as port:
         def exchange(payload, match, timeout=3):
             frame = encode(session, payload)
             if port.write(frame) != len(frame):

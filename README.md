@@ -129,9 +129,11 @@ Android 需 Android 8.0+；Windows 支持 Windows 10 / 11 x64；Linux 桌面包�
 
 | 组件 | 源码版本 | 入口 |
 | --- | --- | --- |
-| ESP32-S3 固件 | **1.24.2** | [构建与烧录](#build) |
-| Android App | **1.21.0** | [Android 构建](#build-android) |
-| CAN Scope Desktop | **1.2.4** | [桌面使用说明](desktop/README.md) |
+| ESP32-S3 固件 | **1.24.3** | [构建与烧录](#build) |
+| Android App | **1.21.4** | [Android 构建](#build-android) |
+| CAN Scope Desktop | **1.2.14** | [桌面使用说明](desktop/README.md) |
+
+这些源码版本尚未包含在上方完整发行套件中。新增 CAN 批量接收、首页摘要和曲线开销优化；Android 修复局域网连接路径、TLS 断开闪退、旧固件搜索兼容和返回操作，并整理详情首屏；桌面增加显示缩放、Escape 分层关闭，并修复最大历史 CSV 导出。具体实机条件、有效结果与未通过的候选见 [性能与验证记录](docs/PERFORMANCE.md)。
 
 ```bash
 git clone git@github.com:QianmoNai/Wireless-CAN-Analyzer.git

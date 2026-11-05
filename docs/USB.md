@@ -61,3 +61,5 @@ XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 QT_QPA_PLATFORM=wayland
 最后一行是本机普通用户 Wayland 会话示例，显示环境随机器调整。原始测试默认不发送 CAN，只有在确认可测试的总线上才加 `--can-tx`，它会发送一帧 STD ID `0x7fe`、数据 `00`。UART 测试在正式数据前发送同步标记并记录标记前 ROM/适配器缓存字节；之后 HEX、UTF-8 的全部字节严格比对。测试包含设置校验、两档 UART 速率、type19/20/21、BYE、旧会话拒绝、租约失效与重连；`--check-only` 不修改设置，供外部复位后检查 NVS。Qt 测试操作真实页面和真实串口，使用临时桌面配置，输出 JSON 与截图。
 
 编译、主机协议测试、桌面界面测试与物理收发证据分别记录。本次 ESP32-S3 双串口实机验证已覆盖 USB 会话及 UART 115200/230400 的 HEX、UTF-8 双向字节比对；CAN 单次发送得到 type3 / ACK error，未观察到 CAN RX，因此没有证明真实 CAN 总线双向通信成功。断线恢复与桌面验证的具体覆盖范围以交付测试日志、结果文件为准。
+
+Linux 1.2.14 的原生 USB 打开入口将 DTR/RTS 在一次 ioctl 中同时清除。实体 ESP32-S3 台架曾在分步清除两线时报告 USB UART reset；仅设置两个布尔值为 false 不足以避免过渡状态。设置脚本与桌面传输复用 `can_scope.serial_port.open_native_port`；不需要修改系统网络或设备保存的配置。

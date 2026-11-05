@@ -1,5 +1,6 @@
 'use strict';
 let transportMode='ble',wifiBusy=false;
+function wifiNotice(message){if(message!==undefined)$('wifiResult').textContent=message;$('wifiResult').scrollIntoView({block:'nearest'})}
 function refreshNetworkControls(){
  $('connectionMode').value=transportMode;$('transportBadge').textContent=transportMode==='usb'?'USB直连':transportMode==='wifi'?'Wi-Fi':'BLE';
  $('lanManual').hidden=transportMode!=='wifi';
@@ -10,8 +11,9 @@ function selectConnectionMode(value){invoke('connectionMode',value)}
 function wifiRequest(op){
  if(wifiBusy)return;
  const ssid=$('wifiSsid').value,password=$('wifiPassword').value;
- if(op===5){const count=new TextEncoder().encode(ssid).length;if(!count||count>32){$('wifiResult').textContent='Wi-Fi 名称须为 1–32 个 UTF-8 字节';return;}if(password&&!(/^[\x20-\x7e]{8,63}$/.test(password)||/^[0-9a-fA-F]{64}$/.test(password))){$('wifiResult').textContent='密码须为 8–63 个英文字符；开放网络留空';return;}}
+ if(op===5){const count=new TextEncoder().encode(ssid).length;if(!count||count>32){wifiNotice('Wi-Fi 名称须为 1–32 个 UTF-8 字节');return;}if(password&&!(/^[\x20-\x7e]{8,63}$/.test(password)||/^[0-9a-fA-F]{64}$/.test(password))){wifiNotice('密码须为 8–63 个英文字符；开放网络留空');return;}}
  if(op===6&&!confirm('清除设备保存的 Wi-Fi 名称和密码？之后可通过蓝牙重新配置。'))return;
+ wifiNotice('正在处理；首次配对请在系统配对窗口输入设备屏幕上的六位码。若未弹出输入框，请检查系统的蓝牙配对请求通知。');
  invoke('wifiConfigure',op,ssid,password);if(op===5)$('wifiPassword').value='';
 }
 function wifiSelect(){const value=$('wifiNetworks').value;if(value)$('wifiSsid').value=value;}

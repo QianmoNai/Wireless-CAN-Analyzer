@@ -1,6 +1,13 @@
 'use strict';
 const $=id=>document.getElementById(id);
-let connected=false,paused=false,dirty=false,toastTimer,deviceMap=new Map(),lastStatus=0,firmwareDrops=0,appDrops=0;
+function consumeChannelBack(){
+ if(typeof closeDetailChartFullscreen==='function'&&closeDetailChartFullscreen())return true;
+ const devices=$('deviceModal');if(devices&&!devices.hidden&&devices.getClientRects().length){closeDevices();return true}
+ const editor=$('watchEditor');if(editor&&!editor.hidden&&editor.getClientRects().length&&typeof closeWatchEditor==='function'){closeWatchEditor();return true}
+ return false;
+}
+window.addEventListener('keydown',event=>{if(event.key==='Escape'&&consumeChannelBack()){event.preventDefault();event.stopImmediatePropagation()}});
+let connected=false,connectionPending=false,paused=false,dirty=false,toastTimer,deviceMap=new Map(),lastStatus=0,firmwareDrops=0,appDrops=0;
 const frameHistory=new FrameHistory();
 Object.defineProperty(window,'frames',{get:()=>frameHistory.snapshot(),set:records=>frameHistory.replace(records)});
 let frameFilter='all',displayedFrameHistory=[],frozenFrameHistory=null;
@@ -9,13 +16,13 @@ let bucketRx=0,bucketTx=0,rxHistory=Array(30).fill(0),txHistory=Array(30).fill(0
 const native=()=>window.CanAndroid;
 function toast(message){$('toast').textContent=message;$('toast').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('toast').hidden=true,4500)}
 function invoke(name,...args){if(native()&&typeof native()[name]==='function')native()[name](...args);else if(!native())toast('请在安卓 App 中连接设备；此处为界面预览。')}
-function connectAction(){if(connected){invoke('disconnect');return} $('deviceModal').hidden=false;scan()}
+function connectAction(){if(connected||connectionPending){invoke('disconnect');return} $('deviceModal').hidden=false;scan()}
 function scan(){deviceMap.clear();$('deviceList').replaceChildren();$('scanHint').textContent=typeof transportMode!=='undefined'&&transportMode==='usb'?'正在扫描 USB 串口…':typeof transportMode!=='undefined'&&transportMode==='wifi'?'正在寻找局域网中的已配对设备…':'正在扫描附近的 ESP32…';invoke('scan')}
 function closeDevices(){$('deviceModal').hidden=true}
 function renderChannelTab(name){document.querySelectorAll('.tabs .tab').forEach(b=>b.classList.toggle('active',b.dataset.tab===name));document.querySelectorAll('.view').forEach(v=>v.hidden=v.id!=='view-'+name);if(native()&&typeof native().setMonitorVisible==='function')native().setMonitorVisible(name==='live'||name==='uart')}
-function showTab(name){if(window.uartMode&&(name==='motor'||name==='live'))name='uart';if(!['motor','live','settings','uart'].includes(name))return;if(window.closeMotorDetail)closeMotorDetail(true);renderChannelTab(name)}
+function showTab(name){if(window.uartMode&&(name==='motor'||name==='live'))name='uart';if(!['motor','live','settings','uart'].includes(name))return;if(window.closeMotorDetail)closeMotorDetail(true,name);renderChannelTab(name)}
 function setConnection(d){
- connected=d.value==='ready';$('connectionMessage').textContent=d.message||'';$('badgeText').textContent=connected?'已连接':d.value==='connecting'?'连接中':d.value==='scanning'?'扫描中':'未连接';$('connectionBadge').classList.toggle('online',connected);$('connectButton').textContent=connected?'断开连接':'连接设备';$('connectButton').disabled=d.value==='connecting';updateFrameViewState();$('deviceName').textContent=connected?d.name:'连接 CAN 设备';
+ connected=d.value==='ready';connectionPending=d.value==='connecting';$('connectionMessage').textContent=d.message||'';$('badgeText').textContent=connected?'已连接':connectionPending?'连接中':d.value==='scanning'?'扫描中':'未连接';$('connectionBadge').classList.toggle('online',connected);$('connectButton').textContent=connected?'断开连接':connectionPending?'取消连接':'连接设备';$('connectButton').disabled=false;updateFrameViewState();$('deviceName').textContent=connected?d.name:'连接 CAN 设备';
  resetMonitorMetrics();gotStatus=false;lastStatus=Date.now();rxHistory.fill(0);txHistory.fill(0);bucketRx=bucketTx=0;
  if(window.deviceConnection)deviceConnection();if(window.resetWatchedFeedback)resetWatchedFeedback();
  if(connected)closeDevices();else $('busStatus').textContent='未连接';if(d.value==='idle')$('scanHint').textContent=d.message||'';
@@ -23,7 +30,14 @@ function setConnection(d){
 function u32(a,o){return (a[o]|a[o+1]<<8|a[o+2]<<16|a[o+3]<<24)>>>0}
 function put32(a,o,n){for(let i=0;i<4;i++)a[o+i]=(n>>>(8*i))&255}
 function hexOf(a){return Array.from(a,x=>x.toString(16).padStart(2,'0')).join('')}
-function parsePacket(hex){if(!/^[0-9a-f]{40}$/i.test(hex))return null;const a=Uint8Array.from(hex.match(/../g),x=>parseInt(x,16));if(a[0]!==1)return null;return a}
+const packetNibbles=new Int8Array(128).fill(-1);
+for(let i=0;i<16;i++){packetNibbles['0123456789abcdef'.charCodeAt(i)]=i;packetNibbles['0123456789ABCDEF'.charCodeAt(i)]=i;}
+function parsePacket(hex){
+ if(typeof hex!=='string'||hex.length!==40)return null;
+ const a=new Uint8Array(20);
+ for(let i=0;i<20;i++){const hi=packetNibbles[hex.charCodeAt(i*2)],lo=packetNibbles[hex.charCodeAt(i*2+1)];if(hi===undefined||lo===undefined||hi<0||lo<0)return null;a[i]=hi*16+lo;}
+ return a[0]===1?a:null;
+}
 function nativePacket(item,deliveryAge){if(item&&item.uart!==undefined&&window.uartBatch)uartBatch(item);else if(typeof item==='string')processPacket(item);else processPacket(item.hex,(item.age||0)+deliveryAge)}
 function processPacket(hex,age=0){
  const a=parsePacket(hex);if(!a)return;const kind=a[1];if(window.uartPacket&&uartPacket(a))return;if(window.devicePacket)devicePacket(a);if(window.watchedPacket)watchedPacket(a,age);

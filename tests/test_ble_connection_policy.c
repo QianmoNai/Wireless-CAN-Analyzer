@@ -23,6 +23,13 @@ int main(void){
  }
  bridge_ble_policy_start(&s,13,0);
  assert(!bridge_ble_policy_next(&s,13,1000,1,true,24,0,42,&p));
+ bridge_ble_policy_start(&s,13,0);
+ assert(bridge_ble_policy_next(&s,13,1000,3,true,12,0,42,&p));
+ assert(p.min_interval==6&&p.max_interval==6&&p.timeout==42);
+ bridge_ble_policy_result(&s,0);
+ assert(!bridge_ble_policy_next(&s,13,4000,3,true,12,0,42,&p));
+ bridge_ble_policy_start(&s,13,0);
+ assert(!bridge_ble_policy_next(&s,13,1000,3,true,6,0,42,&p));
  bridge_ble_policy_start(&s,14,0);
  assert(bridge_ble_policy_next(&s,14,1000,1,true,24,1,9,&p));assert(p.timeout==200&&p.latency==0);
  for(unsigned timeout=10;timeout<=3200;timeout++){

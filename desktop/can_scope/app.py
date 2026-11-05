@@ -11,8 +11,8 @@ from .rendering import configure
 configure()
 from shiboken6 import delete, isValid
 
-from PySide6.QtCore import QObject, Signal, Slot, QTimer, QUrl, QFile, QIODevice, QStandardPaths
-from PySide6.QtGui import QColor
+from PySide6.QtCore import QObject, Signal, Slot, QTimer, QUrl, QFile, QIODevice, QStandardPaths, QEvent
+from PySide6.QtGui import QColor, QKeySequence
 from PySide6.QtWidgets import QApplication, QMainWindow, QTabWidget, QToolBar, QFileDialog, QMessageBox
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineScript, QWebEngineUrlRequestInterceptor, QWebEngineSettings
@@ -20,6 +20,7 @@ from PySide6.QtWebEngineWidgets import QWebEngineView
 from .engine import Channel
 from .connection_store import load_connection, save_connection
 from . import __version__
+from . import csv_export
 
 SOURCE = Path(__file__).resolve().parent
 ASSETS = Path(sys._MEIPASS)/'assets' if hasattr(sys, '_MEIPASS') else SOURCE.parents[1]/'android/app/src/main/assets'
@@ -93,7 +94,8 @@ class Bridge(QObject):
     @Slot(str, str)
     def call(self, name, payload):
         try:
-            if len(payload) > 2_000_000:
+            limit = csv_export.MAX_BRIDGE_PAYLOAD if name == 'exportCsv' else 2_000_000
+            if len(payload) > limit:
                 raise ValueError('操作数据过大')
             args = json.loads(payload)
             if not isinstance(args, list):
@@ -104,10 +106,10 @@ class Bridge(QObject):
                 self.window.views[self.slot].page().runJavaScript("showTab('motor')")
                 self.window.runtime.call(self.slot, 'leaveDetail', [])
             elif name == 'setChartFullscreen':
-                self.window.showFullScreen() if args[0] else self.window.showNormal()
-            elif name in ('setMonitorVisible',):
-                pass
-            elif name in ('connectionMode', 'networkState', 'wifiConfigure', 'connectLan', 'showDetail', 'leaveDetail', 'dashboard', 'scan', 'connect', 'disconnect', 'setPolling', 'send', 'manual', 'delivered', 'reconnect', 'deviceSettings', 'uartSend', 'uartCancel'):
+                if len(args) != 1 or type(args[0]) is not bool:
+                    raise ValueError('全屏状态无效')
+                self.window.set_chart_fullscreen(self.slot, args[0])
+            elif name in ('setMonitorVisible', 'connectionMode', 'networkState', 'wifiConfigure', 'connectLan', 'showDetail', 'leaveDetail', 'dashboard', 'scan', 'connect', 'disconnect', 'setPolling', 'send', 'manual', 'delivered', 'reconnect', 'deviceSettings', 'uartSend', 'uartCancel'):
                 self.window.runtime.call(self.slot, name, args)
         except Exception as e:
             self.window.deliver(self.slot, 'error', json.dumps(dict(message=str(e))))
@@ -131,6 +133,9 @@ class Window(QMainWindow):
         self.smoke = smoke
         self.js_errors = []
         self.ready = set()
+        self.channel_states = {}
+        self.chart_window_state = None
+        self.chart_window_slot = None
         self.views = {}
         self.profiles = []
         self.folder = folder
@@ -138,6 +143,7 @@ class Window(QMainWindow):
         self.runtime.diagnostic_log = diagnostic_log
         self.runtime.message.connect(self.deliver)
         self.tabs = QTabWidget()
+        self.tabs.currentChanged.connect(self.channel_changed)
         self.setCentralWidget(self.tabs)
         toolbar = QToolBar('通道')
         toolbar.setMovable(False)
@@ -145,7 +151,17 @@ class Window(QMainWindow):
         toolbar.addAction('＋ 添加通道', self.add_channel)
         toolbar.addAction('重新连接', lambda: self.runtime.call(self.tabs.currentIndex()+1, 'reconnect', []))
         toolbar.addAction('断开所有', lambda: [self.runtime.call(slot, 'disconnect', []) for slot in self.views])
-        self.statusBar().showMessage('蓝牙 / Wi-Fi · 最多四通道 · 关闭窗口自动断开')
+        toolbar.addSeparator()
+        smaller = toolbar.addAction('缩小', lambda: self.adjust_zoom(-1))
+        smaller.setShortcuts([QKeySequence('Ctrl+-')])
+        smaller.setToolTip('缩小当前通道显示（Ctrl+-）')
+        self.zoom_action = toolbar.addAction('100%', lambda: self.set_active_zoom(1.0))
+        self.zoom_action.setShortcuts([QKeySequence('Ctrl+0')])
+        self.zoom_action.setToolTip('恢复当前通道 100% 显示（Ctrl+0）')
+        larger = toolbar.addAction('放大', lambda: self.adjust_zoom(1))
+        larger.setShortcuts([QKeySequence('Ctrl++'), QKeySequence('Ctrl+=')])
+        larger.setToolTip('放大当前通道显示（Ctrl++ 或 Ctrl+=）')
+        self.statusBar().showMessage('USB / 蓝牙 / Wi-Fi · 最多四通道 · 关闭窗口自动断开')
         self.setStyleSheet('QMainWindow,QTabWidget::pane{background:#0a0f19;color:#f2f5fa} QToolBar,QStatusBar{background:#111a28;color:#91a0b7;border:0;padding:7px} QToolButton{background:#172234;border:1px solid #304059;border-radius:6px;color:#e2ecf5;padding:8px 16px} QToolButton:hover{background:#29403e} QTabBar::tab{background:#172234;color:#91a0b7;padding:12px 30px} QTabBar::tab:selected{color:#65e6cb;background:#203333}')
         count = 1
         try:
@@ -154,6 +170,73 @@ class Window(QMainWindow):
             pass
         for _ in range(count):
             self.add_channel()
+
+    def set_chart_fullscreen(self, slot, enabled):
+        if enabled:
+            if slot != self.tabs.currentIndex()+1:
+                return
+            if self.chart_window_state is None or (self.chart_window_slot is None and not self.isFullScreen()):
+                self.chart_window_state = self.windowState()
+            self.chart_window_slot = slot
+            self.showFullScreen()
+            # A tab switch can restore and enter in the same event turn.
+            # Reconcile after Qt processes the preceding window-state change.
+            QTimer.singleShot(0, lambda: self.showFullScreen()
+                              if self.chart_window_slot == slot and self.tabs.currentIndex()+1 == slot else None)
+        elif self.chart_window_slot == slot and self.chart_window_state is not None:
+            # Preserve this baseline across Qt's asynchronous restore. A new
+            # tab can enter while windowState still reports the old fullscreen.
+            state = self.chart_window_state
+            self.chart_window_slot = None
+            self.setWindowState(state)
+            self.show()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        slot = getattr(self, 'chart_window_slot', None)
+        if event.type() == QEvent.Type.WindowStateChange and slot is not None and not self.isFullScreen():
+            QTimer.singleShot(0, lambda: self.showFullScreen()
+                              if self.chart_window_slot == slot and self.tabs.currentIndex()+1 == slot else None)
+
+    def channel_changed(self, index):
+        previous = self.chart_window_slot
+        if previous is not None and previous != index+1:
+            self.set_chart_fullscreen(previous, False)
+            # The native tab change owns this transition. A hidden page's
+            # later visibility callback cannot close another tab's fullscreen.
+            self.views[previous].page().runJavaScript('closeDetailChartFullscreen(false)')
+        for slot in self.views:
+            self.runtime.call(slot, 'setChannelVisible', [slot == index+1])
+        self.refresh_connection_status()
+        self.refresh_zoom()
+
+    def refresh_zoom(self):
+        view = self.views.get(self.tabs.currentIndex()+1)
+        if view is not None:
+            self.zoom_action.setText(f'{round(view.zoomFactor()*100)}%')
+
+    def set_active_zoom(self, factor):
+        view = self.views.get(self.tabs.currentIndex()+1)
+        if view is not None:
+            view.setZoomFactor(max(.75, min(2.0, factor)))
+            self.refresh_zoom()
+
+    def adjust_zoom(self, direction):
+        view = self.views.get(self.tabs.currentIndex()+1)
+        if view is None:
+            return
+        current = view.zoomFactor()
+        steps = (.75, .9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0)
+        choices = [step for step in steps if step > current+.001] if direction > 0 else [step for step in reversed(steps) if step < current-.001]
+        if choices:
+            self.set_active_zoom(choices[0])
+
+    def refresh_connection_status(self):
+        slot = self.tabs.currentIndex()+1
+        state = self.channel_states.get(slot)
+        if state:
+            mode = {'usb':'USB直连', 'ble':'蓝牙', 'wifi':'Wi-Fi'}.get(state.get('transport'), '')
+            self.statusBar().showMessage(f'通道 {slot} · {mode} · '+state.get('message', ''))
 
     def add_channel(self):
         if len(self.views) >= 4:
@@ -184,6 +267,7 @@ class Window(QMainWindow):
         resource = QFile(':/qtwebchannel/qwebchannel.js')
         resource.open(QIODevice.OpenModeFlag.ReadOnly)
         bootstrap = bytes(resource.readAll()).decode()
+        bootstrap += '\nwindow.CAN_SCOPE_VERSION=' + json.dumps(__version__) + ';\n'
         bootstrap += '''
         const desktopQueue=[];let desktopNative=null;
         window.CanAndroid=new Proxy({}, {get:(_,name)=>(...args)=>{if(desktopNative)desktopNative.call(name,JSON.stringify(args));else if(desktopQueue.length<64)desktopQueue.push([name,args]);}});
@@ -193,6 +277,7 @@ class Window(QMainWindow):
         page.scripts().insert(script('desktop', (SOURCE/'desktop.js').read_text('utf8'), QWebEngineScript.InjectionPoint.DocumentReady))
         self.views[slot] = view
         self.tabs.addTab(view, f'通道 {slot}')
+        self.runtime.call(slot, 'setChannelVisible', [slot == self.tabs.currentIndex()+1])
         view.loadStarted.connect(lambda: self.ready.discard(slot))
         view.loadFinished.connect(lambda ok: self.loaded(slot, ok))
         view.setUrl(QUrl.fromLocalFile(str(ASSETS/'index.html')))
@@ -203,6 +288,7 @@ class Window(QMainWindow):
             self.ready.add(slot)
             self.runtime.call(slot, 'networkState', [])
             self.runtime.call(slot, 'delivered', [])
+            self.views[slot].page().runJavaScript("CanAndroid.setMonitorVisible(!$('view-live').hidden||!$('view-uart').hidden)")
         else:
             self.statusBar().showMessage('界面加载失败，请检查资源文件是否完整')
 
@@ -214,7 +300,10 @@ class Window(QMainWindow):
         self.views[slot].page().runJavaScript(expression, lambda _: self.runtime.call(slot, 'delivered', [json.loads(payload)['delivery']]) if kind in ('packets', 'motorSamples') else None)
         if kind == 'state':
             value = json.loads(payload)
-            self.tabs.setTabText(slot-1, f'通道 {slot}'+(' · 已连接' if value['value'] == 'ready' else ''))
+            self.channel_states[slot] = value
+            mode = {'usb':'USB', 'ble':'蓝牙', 'wifi':'Wi-Fi'}.get(value.get('transport'), '')
+            self.tabs.setTabText(slot-1, f'通道 {slot}'+(f' · {mode} · 已连接' if value['value'] == 'ready' else ''))
+            self.refresh_connection_status()
         elif kind == 'error':
             self.statusBar().showMessage(json.loads(payload)['message'], 8000)
 
@@ -228,7 +317,9 @@ class Window(QMainWindow):
                 self.views[slot].page().runJavaScript('desktopImport('+json.dumps(text)+')')
             return
         extension = 'csv' if name == 'exportCsv' else 'json'
-        value = json.loads(args[0])
+        if len(args) != 1 or type(args[0]) is not str:
+            raise ValueError('导出参数无效')
+        value = csv_export.rows(args[0]) if extension == 'csv' else json.loads(args[0])
         path, _ = QFileDialog.getSaveFileName(self, '导出当前通道', f'can-scope-channel-{slot}.{extension}', f'*.{extension}')
         if not path:
             return
@@ -237,12 +328,13 @@ class Window(QMainWindow):
         else:
             with open(path, 'w', newline='', encoding='utf-8-sig') as stream:
                 writer = csv.writer(stream)
-                writer.writerow(['kind', 'CAN_ID', 'EXT', 'RTR', 'DLC', 'data', 'receivedAt', 'token'])
-                for row in value[:20000]:
-                    writer.writerow([int(row['kind']), hex(int(row['id'])), int(bool(row['ext'])), int(bool(row['rtr'])), int(row['dlc']), ' '.join(f'{b:02X}' for b in row['data']), int(row.get('receivedAt', 0)), int(row.get('seq', 0))])
+                writer.writerow(csv_export.HEADER)
+                writer.writerows(value)
         self.statusBar().showMessage('已导出 '+path, 5000)
 
     def closeEvent(self, event):
+        # Any queued window-state reconciliation must stop with this window.
+        self.chart_window_slot = None
         # Stop WebChannel callbacks before joining workers or destroying Chromium.
         for view in self.views.values():
             view.page().setWebChannel(None)

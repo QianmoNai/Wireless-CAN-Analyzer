@@ -45,6 +45,7 @@ public class MainActivity extends Activity {
     private FrameLayout content;
     private Button add;
     private WebView home;
+    private int backNavigationRequest;
     private boolean homeReady;
     private boolean homeUpdatePending;
     private final Runnable homeUpdate=()->{homeUpdatePending=false;updateHome();};
@@ -121,7 +122,21 @@ public class MainActivity extends Activity {
         });
         content.addView(home,new FrameLayout.LayoutParams(-1,-1));home.loadUrl("https://home.local/home.html");
     }
-    @Override public void onBackPressed(){if(chartFullscreen){exitChartFullscreen(true);return;}if(selected!=null){showHome();return;}if(Build.VERSION.SDK_INT>=33)finish();else super.onBackPressed();}
+    @Override public void onBackPressed(){
+        int request=++backNavigationRequest;
+        if(chartFullscreen){exitChartFullscreen(true);return;}
+        DevicePanel panel=selected;
+        if(panel!=null){
+            if(panel.closed||!panel.pageReady){showHome();return;}
+            int session=panel.generation;
+            panel.web.evaluateJavascript("typeof consumeChannelBack==='function'&&consumeChannelBack()",result->{
+                if(request!=backNavigationRequest||selected!=panel||panel.closed||panel.generation!=session||!foreground)return;
+                if(!"true".equals(result))showHome();
+            });
+            return;
+        }
+        if(Build.VERSION.SDK_INT>=33)finish();else super.onBackPressed();
+    }
     @Override public void onWindowFocusChanged(boolean focused){super.onWindowFocusChanged(focused);if(focused&&chartFullscreen){if(chartOwnerCurrent())applyChartImmersive();else exitChartFullscreen(true);}}
     @Override public void onConfigurationChanged(Configuration configuration){super.onConfigurationChanged(configuration);if(chartFullscreen){if(chartOwnerCurrent())applyChartImmersive();else exitChartFullscreen(true);}if(rootLayout!=null)rootLayout.requestApplyInsets();}
     private boolean chartOwnerCurrent(){return chartPanel!=null&&!chartPanel.closed&&selected==chartPanel&&chartSession==chartPanel.generation&&!chartMotorKey.isEmpty()&&chartMotorKey.equals(chartPanel.detailKey);}
@@ -167,7 +182,7 @@ public class MainActivity extends Activity {
         if(Looper.myLooper()!=Looper.getMainLooper()){ui.post(()->closeChartForDisconnectedPanel(panel));return;}
         if(chartFullscreen&&chartPanel==panel&&(panel.closed||chartSession!=panel.generation))exitChartFullscreen(true);
     }
-    private void showHome(){exitChartFullscreen(true);selected=null;for(DevicePanel p:panels){p.detailKey="";p.web.evaluateJavascript("window.closeMotorDetail&&closeMotorDetail(false)",null);p.web.setVisibility(View.GONE);p.configureTelemetry();}home.setVisibility(View.VISIBLE);renderTabs();updateHome();}
+    private void showHome(){backNavigationRequest++;exitChartFullscreen(true);selected=null;for(DevicePanel p:panels){p.detailKey="";p.web.evaluateJavascript("window.closeMotorDetail&&closeMotorDetail(false)",null);p.web.setVisibility(View.GONE);p.configureTelemetry();}home.setVisibility(View.VISIBLE);renderTabs();updateHome();}
     private void updateHome(){
         ui.removeCallbacks(homeUpdate);homeUpdatePending=false;
         if(!homeReady||selected!=null)return;
@@ -210,6 +225,7 @@ public class MainActivity extends Activity {
         @JavascriptInterface public void openMotor(int slot,String key){runOnUiThread(()->{for(DevicePanel p:panels)if(p.slot==slot){p.detailKey=key;select(p);p.web.evaluateJavascript("window.dashboardOpen("+JSONObject.quote(key)+")",null);break;}});}
     }
     private void select(DevicePanel panel) {
+        backNavigationRequest++;
         if(chartFullscreen&&(chartPanel!=panel||!chartMotorKey.equals(panel.detailKey)||chartSession!=panel.generation))exitChartFullscreen(true);
         selected=panel;home.setVisibility(View.GONE);
         for(DevicePanel p:panels){p.web.setVisibility(p==panel?View.VISIBLE:View.GONE);p.configureTelemetry();}
@@ -478,7 +494,9 @@ public class MainActivity extends Activity {
     private class DevicePanel {
     private final UUID SERVICE = UUID.fromString("c0de0001-1212-efde-1523-785feabcd123");
     private final UUID WRITE = UUID.fromString("c0de0002-1212-efde-1523-785feabcd123");
-    private final UUID NOTIFY = UUID.fromString("c0de0003-1212-efde-1523-785feabcd123");
+    private final UUID NOTIFY = BleNotifications.LEGACY;
+    private volatile UUID notificationUuid=BleNotifications.LEGACY;
+    private boolean awaitingNotificationMtu;
     private final UUID NETWORK = UUID.fromString("c0de0004-1212-efde-1523-785feabcd123");
     private final UUID CCCD = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -528,7 +546,7 @@ public class MainActivity extends Activity {
             public void connected(LanTransport source){main.post(()->{if(lan!=source||closed||!foreground){source.close();return;}synchronized(transportLock){ready=true;lanConnecting=false;}state("ready","局域网已连接 · "+networkIp);networkState();});}
             public void packet(LanTransport source,byte[] packet){if(lan!=source)return;if(packet[1]==18){enqueueControl(null,packet[2]&255,null,SystemClock.elapsedRealtime());return;}receive(null,packet);}
             public void failed(LanTransport source,String message){main.post(()->{if(lan==source)fail(message);});}
-        });lan=next;next.connect(ip,32323,networkPin,networkToken);
+        },target->LanNetwork.socket(MainActivity.this,target));lan=next;next.connect(ip,32323,networkPin,networkToken);
     }
     private void configureWifi(int op,String ssid,String password){
         if(closed||configBusy||!ready||gatt==null||networkBusy()){error("请先通过蓝牙连接设备，并等待当前配置结束");return;}
@@ -550,7 +568,7 @@ public class MainActivity extends Activity {
                 public void networks(JSONArray rows){if(session==generation)emit("wifiScan",obj("rows",rows));}
                 public void finished(String message){if(session==generation){emit("wifiResult",obj("message",message,"busy",false));}}
             },op,ssid,password);
-            provisioner=next;emit("wifiResult",obj("message","正在安全配网；首次使用请在手机输入屏幕上的六位配对码","busy",true));
+            provisioner=next;emit("wifiResult",obj("message","正在安全配对；未弹出输入框时，请打开手机通知栏的蓝牙配对请求，输入设备屏幕上的六位码","busy",true));
             long until=SystemClock.elapsedRealtime()+6500;
             main.post(new Runnable(){public void run(){if(session!=generation||!next.active())return;if(writing){if(SystemClock.elapsedRealtime()>until){next.cancel();emit("wifiResult",obj("message","设备忙，请稍后重试","busy",false));}else main.postDelayed(this,50);return;}next.start();}});
         }catch(IllegalArgumentException e){error(e.getMessage());}
@@ -605,7 +623,7 @@ public class MainActivity extends Activity {
     }
     private void configureTelemetry(){synchronized(transportLock){
         updatePriority();
-        boolean wantLoad=selected==this&&detailKey.isEmpty();
+        boolean wantLoad=selected==this&&monitorVisible&&detailKey.isEmpty();
         if(wantsBusLoad!=wantLoad){wantsBusLoad=wantLoad;busLoadActive=false;emit("busLoadReset",obj());}
         try{int[][] rows=new int[snapshot.length()][3];
             for(int i=0;i<rows.length;i++){JSONObject m=snapshot.getJSONObject(i),c=new JSONObject(m.getString("key"));rows[i]=new int[]{"imu".equals(m.optString("family"))?(imuSupported?2:0):"dm".equals(m.optString("family"))?1:0,"imu".equals(m.optString("family"))&&!imuSupported?1:c.getInt("id"),"imu".equals(m.optString("family"))&&!imuSupported?0x7ff:c.getInt("feedbackId")};}
@@ -616,7 +634,7 @@ public class MainActivity extends Activity {
                 if(supported)telemetry.configure(selected==this&&target>=0?2:3,0,selected==this&&target>=0?new int[][]{rows[target]}:new int[0][],selected==this&&target>=0&&detailMaxHz>0?Math.max(1,Math.min(detailMaxHz,snapshot.getJSONObject(target).optInt("sampleHz",100))):0);
                 else telemetry.configure(3,0,new int[0][]);
                 if(selected==this)emit("detailSupport",obj("supported",supported,"maxHz",supported?detailMaxHz:0,"channel","通道 "+slot+" · "+deviceName));
-            }else telemetry.configure(selected==this?0:1,0,rows);
+            }else telemetry.configure(selected==this&&monitorVisible?0:1,0,rows);
         }catch(JSONException ignored){}
     }}
     private String packetHex(byte[] data){char[] out=new char[data.length*2];final String digits="0123456789abcdef";for(int i=0;i<data.length;i++){out[i*2]=digits.charAt((data[i]&255)>>>4);out[i*2+1]=digits.charAt(data[i]&15);}return new String(out);}
@@ -780,7 +798,7 @@ public class MainActivity extends Activity {
         @JavascriptInterface public void setChartFullscreen(boolean enabled){int session=generation;String motorKey=detailKey;main.post(()->{if(closed||session!=generation||!motorKey.equals(detailKey))return;if(enabled)enterChartFullscreen(DevicePanel.this,session,motorKey);else if(chartPanel==DevicePanel.this&&chartMotorKey.equals(motorKey))exitChartFullscreen(false);});}
         @JavascriptInterface public void leaveDetail(){int session=generation;main.post(()->{if(closed||session!=generation)return;if(chartPanel==DevicePanel.this)exitChartFullscreen(true);detailKey="";for(DevicePanel p:panels)p.configureTelemetry();renderTabs();});}
         @JavascriptInterface public void home(){main.post(()->showHome());}
-        @JavascriptInterface public void setMonitorVisible(boolean visible){int session=generation;main.post(()->{if(closed||session!=generation)return;monitorVisible=visible;updatePriority();});}
+        @JavascriptInterface public void setMonitorVisible(boolean visible){int session=generation;main.post(()->{if(closed||session!=generation||monitorVisible==visible)return;monitorVisible=visible;configureTelemetry();});}
         @JavascriptInterface public void dashboard(String json) { main.post(()->{
             if(closed||!pageReady||json==null||json.length()>65536)return;
             try{JSONArray list=new JSONArray(json);if(list.length()<=32){JSONArray rules=new JSONArray();for(int i=0;i<list.length();i++){JSONObject motor=list.getJSONObject(i);rules.put(motor.getString("key")+"|"+motor.optInt("sampleHz",100));}String signature=rules.toString();snapshot=list;snapshotTime=SystemClock.elapsedRealtime();if(!registrySignature.equals(signature)){registrySignature=signature;configureTelemetry();}scheduleHomeUpdate();}}catch(JSONException ignored){}
@@ -908,7 +926,7 @@ public class MainActivity extends Activity {
         synchronized(transportLock){
             imuSupported=false;devicePolling=false;homeTelemetrySupported=false;detailSupported=false;detailMaxHz=0;busLoadActive=false;telemetry.reset();
             generation++;for(String key:queries.keys())queryStatus(key,false,"连接已断开，查询已停止");queries.reset();queryUiVersions.clear();controlEvents.clear();settingsHoldUntil=0;
-            ready=false;deviceWifiMode=false;writing=false;writer=null;subscriptionDescriptor=null;currentQueryWrite=null;telemetryWrite=queryWrite=false;telemetryRetryAt=0;history.failed();
+            ready=false;deviceWifiMode=false;writing=false;writer=null;subscriptionDescriptor=null;awaitingNotificationMtu=false;notificationUuid=NOTIFY;currentQueryWrite=null;telemetryWrite=queryWrite=false;telemetryRetryAt=0;history.failed();
             old=gatt;gatt=null;
             emit("busLoadReset",obj());
         }
@@ -918,6 +936,19 @@ public class MainActivity extends Activity {
         if(old!=null){try{old.disconnect();}catch(Exception ignored){}old.close();}
     }
     private void fail(String message) { disconnectDevice(); state("idle", message); error(message); }
+    private void subscribeNotifications(BluetoothGatt g){
+        if(g!=gatt||closed||ready)return;
+        BluetoothGattService service=g.getService(SERVICE);
+        BluetoothGattCharacteristic notifier=service==null?null:service.getCharacteristic(notificationUuid);
+        if(notifier==null||!g.setCharacteristicNotification(notifier,true)){fail("CAN 特征配置失败");return;}
+        BluetoothGattDescriptor descriptor=notifier.getDescriptor(CCCD);
+        if(descriptor==null){fail("设备缺少通知订阅描述符");return;}
+        subscriptionDescriptor=descriptor;
+        boolean ok;
+        if(Build.VERSION.SDK_INT>=33)ok=g.writeDescriptor(descriptor,BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)==BluetoothStatusCodes.SUCCESS;
+        else {descriptor.setValue(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);ok=g.writeDescriptor(descriptor);}
+        if(!ok)fail("无法订阅 CAN 数据");
+    }
     private final BluetoothGattCallback callback = new BluetoothGattCallback() {
         @Override public void onConnectionStateChange(BluetoothGatt g, int status, int newState) { main.post(() -> {
             if (g != gatt) return;
@@ -931,28 +962,38 @@ public class MainActivity extends Activity {
             BluetoothGattService service = g.getService(SERVICE);
             if (status != 0 || service == null) { fail("设备没有 CAN Scope 服务，请检查固件"); return; }
             writer = service.getCharacteristic(WRITE);
-            BluetoothGattCharacteristic notifier = service.getCharacteristic(NOTIFY);
-            if (writer == null || notifier == null || !g.setCharacteristicNotification(notifier, true)) { fail("CAN 特征配置失败"); return; }
-            BluetoothGattDescriptor descriptor = notifier.getDescriptor(CCCD);
-            if (descriptor == null) { fail("设备缺少通知订阅描述符"); return; }
-            subscriptionDescriptor=descriptor;
-            boolean ok;
-            if (Build.VERSION.SDK_INT >= 33) ok = g.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) == BluetoothStatusCodes.SUCCESS;
-            else { descriptor.setValue(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE); ok = g.writeDescriptor(descriptor); }
-            if (!ok) fail("无法订阅 CAN 数据");
+            if(writer==null){fail("CAN 特征配置失败");return;}
+            notificationUuid=BleNotifications.select(service.getCharacteristic(BleNotifications.BATCH)!=null);
+            if(notificationUuid.equals(BleNotifications.BATCH)){
+                // Serialize MTU and CCCD operations. Never overlap a pending
+                // negotiation with a descriptor write or any CAN command.
+                awaitingNotificationMtu=true;
+                if(g.requestMtu(247)){
+                    main.postDelayed(()->{if(g==gatt&&awaitingNotificationMtu){awaitingNotificationMtu=false;fail("蓝牙 MTU 协商超时，请重新连接");}},5000);
+                    return;
+                }
+                awaitingNotificationMtu=false;
+            }
+            subscribeNotifications(g);
         }); }
+        @Override public void onMtuChanged(BluetoothGatt g,int mtu,int status){main.post(()->{
+            if(g!=gatt||!awaitingNotificationMtu)return;
+            awaitingNotificationMtu=false;
+            // Failed negotiation keeps MTU23 valid: firmware emits one frame.
+            subscribeNotifications(g);
+        });}
         @Override public void onDescriptorWrite(BluetoothGatt g, BluetoothGattDescriptor descriptor, int status) { main.post(() -> {
-            if (g != gatt||descriptor!=subscriptionDescriptor||!CCCD.equals(descriptor.getUuid())||descriptor.getCharacteristic()==null||!NOTIFY.equals(descriptor.getCharacteristic().getUuid())) return;
+            if (g != gatt||descriptor!=subscriptionDescriptor||!CCCD.equals(descriptor.getUuid())||descriptor.getCharacteristic()==null||!notificationUuid.equals(descriptor.getCharacteristic().getUuid())) return;
             if (status != 0) { fail("订阅失败：" + status); return; }
             synchronized(transportLock){if(g!=gatt||ready)return;ready=true;subscriptionDescriptor=null;if(history.subscribed(address,deviceName))saveReconnectHistory();}
             updatePriority();
             state("ready", "已连接 · 正在接收实时数据");
         }); }
         @Override public void onCharacteristicChanged(BluetoothGatt g, BluetoothGattCharacteristic characteristic, byte[] value) {
-            if (NOTIFY.equals(characteristic.getUuid())) receive(g, value);
+            if(g==gatt&&notificationUuid.equals(characteristic.getUuid()))BleNotifications.dispatch(value,notificationUuid.equals(BleNotifications.BATCH),p->receive(g,p));
         }
         @Override public void onCharacteristicChanged(BluetoothGatt g, BluetoothGattCharacteristic characteristic) {
-            if (Build.VERSION.SDK_INT < 33 && NOTIFY.equals(characteristic.getUuid())) receive(g, characteristic.getValue());
+            if(Build.VERSION.SDK_INT<33&&g==gatt&&notificationUuid.equals(characteristic.getUuid()))BleNotifications.dispatch(characteristic.getValue(),notificationUuid.equals(BleNotifications.BATCH),p->receive(g,p));
         }
         @Override public void onCharacteristicRead(BluetoothGatt g,BluetoothGattCharacteristic c,byte[] value,int status){networkRead(g,c,value,status);}
         @Override public void onCharacteristicRead(BluetoothGatt g,BluetoothGattCharacteristic c,int status){if(Build.VERSION.SDK_INT<33)networkRead(g,c,c.getValue(),status);}

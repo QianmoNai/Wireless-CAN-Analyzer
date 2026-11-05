@@ -59,6 +59,14 @@ with sync_playwright() as p:
  # Pagination freezes the list while browsing older entries; TX history stays untouched.
  for t in range(4200,7000,50):send(keys[0],dji,t)
  page.evaluate('renderDetailStream()');assert page.locator('.detail-can-frame').count()==40
+ # Repainting the same history must preserve rows and make no subtree writes.
+ page.evaluate("window.streamRow=$('detailStreamFrames').firstChild;window.streamByte=streamRow.querySelector('.byte');const observer=new MutationObserver(()=>{});observer.observe($('detailStreamFrames'),{subtree:true,childList:true,characterData:true});renderDetailStream();if(observer.takeRecords().length)throw Error('unchanged stream was rewritten');observer.disconnect()")
+ page.evaluate("detailStreamPaintAt=performance.now()+10000;window.streamTime=streamRow.querySelector('.time').textContent")
+ send(keys[0],dji,7000)
+ assert page.evaluate("detailRxFrames[0].stamp===7000&&streamRow.querySelector('.time').textContent===streamTime")
+ page.evaluate('async()=>{detailStreamPaintAt=0;requestDetailPaint();await new Promise(requestAnimationFrame)}')
+ assert page.evaluate("streamRow===$('detailStreamFrames').firstChild&&streamByte===streamRow.querySelector('.byte')")
+ assert page.locator('.detail-can-frame').first.locator('.time').inner_text()=='7.000 s'
  page.locator('#detailStreamOlder').click();assert page.locator('#detailStreamPause').inner_text()=='继续列表'
  assert page.evaluate('detailStreamPage')==1
  page.fill('#detailStreamLimit','3');page.evaluate('saveDetailStreamLimit()')
@@ -107,6 +115,14 @@ with sync_playwright() as p:
  const points=Array.from({length:60000},(_,i)=>({t:i,values:{position:i===30000?1000:0,speed:0,effort:0,temperature:40}}));
  const reduced=detailPeakPoints(points,'position',60000,0);
  if(!reduced.some(p=>p.values.position===1000)||reduced.length>1600)throw Error('lost peak or unbounded SVG');
+ // Even within one pixel bucket, preserve both edges of a real time gap,
+ // extrema in their time order, and the original sample objects.
+ const gapPoints=Array.from({length:3202},(_,i)=>({t:i+(i>=1601?400:0),values:{position:i===10||i===1700?-100:i===20||i===1800?100:0}}));
+ const gapReduced=detailPeakPoints(gapPoints,'position',100000,0,1);
+ const expected=[0,10,20,1600,1601,1700,1800,3201];
+ if(gapReduced.length!==expected.length||!expected.every((i,n)=>gapReduced[n]===gapPoints[i]))throw Error('lost gap boundaries, extrema order or sample identity');
+ const short=gapPoints.slice(0,1600);if(detailPeakPoints(short,'position',100000,0,1)!==short)throw Error('small history was copied');
+ if(gapPoints.length!==3202||gapPoints[1700].values.position!==-100)throw Error('input history mutated');
  detailSamples=points;detailSampleHead=0;detailClock=59999;detailLastStamp=59999;detailLastArrival=Date.now();$('detailWindow').value='60';drawDetail();
  }""")
  send(key,bytes([0x13,0x80,0,0x80,0,0,43,44]),60000)
@@ -121,6 +137,14 @@ with sync_playwright() as p:
  for width in [320,412,820]:
   page.set_viewport_size({'width':width,'height':915});assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
  page.set_viewport_size({'width':412,'height':915});page.evaluate('drawDetail()');page.screenshot(path=str(ROOT/'android/dist/preview-motor-detail.png'),full_page=True)
+ # Going straight to CAN monitoring must not request a transient quiet home
+ # subscription, which would send a full roster before returning to raw mode.
+ page.evaluate("CanAndroid.setMonitorVisible=v=>actions.push(['visible',v]);actions=[];showTab('live')")
+ navigation=page.evaluate('actions')
+ assert [a for a in navigation if a[0]=='leave']==[['leave']]
+ assert all(a[1] is True for a in navigation if a[0]=='visible'),navigation
+ assert page.locator('#view-live').is_visible()
+ page.evaluate('dashboardOpen(JSON.stringify(watchedMotors[0].config))')
  page.evaluate("onNative('state',{value:'idle',message:'已断开'})");page.wait_for_timeout(200);assert page.evaluate('detailSamples.length')==0
  assert '未连接' in page.locator('#detailState').inner_text()
  assert page.evaluate('detailRxFrames.length')==0

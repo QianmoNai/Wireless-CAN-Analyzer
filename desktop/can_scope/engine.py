@@ -42,6 +42,10 @@ class Channel:
         self.roster = []
         self.signature = None
         self.applied_mode = 0
+        self.monitor_visible = True
+        self.channel_visible = True
+        self.subscription = None
+        self.applied_roster = []
         self.capabilities = 0
         self.max_hz = 0
         self.ui_pending = False
@@ -178,12 +182,14 @@ class Channel:
         elif name == 'disconnect':
             await self.disconnect()
         elif name == 'scan':
+            if len(args) > 1 or (args and type(args[0]) is not bool):
+                raise ValueError('串口搜索选项无效')
             if self.ready:
                 return
             self.state('scanning', '正在搜索设备…')
             self.emit('scanStart', {})
             if self.mode == 'usb':
-                await scan_usb(lambda d: self.emit('device', d))
+                await scan_usb(lambda d: self.emit('device', d), include_all=bool(args and args[0]))
             elif self.mode == 'wifi':
                 if not self.saved.get('id'):
                     raise ValueError('请先通过蓝牙读取网络状态，取得安全连接信息')
@@ -216,8 +222,20 @@ class Channel:
                     self.saved['usb_port'] = target[4:]
                 elif target.startswith('wifi:'):
                     self.mode = 'wifi'
-                    self.transport = LanTransport(received, lost)
-                    await self.transport.connect(target[5:], self.saved.get('fp'), self.saved.get('token'))
+                    # Association/DHCP and the embedded TLS accept loop may
+                    # still be settling after a mode change. Retry connection
+                    # setup only; a connected session never replays CAN writes.
+                    for attempt in range(3):
+                        self.transport = LanTransport(received, lost)
+                        try:
+                            await self.transport.connect(target[5:], self.saved.get('fp'), self.saved.get('token'), identity=self.saved.get('id'))
+                            break
+                        except (TimeoutError, ConnectionRefusedError, ConnectionResetError):
+                            await self.transport.close()
+                            if attempt == 2:
+                                raise
+                            self.state('connecting', f'等待 Wi-Fi 就绪，正在重试连接（{attempt+2}/3）…')
+                            await asyncio.sleep(1)
                     self.saved['ip'] = target[5:]
                 else:
                     self.mode = 'ble'
@@ -229,7 +247,7 @@ class Channel:
                     self.address = target
                 self.ready = True
                 self.persist()
-                self.state('ready', '已连接 · 等待设备状态')
+                self.state('ready', '已连接')
                 self.network_state()
             except BaseException:
                 await self.disconnect('连接未完成')
@@ -325,6 +343,13 @@ class Channel:
                 except Exception:
                     self.polls.pop(key, None)
                     self.emit('queryState', dict(key=key, enabled=False, message='查询确认超时，已停止续租'))
+        elif name in ('setMonitorVisible', 'setChannelVisible'):
+            if len(args) != 1 or type(args[0]) is not bool:
+                raise ValueError('页面状态无效')
+            field = 'monitor_visible' if name == 'setMonitorVisible' else 'channel_visible'
+            if getattr(self, field) != args[0]:
+                setattr(self, field, args[0])
+                await self.subscribe()
         elif name == 'showDetail':
             if args[0] not in [m['key'] for m in self.roster]:
                 raise ValueError('电机不在当前列表')
@@ -393,21 +418,37 @@ class Channel:
         self.emit('detailSupport', dict(supported=supported, maxHz=self.max_hz, channel=self.name))
         if not self.capabilities & 64:
             return
-        self.revision += 1
-        rows = [m for m in self.roster if m['key'] == self.detail] if self.detail else []
-        mode = 2 if rows and supported else 0
-        self.packets.clear()
-        if mode == 2:
-            m = rows[0]
-            c = json.loads(m['key'])
-            await self.write(packet(0x16, b={'dji':0, 'dm':1, 'imu':2}[m['family']], x=c['id'], y=c['feedbackId'], token=self.revision))
+        detail_rows = [m for m in self.roster if m['key'] == self.detail] if self.detail else []
+        if not self.channel_visible:
+            mode, rows = (3 if supported else 1), []
+        elif detail_rows and supported:
+            mode, rows = 2, detail_rows
+        elif not self.monitor_visible:
+            mode, rows = 1, self.roster
+        else:
+            mode, rows = 0, []
         hz = min(self.max_hz, max(1, int(rows[0].get('sampleHz', 100)))) if mode == 2 else 0
+        signature = (mode, hz, tuple((m['key'], m['family']) for m in rows))
+        if signature == self.subscription:
+            return
+        # A failed transaction may still have changed the device. Never reuse
+        # the preceding signature after advancing the subscription revision.
+        self.subscription = None
+        self.revision += 1
+        self.packets.clear()
+        for slot, m in enumerate(rows):
+            c = json.loads(m['key'])
+            await self.write(packet(0x16, a=slot, b={'dji':0, 'dm':1, 'imu':2}[m['family']], x=c['id'], y=c['feedbackId'], token=self.revision))
         try:
-            result = await self.acknowledge(packet(0x17, a=mode, b=int(mode == 2), y=hz, token=self.revision), 10, self.revision)
+            result = await self.acknowledge(packet(0x17, a=mode, b=len(rows), y=hz, token=self.revision), 10, self.revision)
+            if result[2] != mode or result[3] != len(rows):
+                raise ValueError('设备订阅响应与请求不符')
             self.applied_mode = result[2]
-            self.emit('telemetryMode', dict(mode=result[2], hz=u32(result, 8)))
+            self.subscription = signature
+            self.applied_roster = list(rows)
+            self.emit('telemetryMode', dict(mode=result[2], quiet=result[2] == 1, hz=u32(result, 8)))
         except asyncio.TimeoutError:
-            self.emit('error', dict(message='订阅未确认，请重新进入电机详情'))
+            self.emit('error', dict(message='订阅未确认，请切换页面重试'))
 
     def network_status(self, value):
         if all(value.get(k) for k in ('id', 'fp', 'token')):
@@ -455,16 +496,36 @@ class Channel:
                     self.emit('queryState', dict(key=key, enabled=False, message='设备停止查询，状态码 '+str(p[2])))
         if kind in (2, 3) and u32(p, 16) in self.pending_tx:
             self.pending_tx.pop(u32(p, 16))
-            self.emit('manualResult', dict(token=u32(p, 16), status='CAN 发送成功（已收到 ACK）' if kind == 2 else 'CAN 发送失败，错误标志 0x%02X'%p[2]))
+            status = ('CAN 发送成功（已收到 ACK）' if kind == 2 else
+                      'CAN 仲裁丢失；本次未发送成功，未自动重发' if p[2] & 0x80 and not p[2] & 0x7c else
+                      'CAN 发送失败，错误标志 0x%02X'%p[2])
+            self.emit('manualResult', dict(token=u32(p, 16), status=status))
         if kind == 18 and p[2]:
             self.emit('error', dict(message='设备拒绝通信命令，状态码 '+str(p[2])))
         if kind == 11 and (not self.detail or u32(p, 4) != self.revision):
             return
         if kind == 12:
             if self.detail and u32(p, 16) == self.revision:
-                self.emit('motorRates', dict(key=self.detail, received=u32(p,4), sampled=u32(p,8), elapsed=u32(p,12), age=0))
+                self.emit('motorRates', dict(key=self.detail, received=u32(p,4), sampled=u32(p,8), elapsed=u32(p,12), age=0, sentAt=int(time.time()*1000)))
+            return
+        if kind in (9, 16):
+            count = len(self.applied_roster)
+            if self.applied_mode != 1 or u32(p, 16) != self.revision or p[3] != count:
+                return
+            stamp = int(time.time()*1000)
+            if kind == 9 and p[2] == 1:
+                self.emit('onlineSummary', dict(count=count, online=u32(p, 4), seen=u32(p, 8), age=0, sentAt=stamp))
+            elif kind == 16 and p[2] in (0, 10, 20, 30) and p[2] < count:
+                size = min(10, count-p[2])
+                mask = int.from_bytes(p[4:6], 'little')
+                if mask >> size or any(p[6+size:16]):
+                    return
+                self.emit('motorTemperatures', dict(start=p[2], count=count,
+                    temperatures=[p[6+i] if mask & (1 << i) else None for i in range(size)], age=0, sentAt=stamp))
             return
         if kind in (8, 9, 10, 15, 16, 18):
+            return
+        if kind in (1, 2, 3) and self.applied_mode != 0:
             return
         queue = self.packets if kind in (1, 2, 3, 11, 19) else self.controls
         if len(queue) == queue.maxlen:
@@ -552,6 +613,9 @@ class Channel:
         self.ready = False
         self.polls.clear()
         self.capabilities = 0
+        self.subscription = None
+        self.applied_roster = []
+        self.applied_mode = 0
         self.ui_pending = self.control_pending = False
         self.deliveries.clear()
         self.packets.clear(); self.controls.clear()

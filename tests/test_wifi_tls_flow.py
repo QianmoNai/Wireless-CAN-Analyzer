@@ -30,14 +30,18 @@ for source in (old, current):
     serve = function(source, 'static void serve_client(')
     prefix = serve.split('while(network_connected()', 1)[0]
     assert 'collect_batch(' not in prefix and 'xQueueReceive(' not in prefix
-assert function(old, 'static void serve_client(').split('while(network_connected()', 1)[0] == \
-       function(current, 'static void serve_client(').split('while(network_connected()', 1)[0]
+# Connection mode bookkeeping follows authentication. The actual handshake,
+# token fence and OK01/queue handoff prefix remain identical.
+assert function(old, 'static void serve_client(').split('uint8_t incoming[20]', 1)[0] == \
+       function(current, 'static void serve_client(').split('uint8_t incoming[20]', 1)[0]
 
 with tempfile.TemporaryDirectory(prefix='wifi-tls-flow-') as directory:
     path = Path(directory)
     for name, source in [('old16', old), ('new16', current),
-                         ('new32', current), ('new64', current)]:
+                         ('new32', current), ('new64', current), ('new100hz16', current),
+                         ('newcan16', current)]:
         batch = int(name[-2:])
+        tick_ms = 10 if name.startswith('new100hz') else 1
         functions = [function(source, marker) for marker in markers]
         if name != 'old16':
             functions.insert(-1, function(source, 'static unsigned collect_batch('))
@@ -46,6 +50,8 @@ with tempfile.TemporaryDirectory(prefix='wifi-tls-flow-') as directory:
         binary = path / name
         subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror',
                         '-DCAN_WIFI_TCP_NODELAY=0', '-DCAN_WIFI_TLS_BATCH='+str(batch),
+                        '-DCAN_TEST_TICK_MS='+str(tick_ms),
+                        '-DCAN_WIFI_CAN_TCP_NODELAY='+str(int(name == 'newcan16')),
                         '-I'+str(ROOT/'firmware/main'), '-I'+str(ROOT/'tests/stubs'),
                         str(c), str(ROOT/'firmware/main/wifi_uart_diag.c'),
                         '-o', str(binary)], check=True)

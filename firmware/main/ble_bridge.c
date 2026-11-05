@@ -40,13 +40,15 @@ void ble_store_config_init(void);
 static const ble_uuid128_t service_uuid = BLE_UUID128_INIT(UUID_BYTES(1));
 static const ble_uuid128_t write_uuid = BLE_UUID128_INIT(UUID_BYTES(2));
 static const ble_uuid128_t notify_uuid = BLE_UUID128_INIT(UUID_BYTES(3));
+static const ble_uuid128_t batch_notify_uuid = BLE_UUID128_INIT(UUID_BYTES(6));
 static const ble_uuid128_t network_uuid = BLE_UUID128_INIT(UUID_BYTES(4));
 #if CONFIG_BLE_TEST_DIAGNOSTICS
 static const ble_uuid128_t diagnostics_uuid = BLE_UUID128_INIT(UUID_BYTES(5));
 #endif
 static const char *TAG = "can_ble";
 static QueueHandle_t command_queue, query_command_queue, ack_notify_queue, notify_queue, control_notify_queue;
-static uint16_t notify_handle;
+static uint16_t notify_handle,batch_notify_handle;
+static atomic_bool batch_subscribed,legacy_subscribed;
 static home_status_t home_status;
 static portMUX_TYPE home_lock=portMUX_INITIALIZER_UNLOCKED;
 // Called with home_lock held. Explicit command acknowledgments always pass.
@@ -92,10 +94,10 @@ static void wake_notify(void){if(notify_worker)xTaskNotifyGive(notify_worker);}
 static uint32_t packet_generation(const bridge_packet_t *p){
     return atomic_load(p->bytes[1]==17?&ble_generation:&notify_generation);
 }
-#if CONFIG_BLE_TEST_DIAGNOSTICS
 static unsigned packet_class(const bridge_packet_t *p){
     return bridge_packet_is_ack(p)?BD_ACK:bridge_packet_is_raw(p)?BD_RAW:BD_CONTROL;
 }
+#if CONFIG_BLE_TEST_DIAGNOSTICS
 static unsigned packet_bytes(const bridge_packet_t *p){return p->bytes[1]==19?p->bytes[2]:0;}
 #endif
 static void wifi_note_queue(QueueHandle_t queue){
@@ -293,6 +295,7 @@ static const struct ble_gatt_svc_def services[] = {
          {.uuid = &notify_uuid.u, .access_cb = access_cb,
           .flags = BLE_GATT_CHR_F_NOTIFY, .val_handle = &notify_handle},
          {.uuid=&network_uuid.u,.access_cb=network_access,.flags=BLE_GATT_CHR_F_READ|BLE_GATT_CHR_F_WRITE|BLE_GATT_CHR_F_READ_AUTHEN|BLE_GATT_CHR_F_WRITE_AUTHEN},
+         {.uuid=&batch_notify_uuid.u,.access_cb=access_cb,.flags=BLE_GATT_CHR_F_NOTIFY,.val_handle=&batch_notify_handle},
 #if CONFIG_BLE_TEST_DIAGNOSTICS
          {.uuid=&diagnostics_uuid.u,.access_cb=diagnostics_access,.flags=BLE_GATT_CHR_F_READ},
 #endif
@@ -358,6 +361,7 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         atomic_fetch_add(&ble_generation,1);wake_notify();
         bd_add(BD_DISCONNECTS,1);bd_set(BD_DISCONNECT_REASON,event->disconnect.reason);
         atomic_store(&subscribed, false);
+        atomic_store(&batch_subscribed, false);atomic_store(&legacy_subscribed, false);
         if(!network_wifi_mode()&&!network_usb_mode())ble_bridge_reset_session();
         network_config_disconnect();
         atomic_store(&connection, BLE_HS_CONN_HANDLE_NONE);
@@ -365,10 +369,11 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         advertise();
         break;
     case BLE_GAP_EVENT_SUBSCRIBE:
-        if (event->subscribe.attr_handle == notify_handle) {
-            atomic_store(&subscribed, event->subscribe.cur_notify != 0);wake_notify();
+        if (event->subscribe.attr_handle == notify_handle || event->subscribe.attr_handle == batch_notify_handle) {
+            atomic_store(event->subscribe.attr_handle==batch_notify_handle?&batch_subscribed:&legacy_subscribed,event->subscribe.cur_notify!=0);
+            atomic_store(&subscribed,atomic_load(&batch_subscribed)||atomic_load(&legacy_subscribed));wake_notify();
 #if CONFIG_BLE_CONNECTION_POLICY
-            parameter_subscribe(event->subscribe.cur_notify != 0);
+            parameter_subscribe(atomic_load(&subscribed));
 #endif
             if(event->subscribe.cur_notify){bridge_packet_t features={.bytes={1,15,1,0}};ble_bridge_publish(&features);bridge_packet_t name=name_status(0);ble_bridge_publish(&name);}
             ESP_LOGI(TAG, "CAN notifications %s", event->subscribe.cur_notify ? "enabled" : "disabled");
@@ -389,7 +394,7 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         bd_set(BD_MTU,event->mtu.value);
         break;
     case BLE_GAP_EVENT_NOTIFY_TX:
-        if(event->notify_tx.conn_handle==atomic_load(&connection)&&event->notify_tx.attr_handle==notify_handle){
+        if(event->notify_tx.conn_handle==atomic_load(&connection)&&(event->notify_tx.attr_handle==notify_handle||event->notify_tx.attr_handle==batch_notify_handle)){
             wake_notify(); // Local attempt hint only; never a remote ACK/credit.
             bd_add(BD_NOTIFY_EVENTS,1);
             if(event->notify_tx.status)bd_add(BD_NOTIFY_ERRORS,1);
@@ -454,6 +459,7 @@ static void on_reset(int reason)
     if(!network_wifi_mode()&&!network_usb_mode())ble_bridge_reset_session();
     network_config_disconnect();
     atomic_store(&subscribed, false);
+    atomic_store(&batch_subscribed, false);atomic_store(&legacy_subscribed, false);
     atomic_store(&connection, BLE_HS_CONN_HANDLE_NONE);
     ESP_LOGW(TAG, "BLE reset: %d", reason);
 }
@@ -470,9 +476,11 @@ static bool notify_connected(void *context)
     return (!context||*(uint32_t *)context==atomic_load(&notify_generation))&&ble_bridge_connected();
 }
 static unsigned notify_failure;
+typedef struct {const bridge_packet_t *packet;const uint8_t *bytes;unsigned size;} notify_payload_t;
 static void *notify_allocate(void *context, const bridge_packet_t *packet)
 {
-    void *buffer=ble_hs_mbuf_from_flat(packet->bytes, sizeof(packet->bytes));
+    notify_payload_t *payload=context;
+    void *buffer=ble_hs_mbuf_from_flat(payload->bytes,payload->size);
     if(!buffer)notify_failure=BD_DROP_ALLOC_BYTES;
     if(!buffer)bd_add(bd_index(packet_class(packet),BD_ALLOC_FAIL),1);
     return buffer;
@@ -489,7 +497,7 @@ static unsigned notify_pool_free(void *context, void *buffer)
     bd_min(BD_POOL_MIN,free_blocks);
     if(free_blocks<BRIDGE_NOTIFY_ATT_RESERVE+BRIDGE_NOTIFY_HEADER_BLOCKS)notify_failure=BD_DROP_RESERVE_BYTES;
     if(free_blocks<BRIDGE_NOTIFY_ATT_RESERVE+BRIDGE_NOTIFY_HEADER_BLOCKS)
-        bd_add(bd_index(packet_class(context),BD_RESERVE_REJECT),1);
+        bd_add(bd_index(packet_class(((notify_payload_t *)context)->packet),BD_RESERVE_REJECT),1);
     return free_blocks;
 }
 static void notify_release(void *context, void *buffer)
@@ -499,14 +507,14 @@ static void notify_release(void *context, void *buffer)
 static bool notify_submit(void *context, void *buffer)
 {
     // notify_custom consumes its mbuf even when it returns an error.
-    int rc=ble_gatts_notify_custom(atomic_load(&connection), notify_handle, buffer);
+    int rc=ble_gatts_notify_custom(atomic_load(&connection),atomic_load(&batch_subscribed)?batch_notify_handle:notify_handle,buffer);
     if(rc){
         notify_failure=BD_DROP_SUBMIT_BYTES;
         bd_set(BD_LAST_ERROR_RC,rc);
         bd_add(rc==BLE_HS_ENOMEM?BD_RC_ENOMEM:rc==BLE_HS_ENOTCONN?BD_RC_ENOTCONN:rc==BLE_HS_EAGAIN?BD_RC_EAGAIN:BD_RC_OTHER,1);
     }
     bd_set(BD_NOTIFY_RC,rc);
-    bd_add(bd_index(packet_class(context),rc?BD_SUBMIT_ERROR:BD_SUBMITTED),1);
+    bd_add(bd_index(packet_class(((notify_payload_t *)context)->packet),rc?BD_SUBMIT_ERROR:BD_SUBMITTED),1);
     return rc==0;
 }
 static bool notify_send(void *context, const bridge_packet_t *packet)
@@ -522,7 +530,8 @@ static bool notify_send(void *context, const bridge_packet_t *packet)
         .allocate = notify_allocate, .pool_free = notify_pool_free,
         .release = notify_release, .submit = notify_submit,
     };
-    return bridge_notify_with_reserve(packet, &ops, (void *)packet);
+    notify_payload_t payload={packet,packet->bytes,sizeof(packet->bytes)};
+    return bridge_notify_with_reserve(packet, &ops, &payload);
 }
 #if CONFIG_BLE_EVENT_SCHEDULER
 static bool ble_resource_ready(void){
@@ -537,6 +546,7 @@ static bool ble_resource_ready(void){
     os_mbuf_free_chain(om);
     return free_blocks>=BRIDGE_NOTIFY_ATT_RESERVE+BRIDGE_NOTIFY_HEADER_BLOCKS;
 }
+
 #endif
 static void notify_delay(void *context, unsigned milliseconds)
 {
@@ -555,6 +565,55 @@ static void notify_delay(void *context, unsigned milliseconds)
 #else
     vTaskDelay(pdMS_TO_TICKS(milliseconds));
 #endif
+}
+// Optional characteristic c0de0006 carries concatenated, unchanged v1 packets.
+// The CAN lane gathers complete packets, always checking ACK/control queues
+// before ordinary telemetry. UART and legacy subscribers retain their paths.
+static void deliver_can_batch(const notify_item_t *first)
+{
+    if(first->generation!=packet_generation(&first->packet)||!packet_connected(&first->packet)||suppress_packet(&first->packet))return;
+    uint32_t generation=atomic_load(&notify_generation),ble_epoch=atomic_load(&ble_generation);
+    unsigned mtu=ble_att_mtu(atomic_load(&connection));
+    unsigned limit=mtu>3?(mtu-3)/20:1;
+    // 200 bytes fit one default 256-byte msys block after NimBLE headers.
+    // A 240-byte value chains a second block and halves useful pool capacity.
+    if(limit>10)limit=10;
+    if(!limit)limit=1;
+    uint8_t bytes[240];unsigned count=0,classes[BD_CLASSES]={0},examined=0;
+    int64_t deadline=esp_timer_get_time()+10000;
+    notify_item_t item=*first;
+    do {
+        examined++;
+        if(item.generation==packet_generation(&item.packet)&&packet_connected(&item.packet)&&!suppress_packet(&item.packet)){
+            memcpy(bytes+20*count,item.packet.bytes,20);count++;classes[packet_class(&item.packet)]++;
+        }else uart_bridge_drop_packet(&item.packet);
+        if(count>=limit||examined>=24)break;
+        if(dequeue_item(ack_notify_queue,&item,0)||dequeue_item(control_notify_queue,&item,0))continue;
+        // Sparse management replies never wait for raw traffic. CAN traffic
+        // gathers for 10ms, with at most one additional RTOS tick at the edge.
+        TickType_t wait=!classes[BD_ACK]&&!classes[BD_CONTROL]&&esp_timer_get_time()<deadline?1:0;
+        if(!dequeue_item(notify_queue,&item,wait))break;
+    }while(count<limit);
+    if(!count)return;
+    static const bridge_notify_resource_ops_t ops={
+        .allocate=notify_allocate,.pool_free=notify_pool_free,.release=notify_release,.submit=notify_submit,
+    };
+    notify_payload_t payload={&first->packet,bytes,count*20};
+    bool delivered=false;
+    unsigned attempts=8;
+    for(unsigned attempt=0;attempt<attempts;attempt++){
+        if(generation!=atomic_load(&notify_generation)||ble_epoch!=atomic_load(&ble_generation)||!packet_connected(&first->packet)||!atomic_load(&batch_subscribed))return;
+        if(bridge_notify_with_reserve(&first->packet,&ops,&payload)){delivered=true;break;}
+        if(attempt+1<attempts)notify_delay(&generation,10);
+    }
+    if(delivered){
+        classes[packet_class(&first->packet)]--; // notify_submit already counted its first packet.
+        for(unsigned cls=0;cls<BD_CLASSES;cls++)bd_add(bd_index(cls,BD_SUBMITTED),classes[cls]);
+    }else{
+        for(unsigned cls=0;cls<BD_CLASSES;cls++)bd_add(bd_index(cls,BD_FAILED_PACKETS),classes[cls]);
+        atomic_fetch_add(&dropped,count);
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
 }
 // A false USB/LAN enqueue or failed BLE submission leaves this packet here.
 // Their queues account for later failures only after accepting ownership.
@@ -671,7 +730,8 @@ static void notify_task(void *arg)
         bool ack=dequeue_item(ack_notify_queue,&item,0);
         bool control=!ack&&dequeue_item(control_notify_queue,&item,0);
         if(!ack&&!control&&!dequeue_item(notify_queue,&item,pdMS_TO_TICKS(10)))continue;
-        deliver_packet(&item.packet,ack,control,item.generation);
+        if(atomic_load(&batch_subscribed)&&!uart_bridge_selected()&&!network_wifi_mode()&&!network_usb_mode())deliver_can_batch(&item);
+        else deliver_packet(&item.packet,ack,control,item.generation);
 #endif
     }
 }

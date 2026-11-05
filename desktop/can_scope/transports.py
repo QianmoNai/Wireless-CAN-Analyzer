@@ -8,7 +8,7 @@ import socket
 import ssl
 import sys
 import time
-from .protocol import SERVICE, WRITE, NOTIFY, NETWORK, PORT, ipv4, secret, wifi_commands
+from .protocol import SERVICE, WRITE, NOTIFY, BATCH_NOTIFY, NETWORK, PORT, ipv4, secret, wifi_commands
 
 
 _MONOTONIC_MS_MAX = (2**63-1)//1000
@@ -135,7 +135,7 @@ class LanTransport:
         self.tasks = []
         self.closed = False
 
-    async def connect(self, ip, fingerprint, token, port=PORT):
+    async def connect(self, ip, fingerprint, token, port=PORT, *, identity=None):
         pin, key = secret(fingerprint), secret(token)
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         context.check_hostname = False
@@ -144,7 +144,10 @@ class LanTransport:
         context.verify_mode = ssl.CERT_NONE
         context.minimum_version = context.maximum_version = ssl.TLSVersion.TLSv1_2
         try:
-            reader, self.writer = await asyncio.wait_for(asyncio.open_connection(ipv4(ip), port, ssl=context), 5)
+            from .lan_routes import interface_for, open_connection
+            ip = ipv4(ip)
+            self.interface = await interface_for(ip, identity, port)
+            reader, self.writer = await asyncio.wait_for(open_connection(ip, port, context, self.interface), 5)
             cert = self.writer.get_extra_info('ssl_object').getpeercert(binary_form=True)
             if not hmac.compare_digest(hashlib.sha256(cert).digest(), pin):
                 raise ValueError('设备证书不匹配，请通过蓝牙重新确认设备')
@@ -158,13 +161,21 @@ class LanTransport:
             raise
 
     async def read(self, reader):
+        buffer = bytearray()
         try:
             while not self.closed:
-                p = await asyncio.wait_for(reader.readexactly(20), 12)
-                if p[0] != 1:
-                    raise ValueError('设备报文格式错误')
-                if p[1] != 0x7f:
-                    self.received(p)
+                data = await asyncio.wait_for(reader.read(4096), 12)
+                if not data:
+                    raise ConnectionError('设备关闭连接')
+                buffer.extend(data)
+                used = len(buffer)//20*20
+                for offset in range(0, used, 20):
+                    p = bytes(buffer[offset:offset+20])
+                    if p[0] != 1:
+                        raise ValueError('设备报文格式错误')
+                    if p[1] != 0x7f:
+                        self.received(p)
+                del buffer[:used]
         except asyncio.CancelledError:
             pass
         except Exception:
@@ -220,10 +231,23 @@ class BleTransport:
             await self.client.connect()
             if self.client.services.get_service(SERVICE) is None:
                 raise ValueError('设备没有 CAN Scope 服务')
-            await self.client.start_notify(NOTIFY, lambda _, data: self.received(bytes(data)))
+            # The optional characteristic batches complete v1 packets without
+            # changing legacy c0de0003 or requiring a control/CAN command.
+            get_characteristic = getattr(self.client.services, 'get_characteristic', lambda _: None)
+            batched = get_characteristic(BATCH_NOTIFY) is not None
+            await self.client.start_notify(BATCH_NOTIFY if batched else NOTIFY, self.notification)
         except BaseException:
             await self.close()
             raise
+
+    def notification(self, _, data):
+        if not data or len(data) > 240 or len(data) % 20:
+            return
+        # Validate the entire value before delivering any part of it.
+        if any(data[offset] != 1 for offset in range(0, len(data), 20)):
+            return
+        for offset in range(0, len(data), 20):
+            self.received(bytes(data[offset:offset+20]))
 
     def lost(self):
         self.provision_authenticated = False
@@ -344,11 +368,17 @@ async def scan_ble(found):
     return devices
 
 
-async def discover(identity, found, *, broadcast='255.255.255.255', timeout=3):
+async def _discover_interface(identity, found, broadcast, timeout, interface=None):
     loop = asyncio.get_running_loop()
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.setblocking(False)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        if interface:
+            from .lan_routes import bind_device
+            try:
+                bind_device(sock, interface)
+            except OSError:
+                return  # The parallel default-route socket remains available.
         sock.bind(('', 0))
         await loop.sock_sendto(sock, b'CAN_SCOPE_DISCOVER_1', (ipv4(broadcast), PORT))
         # Existing app images incorrectly require 19 bytes, omitting the final
@@ -358,7 +388,32 @@ async def discover(identity, found, *, broadcast='255.255.255.255', timeout=3):
         while loop.time() < deadline:
             try:
                 data, address = await asyncio.wait_for(loop.sock_recvfrom(sock, 128), deadline-loop.time())
-                if data.decode('ascii', errors='ignore').split() == ['CAN_SCOPE_1', identity, str(PORT)]:
+                if address[1] == PORT and data.decode('ascii', errors='ignore').split() == ['CAN_SCOPE_1', identity, str(PORT)]:
                     found(dict(address='wifi:'+address[0], name='ESP32-CAN', rssi=0, transport='wifi'))
             except asyncio.TimeoutError:
                 break
+
+
+async def discover(identity, found, *, broadcast='255.255.255.255', timeout=3):
+    broadcast = ipv4(broadcast)
+    from .lan_routes import interfaces
+    choices = interfaces() if broadcast == '255.255.255.255' else []
+    if len(choices) < 2:
+        return await _discover_interface(identity, found, broadcast, timeout)
+    seen = set()
+    def unique(device):
+        if device['address'] not in seen:
+            seen.add(device['address'])
+            found(device)
+    async def probe(interface):
+        try:
+            await _discover_interface(identity, unique, broadcast, timeout, interface)
+        except OSError:
+            pass  # A disappearing interface must not cancel the other probes.
+    tasks = [asyncio.create_task(probe(name)) for name in [None, *choices]]
+    try:
+        await asyncio.gather(*tasks)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)

@@ -1,29 +1,17 @@
 """Native USB Serial/JTAG, separate from the device's external UART pins."""
 import asyncio
 import secrets
-import os
 import time
 from .usb_protocol import Decoder, encode, HELLO, PING, BYE
 from .protocol import device_settings_command, device_settings_status
+from .serial_port import open_native_port
 
 HANDSHAKE_TIMEOUT = 4.0
 HANDSHAKE_INTERVAL = 0.5
 
 
 def open_port(device):
-    import serial
-    options = {"exclusive": True} if os.name == "posix" else {}
-    port = serial.Serial(port=None, baudrate=115200, timeout=0, write_timeout=.5, **options)
-    try:
-        port.dtr = False
-        port.rts = False
-        port.port = device
-        port.open()
-        port.reset_input_buffer()
-        return port
-    except BaseException:
-        port.close()
-        raise
+    return open_native_port(device)
 
 
 async def prepare_usb(device, data=None, baud=None, timeout=8.0):
@@ -77,11 +65,18 @@ async def prepare_usb(device, data=None, baud=None, timeout=8.0):
         port.close()
 
 
-async def scan_usb(found):
+async def scan_usb(found, include_all=False):
     from serial.tools import list_ports
     ports = await asyncio.to_thread(list_ports.comports)
-    for port in sorted(ports, key=lambda p: p.device):
-        found(dict(address='usb:'+port.device, name=port.description or 'USB 串口',
+    def usb(port):
+        return getattr(port, 'vid', None) is not None and getattr(port, 'pid', None) is not None
+    def native(port):
+        return (getattr(port, 'vid', None), getattr(port, 'pid', None)) == (0x303a, 0x1001)
+    for port in sorted(ports, key=lambda p: (not native(p), not usb(p), p.device)):
+        if not include_all and not usb(port):
+            continue
+        name = 'ESP32 原生 USB（待验证）' if native(port) else port.description or '串口'
+        found(dict(address='usb:'+port.device, name=name,
                    rssi=0, transport='usb'))
 
 

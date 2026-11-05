@@ -117,7 +117,33 @@ def pause_window_and_keyboard(page):
     page.locator("#detailChartPause").click()
     assert page.evaluate("detailFrozen!==null")
     assert page.locator("#detailPause").text_content() == page.locator("#detailChartPause").text_content()
+    page.evaluate("""() => {
+        refreshDetailChart();drawDetail();
+        const observer=new MutationObserver(()=>{});
+        observer.observe($('detailChartFullscreen'),{subtree:true,childList:true,characterData:true,attributes:true});
+        refreshDetailChart();drawDetail();
+        const writes=observer.takeRecords().length;observer.disconnect();
+        if(writes)throw Error('unchanged fullscreen chart was rewritten');
+    }""")
     page.evaluate("window.chartFrozenReference=detailFrozenSamples;window.chartFrozenEnd=detailFrozen")
+    # Scale/axis text can settle the SVG flex height on the next layout turn.
+    page.evaluate("async()=>{for(let i=0;i<2;i++){await new Promise(requestAnimationFrame);drawDetail()}}")
+    frozen_path = page.locator(TRACE).get_attribute('d')
+    page.select_option('#detailChartWindow', '0.1')
+    assert page.locator(TRACE).get_attribute('d') != frozen_path
+    page.select_option('#detailChartWindow', '0.5')
+    assert page.locator(TRACE).get_attribute('d') == frozen_path
+    # A frozen curve still responds to resize and switching the selected series.
+    page.set_viewport_size({'width': 915, 'height': 412})
+    page.evaluate('drawDetail()')
+    assert page.locator(TRACE).get_attribute('d') != frozen_path
+    page.set_viewport_size({'width': 412, 'height': 915})
+    page.evaluate('drawDetail()')
+    assert page.locator(TRACE).get_attribute('d') == frozen_path
+    open_chart(page, 'temperature')
+    assert page.locator(TRACE).get_attribute('d') != frozen_path
+    open_chart(page, 'position')
+    assert page.locator(TRACE).get_attribute('d') == frozen_path
     page.evaluate("""d => {
         const before=$('detailChartSvg').querySelector('.trace').getAttribute('d');
         const oldCount=detailSamples.length;

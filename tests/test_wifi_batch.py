@@ -11,12 +11,15 @@ test = r'''
 #include "network_batch.h"
 #include <assert.h>
 #include <stdint.h>
+#include <stdbool.h>
 #include <string.h>
 typedef struct {uint8_t bytes[20];} bridge_packet_t;
 typedef struct {unsigned left, consumed; uint8_t tag;} queue_t;
 static queue_t control, raw;
 static queue_t *control_out=&control, *raw_out=&raw;
 static int inject;
+static bool uart;
+static bool uart_bridge_selected(void){return uart;}
 #define pdTRUE 1
 static int xQueueReceive(queue_t *q, bridge_packet_t *p, unsigned wait){
  assert(wait==0);
@@ -27,10 +30,12 @@ static int xQueueReceive(queue_t *q, bridge_packet_t *p, unsigned wait){
 }
 ''' + collector + r'''
 int main(void){
- struct {uint8_t before[8],data[20*CAN_WIFI_TLS_BATCH],after[8];} buf;
+ struct {uint8_t before[8],data[20*CAN_WIFI_BATCH_CAPACITY],after[8];} buf;
+ for(unsigned mode=0;mode<2;mode++){
+ uart=mode;
  memset(&buf,0xa5,sizeof(buf));
  control=(queue_t){3,0,0xc1};raw=(queue_t){100,0,0xd1};
- unsigned n=collect_batch(buf.data);assert(n==CAN_WIFI_TLS_BATCH);
+ unsigned n=collect_batch(buf.data);assert(n==(uart?CAN_WIFI_TLS_BATCH:CAN_WIFI_CAN_BATCH));
  assert(control.consumed==3&&raw.consumed==n-3);
  for(unsigned i=0;i<n*20;++i)assert(buf.data[i]==(i<60?0xc1:0xd1));
  for(unsigned i=0;i<8;++i)assert(buf.before[i]==0xa5&&buf.after[i]==0xa5);
@@ -40,6 +45,7 @@ int main(void){
  raw.left=2;inject=1;
  assert(collect_batch(buf.data)==3);
  assert(buf.data[0]==0xd1&&buf.data[20]==0xc1&&buf.data[40]==0xd1);
+ }
 }
 '''
 with tempfile.TemporaryDirectory(prefix='wifi-batch-') as folder:
@@ -55,4 +61,4 @@ with tempfile.TemporaryDirectory(prefix='wifi-batch-') as folder:
                                '-I'+str(root/'firmware/main'),'-fsyntax-only',str(c)],
                               capture_output=True)
         assert result.returncode != 0
-print('PASS: default/16/32/64 production batches, bounds, partial return, control priority, invalid sizes')
+print('PASS: CAN 64 and UART default/16/32/64 production batches, bounds, partial return, control priority, invalid sizes')

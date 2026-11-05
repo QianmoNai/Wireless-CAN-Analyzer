@@ -192,6 +192,10 @@ void app_main(void)
     can_load_reset(&bus_load, CAN_BITRATE, esp_timer_get_time());
     ESP_ERROR_CHECK(twai_node_enable(node));
     board_ui_start();
+    // app_main starts at priority 1. CAN completion/query work must run ahead
+    // of TLS (3), notification delivery (4) and RX forwarding (5); the owner
+    // blocks between events, and never waits for transport/render completion.
+    vTaskPrioritySet(owner_task,6);
     ESP_LOGI(TAG, "Classic CAN + motor panel: TX=GPIO%d RX=GPIO%d bitrate=%d", CAN_TX_GPIO, CAN_RX_GPIO, CAN_BITRATE);
 
     static bridge_packet_t active, pulse_command;

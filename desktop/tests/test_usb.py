@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from can_scope.usb_protocol import Decoder, encode, HELLO, PING
-from can_scope.usb_transport import UsbTransport, prepare_usb
+from can_scope.usb_transport import UsbTransport, prepare_usb, scan_usb
 from can_scope.protocol import packet, u32
 from can_scope.engine import Channel
 
@@ -56,11 +56,24 @@ class CodecTests(unittest.TestCase):
         for session,payload in [(0,HELLO),(1,b'bad')]:
             with self.assertRaises(ValueError):encode(session,payload)
 
+    def test_batched_frames_arbitrary_chunks_and_corrupt_magic(self):
+        expected = [(i+1, packet(1, x=i, token=i)) for i in range(128)]
+        stream = b'noiseCUSB' + bytes(28) + b''.join(encode(s, p) for s, p in expected)
+        for chunk in (1, 7, 31, 32, 63, 4096, len(stream)):
+            decoder, received = Decoder(), []
+            for start in range(0, len(stream), chunk):
+                received.extend(decoder.feed(stream[start:start+chunk]))
+                self.assertLess(len(decoder.buffer), 32)
+            self.assertEqual(received, expected)
+        decoder = Decoder()
+        self.assertEqual(decoder.feed(b'x'*100000+b'CUS'), [])
+        self.assertEqual(decoder.feed(encode(1, HELLO)[3:]), [(1, HELLO)])
+
 
 class UsbTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.received=[];self.errors=[]
-        self.patch=patch('serial.Serial',FakeSerial);self.patch.start()
+        self.patch=patch('can_scope.serial_port.NativeUsbSerial',FakeSerial);self.patch.start()
         self.link=UsbTransport(self.received.append,self.errors.append)
     async def asyncTearDown(self):
         await self.link.close();self.patch.stop()
@@ -84,7 +97,7 @@ class UsbTests(unittest.IsolatedAsyncioTestCase):
     async def test_startup_loses_first_hello(self):
         port = FakeSerial()
         port.drop_hellos = 1
-        with patch('serial.Serial', return_value=port), patch('can_scope.usb_transport.HANDSHAKE_INTERVAL', .02):
+        with patch('can_scope.serial_port.NativeUsbSerial', return_value=port), patch('can_scope.usb_transport.HANDSHAKE_INTERVAL', .02):
             await self.link.connect('TEST')
         frames = [Decoder().feed(frame)[0] for frame in port.writes]
         self.assertEqual([p for _,p in frames], [HELLO, HELLO])
@@ -94,7 +107,7 @@ class UsbTests(unittest.IsolatedAsyncioTestCase):
     async def test_handshake_timeout_closes_port_and_stops_retry(self):
         port = FakeSerial()
         port.answer = False
-        with patch('serial.Serial', return_value=port), patch('can_scope.usb_transport.HANDSHAKE_INTERVAL', .02), patch('can_scope.usb_transport.HANDSHAKE_TIMEOUT', .08):
+        with patch('can_scope.serial_port.NativeUsbSerial', return_value=port), patch('can_scope.usb_transport.HANDSHAKE_INTERVAL', .02), patch('can_scope.usb_transport.HANDSHAKE_TIMEOUT', .08):
             with self.assertRaisesRegex(ConnectionError, 'USB 握手超时'):
                 await self.link.connect('TEST')
         count = len(port.writes)
@@ -146,7 +159,7 @@ class BootstrapTests(unittest.IsolatedAsyncioTestCase):
                     self.input.extend(encode(session,ack))
                 return len(frame)
         port = SettingsSerial()
-        with patch('serial.Serial',return_value=port):
+        with patch('can_scope.serial_port.NativeUsbSerial',return_value=port):
             result = await prepare_usb('TEST',data=1,baud=230400)
         self.assertEqual((result['network'],result['data'],result['baud']), (4,1,230400))
         self.assertFalse(port.is_open)
@@ -155,7 +168,7 @@ class BootstrapTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(commands[1][3],7)
 
     async def test_invalid_bootstrap_never_opens_port(self):
-        with patch('serial.Serial') as serial:
+        with patch('can_scope.serial_port.NativeUsbSerial') as serial:
             with self.assertRaises(ValueError):await prepare_usb('TEST',baud=123)
             serial.assert_not_called()
 
@@ -168,7 +181,7 @@ class BootstrapTests(unittest.IsolatedAsyncioTestCase):
                         self.input.extend(encode(session,packet(22,b=4,y=115200,token=u32(p,16))))
                 return len(frame)
         port=NoSetReply()
-        with patch('serial.Serial',return_value=port):
+        with patch('can_scope.serial_port.NativeUsbSerial',return_value=port):
             with self.assertRaisesRegex(ConnectionError,'设置结果可能未知'):
                 await prepare_usb('TEST',data=1,timeout=.04)
         commands=[Decoder().feed(frame)[0][1] for frame in port.writes]
@@ -182,7 +195,7 @@ class BootstrapTests(unittest.IsolatedAsyncioTestCase):
                     self.input.extend(encode(session,packet(18,a=3,b=25,x=u32(p,16))))
                 return len(frame)
         port=Rejected()
-        with patch('serial.Serial',return_value=port):
+        with patch('can_scope.serial_port.NativeUsbSerial',return_value=port):
             with self.assertRaisesRegex(ValueError,'状态码 3'):
                 await prepare_usb('TEST')
         self.assertFalse(port.is_open)
@@ -201,9 +214,29 @@ class BootstrapTests(unittest.IsolatedAsyncioTestCase):
                     self.input.extend(encode(session,reply))
                 return len(frame)
         port=Starting()
-        with patch('serial.Serial',return_value=port):
+        with patch('can_scope.serial_port.NativeUsbSerial',return_value=port):
             state=await prepare_usb('TEST',timeout=.8)
         self.assertEqual(state['network'],4)
         self.assertEqual(port.queries,2)
         self.assertTrue(all(Decoder().feed(f)[0][1][2] == 0 for f in port.writes))
         self.assertFalse(port.is_open)
+
+
+class UsbDiscoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_scan_filters_system_ports_prioritizes_native_and_never_opens(self):
+        from types import SimpleNamespace
+        ports = [
+            SimpleNamespace(device='/dev/ttyS0', description='n/a', vid=None, pid=None),
+            SimpleNamespace(device='/dev/ttyACM1', description='Horco CMSIS-DAP', vid=0xfaed, pid=0x4870),
+            SimpleNamespace(device='/dev/ttyUSB0', description='USB Serial', vid=0x10c4, pid=0xea60),
+            SimpleNamespace(device='/dev/ttyACM2', description='ESP32 USB', vid=0x303a, pid=0x1001),
+        ]
+        with patch('serial.tools.list_ports.comports', return_value=ports), patch('can_scope.usb_transport.open_port', side_effect=AssertionError('Discovery opened a port')), patch('serial.Serial', side_effect=AssertionError('Discovery opened a serial device')):
+            rows = []
+            await scan_usb(rows.append)
+            self.assertEqual([r['address'] for r in rows], ['usb:/dev/ttyACM2', 'usb:/dev/ttyACM1', 'usb:/dev/ttyUSB0'])
+            self.assertIn('待验证', rows[0]['name'])
+            rows = []
+            await scan_usb(rows.append, include_all=True)
+            self.assertEqual(rows[-1]['address'], 'usb:/dev/ttyS0')
+            self.assertEqual(len(rows), 4)

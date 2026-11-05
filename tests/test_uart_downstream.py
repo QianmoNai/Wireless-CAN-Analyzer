@@ -69,6 +69,7 @@ PLATFORM = r'''
 static bool suppressed,force_ble_failure;
 static atomic_bool subscribed;
 static unsigned ble_calls,lan_calls;
+typedef struct {const bridge_packet_t *packet;const uint8_t *bytes;unsigned size;} notify_payload_t;
 bool ble_bridge_connected(void){return mode==4?usb_link_connected():online;}
 static bool suppress_packet(const bridge_packet_t*p){(void)p;return suppressed;}
 bool network_send(const bridge_packet_t*p){(void)p;lan_calls++;return sink_success;}

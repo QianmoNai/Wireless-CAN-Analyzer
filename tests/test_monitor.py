@@ -7,6 +7,12 @@ with sync_playwright() as p:
  page.add_init_script('window.sent=[];window.CanAndroid={send(h){sent.push(h)}}')
  errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
  page.goto((ROOT/'android/app/src/main/assets/index.html').as_uri())
+ page.evaluate("window.disconnects=0;CanAndroid.disconnect=()=>disconnects++;onNative('state',{value:'connecting'})")
+ assert page.locator('#connectButton').inner_text()=='取消连接'
+ page.locator('#connectButton').click()
+ assert page.evaluate('disconnects')==1
+ page.evaluate("onNative('state',{value:'idle'})")
+ assert page.locator('#connectButton').inner_text()=='连接设备'
  page.evaluate("""() => {
  connected=true;bridgeBitrate=1000000;
  $('rxLimit').value='2';$('txLimit').value='3';applyHistoryLimits();
@@ -226,6 +232,18 @@ with sync_playwright() as p:
  assert page.locator('.can-id').all_text_contents()==['0x7FF','0x205','0x202','0x201']
  page.locator('#filter').fill('202');assert page.locator('.can-id').all_text_contents()==['0x202']
  page.locator('#filter').fill('');assert page.locator('.frame').count()==4
+ before=page.evaluate('JSON.stringify(watchedMotors.map(m=>m.config))')
+ page.evaluate("showTab('motor');openWatchEditor();$('watchName').value='discarded draft';$('deviceModal').hidden=false")
+ page.keyboard.press('Escape')
+ assert page.locator('#deviceModal').is_hidden()
+ assert page.locator('#watchEditor').is_visible(),'First Back/Escape closes the device picker only'
+ page.keyboard.press('Escape')
+ assert page.locator('#watchEditor').is_hidden()
+ assert page.evaluate('JSON.stringify(watchedMotors.map(m=>m.config))')==before,'Cancel must not save a draft'
+ assert page.evaluate('connected&&consumeChannelBack()===false'),'No transient UI: native Back can return home'
+ page.evaluate("openWatchEditor();showTab('live')")
+ assert page.evaluate("consumeChannelBack()===false&&!$('watchEditor').hidden"),'An editor in an inactive tab must not consume Back'
+ page.evaluate('closeWatchEditor()')
  assert page.evaluate('sent.length')==0,'Filtering, pause and history limits cannot send CAN/BLE commands'
  assert not errors,errors
  b.close()

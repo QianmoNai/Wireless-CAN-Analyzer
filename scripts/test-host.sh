@@ -31,6 +31,10 @@ cc -std=c11 -Wall -Wextra -Werror -Itests/settings_stubs -Itests/usb_stubs -Ifir
 compile_run test_network_protocol firmware/main/network_protocol.c
 compile_run test_network_diagnostics -Wall -Wextra -Werror firmware/main/network_diagnostics.c
 compile_run test_wifi_uart_diag -Wall -Wextra -Werror firmware/main/wifi_uart_diag.c
+python3 tests/test_wifi_can_options.py
+python3 tests/test_wifi_can_power.py
+python3 tests/test_can_hardware_bench.py
+python3 tests/test_linux_tcp_info.py
 cc -std=c11 -Wall -Wextra -Werror -Ifirmware/main tests/test_dual_protocol.c tests/dual_crypto_host.c firmware/main/dual_protocol.c firmware/main/dual_session.c -lcrypto -o "$test_build_dir/test_dual_protocol"
 "$test_build_dir/test_dual_protocol"
 cc -std=c11 -Wall -Wextra -Werror -Itests/dual_stubs -Ifirmware/main tests/test_dual_runtime.c tests/dual_runtime_a.c tests/dual_runtime_b.c tests/dual_crypto_host.c firmware/main/dual_protocol.c firmware/main/dual_session.c -lcrypto -o "$test_build_dir/test_dual_runtime"
@@ -59,7 +63,9 @@ python3 tests/test_panel_dma.py
 python3 tests/test_serial_hardware.py
 python3 tests/test_ble_stress.py
 python3 tests/test_ble_connection_glue.py
+python3 tests/test_ble_can_batch.py
 python3 tests/test_wifi_handoff.py
+python3 tests/test_network_discovery.py
 python3 tests/test_wifi_tx_power.py
 python3 tests/test_wifi_socket_diag.py
 python3 tests/test_wifi_batch.py
@@ -73,8 +79,8 @@ node tests/test_uart_render.cjs
 java_src=android/app/src/main/java/dev/qianmo/canview
 javac -encoding UTF-8 -d "$test_build_dir/java" \
     "$java_src/LanTransport.java" "$java_src/MonitorCommands.java" "$java_src/FeedbackQueries.java" "$java_src/HomeTelemetry.java" \
-    "$java_src/PollingStatus.java" "$java_src/ReconnectHistory.java" "$java_src/TelemetryInbox.java" "$java_src/ConnectionPriority.java" tests/*Test.java
-for name in FeedbackQueriesTest HomeTelemetryTest MonitorCommandsTest PollingStatusTest ReconnectHistoryTest TelemetryInboxTest ConnectionPriorityTest; do
+    "$java_src/PollingStatus.java" "$java_src/ReconnectHistory.java" "$java_src/TelemetryInbox.java" "$java_src/ConnectionPriority.java" "$java_src/BleNotifications.java" "$java_src/LanSubnet.java" tests/*Test.java
+for name in FeedbackQueriesTest HomeTelemetryTest MonitorCommandsTest PollingStatusTest ReconnectHistoryTest TelemetryInboxTest ConnectionPriorityTest BleNotificationsTest LanSubnetTest; do
     java -cp "$test_build_dir/java" "dev.qianmo.canview.$name"
 done
 

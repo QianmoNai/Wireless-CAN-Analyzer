@@ -7,7 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, AsyncMock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from can_scope.protocol import can_command, packet, u32, setting_command, wifi_commands, ipv4, device_settings_command, device_settings_status
@@ -176,6 +176,54 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(c.applied_mode,0)
         self.assertFalse(c.packets)
 
+    async def test_page_subscription_quiet_summary_and_silent_channel(self):
+        c = self.channel
+        await c.handle('setMonitorVisible', [False])
+        self.assertEqual(c.applied_mode, 1)
+        self.assertEqual(c.transport.writes[-1][3], 1)
+        revision = c.revision
+        c.receive(packet(9, a=1, b=1, x=1, y=1, token=revision-1))
+        self.assertFalse(any(k == 'onlineSummary' for k, _ in self.events))
+        c.receive(packet(9, a=1, b=1, x=1, y=1, token=revision))
+        self.assertTrue(self.events[-1][1]['online'])
+        temperatures = bytearray(packet(16, b=1, token=revision))
+        temperatures[4] = 1
+        temperatures[6] = 42
+        c.receive(temperatures)
+        self.assertEqual(self.events[-1][1]['temperatures'], [42])
+        c.receive(packet(1))
+        self.assertFalse(c.packets)
+        await c.handle('setChannelVisible', [False])
+        self.assertEqual(c.applied_mode, 3)
+        await c.handle('setChannelVisible', [True])
+        self.assertEqual(c.applied_mode, 1)
+        await c.handle('setMonitorVisible', [True])
+        self.assertEqual(c.applied_mode, 0)
+        c.receive(packet(1))
+        self.assertEqual(len(c.packets), 1)
+
+    async def test_unchanged_subscription_keeps_revision_and_detail_samples(self):
+        c = self.channel
+        await c.handle('showDetail', [self.key])
+        revision, writes = c.revision, len(c.transport.writes)
+        await c.handle('subscribe', [])
+        self.assertEqual(c.revision, revision)
+        self.assertEqual(len(c.transport.writes), writes)
+        c.receive(packet(11, x=revision))
+        self.assertEqual(len(c.packets), 1)
+
+    async def test_failed_subscription_does_not_reuse_previous_revision(self):
+        c = self.channel
+        await c.subscribe()
+        previous = c.revision
+        with patch.object(c, 'acknowledge', side_effect=asyncio.TimeoutError):
+            await c.handle('setMonitorVisible', [False])
+        self.assertIsNone(c.subscription)
+        await c.handle('setMonitorVisible', [True])
+        self.assertEqual(c.revision, previous+2)
+        self.assertEqual(c.applied_mode, 0)
+        self.assertEqual(u32(c.transport.writes[-1], 16), c.revision)
+
     async def test_bounded_telemetry_and_command_queue(self):
         c = self.channel
         for _ in range(10000):
@@ -208,6 +256,35 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(.03)
         self.assertFalse(c.ready)
         self.assertTrue(any(k=='state' and v['value']=='idle' for k,v in self.events))
+
+    async def test_wifi_connection_setup_retries_only_transient_failures(self):
+        c = self.channel
+        instances = []
+        outcomes = [TimeoutError(), ConnectionRefusedError(), None]
+        class Settling:
+            def __init__(self, *_):
+                self.closed = False
+                instances.append(self)
+            async def connect(self, *_, **__):
+                outcome = outcomes.pop(0)
+                if outcome:raise outcome
+            async def close(self):self.closed = True
+        with patch('can_scope.engine.LanTransport', Settling), patch('can_scope.engine.asyncio.sleep', new=AsyncMock()):
+            await c.handle('connect', ['wifi:192.168.1.2'])
+        self.assertTrue(c.ready)
+        self.assertEqual(len(instances), 3)
+        self.assertTrue(all(t.closed for t in instances[:-1]))
+        self.assertFalse(instances[-1].closed)
+        self.assertEqual(c.saved['ip'], '192.168.1.2')
+        for failure in (ValueError('pin mismatch'), TimeoutError()):
+            instances.clear()
+            outcomes[:] = [failure]*3
+            with patch('can_scope.engine.LanTransport', Settling), patch('can_scope.engine.asyncio.sleep', new=AsyncMock()):
+                with self.assertRaises(type(failure)):
+                    await c.handle('connect', ['wifi:192.168.1.2'])
+            self.assertEqual(len(instances), 1 if isinstance(failure, ValueError) else 3)
+            self.assertTrue(all(t.closed for t in instances))
+            self.assertFalse(c.ready)
 
 
 class TlsTests(unittest.IsolatedAsyncioTestCase):
@@ -261,9 +338,26 @@ class TlsTests(unittest.IsolatedAsyncioTestCase):
             await client.connect('127.0.0.1','00'*32,'12'*32,self.port)
         self.assertEqual(self.auth,[])
 
+    async def test_interface_hint_cannot_bypass_certificate_pin(self):
+        client=LanTransport(lambda _:None,lambda _:None)
+        with patch('can_scope.lan_routes.interface_for', new=AsyncMock(return_value='test')), patch('can_scope.lan_routes.bind_device'):
+            with self.assertRaises(ValueError):
+                await client.connect('127.0.0.1','00'*32,'12'*32,self.port,identity='0123456789ab')
+        self.assertEqual(self.auth,[])
+
 
 
 class BleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_batched_notifications_validate_then_preserve_order(self):
+        received = []
+        link = BleTransport(received.append, lambda _: None)
+        frames = [packet(1, x=i) for i in range(12)]
+        link.notification(None, b''.join(frames))
+        self.assertEqual(received, frames)
+        for invalid in (b'', bytes(19), bytes(241), b''.join(frames)+b'x', frames[0]+bytes(20)):
+            link.notification(None, invalid)
+            self.assertEqual(received, frames)
+
     async def test_native_gatt_and_authenticated_provisioning(self):
         import types
         from can_scope.protocol import SERVICE, NETWORK, WRITE, NOTIFY

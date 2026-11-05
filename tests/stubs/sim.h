@@ -60,6 +60,7 @@ typedef void *TaskHandle_t;
 typedef void *esp_timer_handle_t;
 typedef struct {void (*callback)(void*);const char *name;bool skip_unhandled_events;} esp_timer_create_args_t;
 TaskHandle_t xTaskGetCurrentTaskHandle(void);
+void vTaskPrioritySet(TaskHandle_t,unsigned);
 void xTaskNotifyGive(TaskHandle_t);
 void vTaskNotifyGiveFromISR(TaskHandle_t,BaseType_t*);
 unsigned ulTaskNotifyTake(BaseType_t,unsigned);

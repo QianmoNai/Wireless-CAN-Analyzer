@@ -16,14 +16,16 @@ endmenu
 
 menu "BLE connection parameters"
 config BLE_CONNECTION_POLICY
-    int "Connection profile (0=central, 1=15-30ms, 2=7.5-15ms)"
-    range 0 2
+    int "Connection profile (0=central, 1=15-30ms, 2=7.5-15ms, 3=7.5ms test)"
+    range 0 3
     default 2
     help
         Normal builds request profile 2 (7.5-15ms, latency zero).
         Observe the central first, then request once after subscription.
         Only immediate local rejection permits one retry. Rejected or
         ineffective requests leave negotiation to the central. No PHY/MTU changes.
+        Profile 3 is an opt-in throughput experiment requesting 7.5ms only;
+        it is not the production default and the central may reject it.
 endmenu
 
 menu "CAN analyzer status LED"

@@ -188,8 +188,10 @@ size_t network_config_read(char *out,size_t size){
 static int bound_socket(int type){int s=socket(AF_INET,type,0);if(s<0)return -1;int on=1;setsockopt(s,SOL_SOCKET,SO_REUSEADDR,&on,sizeof(on));struct sockaddr_in a={.sin_family=AF_INET,.sin_port=htons(NET_PORT),.sin_addr.s_addr=htonl(INADDR_ANY)};if(bind(s,(struct sockaddr*)&a,sizeof(a))){close(s);return -1;}fcntl(s,F_SETFL,O_NONBLOCK);return s;}
 static void discovery(int fd){
  char message[64];struct sockaddr_in peer;socklen_t len=sizeof(peer);int n=recvfrom(fd,message,sizeof(message),0,(struct sockaddr*)&peer,&len);
- // Reply only to a small, versioned discovery request; never expose credentials.
- if(n==19&&!memcmp(message,"CAN_SCOPE_DISCOVER_1",19)){char reply[100];int count=snprintf(reply,sizeof(reply),"CAN_SCOPE_1 %s %d",device_id,NET_PORT);sendto(fd,reply,count,0,(struct sockaddr*)&peer,len);}
+ // Older firmware accidentally accepted the 19-byte prefix without the final
+ // version digit. Accept that exact legacy form and the complete request.
+ const char request[]="CAN_SCOPE_DISCOVER_1";size_t size=sizeof(request)-1;
+ if(n>0&&((size_t)n==size||(size_t)n==size-1)&&!memcmp(message,request,(size_t)n)){char reply[100];int count=snprintf(reply,sizeof(reply),"CAN_SCOPE_1 %s %d",device_id,NET_PORT);sendto(fd,reply,count,0,(struct sockaddr*)&peer,len);}
 }
 static void tls_diagnostic_end(int64_t began,int64_t waiting,uint64_t blocked,bool ok,int error,int socket_error,bool timeout){
  int64_t now=esp_timer_get_time();
@@ -212,7 +214,9 @@ static bool tls_write_count(esp_tls_t *tls,const uint8_t *p,size_t n,size_t *com
   else if(r!=ESP_TLS_ERR_SSL_WANT_READ&&r!=ESP_TLS_ERR_SSL_WANT_WRITE){tls_diagnostic_end(began,waiting,blocked,false,r,saved_errno,false);return false;}
   else {if(waiting<0)waiting=now;wifi_diag_add(WD_TLS_WANT_EVENTS,1,WD_NOW_SEQUENCE);}
   if((int32_t)(millis()-deadline)>=0){tls_diagnostic_end(began,waiting,blocked,false,r,saved_errno,true);return false;}
-  if(r<=0)vTaskDelay(pdMS_TO_TICKS(5));
+  // pdMS_TO_TICKS truncates at 100 Hz. Yield a real tick so CAN's owner
+  // can run while TLS is backpressured instead of only yielding to peers.
+  if(r<=0)vTaskDelay(pdMS_TO_TICKS(5)?pdMS_TO_TICKS(5):1);
  }tls_diagnostic_end(began,waiting,blocked,true,0,0,false);return true;
 }
 static bool tls_write_all(esp_tls_t *tls,const uint8_t *p,size_t n){
@@ -240,6 +244,9 @@ static bool data_socket_options(int fd){
 #else
  int nodelay=0;
 #endif
+#if defined(CAN_WIFI_CAN_TCP_NODELAY) && CAN_WIFI_CAN_TCP_NODELAY
+ if(!uart_bridge_selected())nodelay=1;
+#endif
  if(setsockopt(fd,IPPROTO_TCP,TCP_NODELAY,&nodelay,sizeof(nodelay))){
   wifi_diag_set(WD_SOCKET_LAST_ERRNO,errno,WD_NOW_SEQUENCE);
   wifi_diag_set(WD_TCP_CLOSE_REASON,WD_CLOSE_OPTIONS,WD_NOW_SEQUENCE);return false;
@@ -258,7 +265,8 @@ static bool tls_diagnostic_reply(esp_tls_t *tls,uint32_t token){
 }
 static unsigned collect_batch(uint8_t *batch){
  unsigned count=0;bridge_packet_t p;
- while(count<CAN_WIFI_TLS_BATCH&&(xQueueReceive(control_out,&p,0)==pdTRUE||xQueueReceive(raw_out,&p,0)==pdTRUE)){memcpy(batch+20*count++,p.bytes,20);}
+ unsigned limit=uart_bridge_selected()?CAN_WIFI_TLS_BATCH:CAN_WIFI_CAN_BATCH;
+ while(count<limit&&(xQueueReceive(control_out,&p,0)==pdTRUE||xQueueReceive(raw_out,&p,0)==pdTRUE)){memcpy(batch+20*count++,p.bytes,20);}
  return count;
 }
 static void serve_client(int fd){
@@ -275,9 +283,20 @@ static void serve_client(int fd){
  if(!tls_write_all(tls,(uint8_t*)"OK01",4))goto done;
  fcntl(fd,F_SETFL,O_NONBLOCK);discard_network_queue(raw_out);discard_network_queue(control_out);ble_bridge_reset_session();atomic_store(&linked,true);
  uint8_t incoming[20];unsigned at=0,close_reason=WD_CLOSE_MODE;uint32_t last_rx=millis();
+#if defined(CAN_WIFI_CAN_TCP_NODELAY) && CAN_WIFI_CAN_TCP_NODELAY
+ // Reapply on the first data iteration: settings may change during TLS setup.
+ int data_uart=-1;
+#endif
  while(network_connected()&&epoch==atomic_load(&network_epoch)){
+#if defined(CAN_WIFI_CAN_TCP_NODELAY) && CAN_WIFI_CAN_TCP_NODELAY
+  bool next_uart=uart_bridge_selected();
+  if(next_uart!=data_uart){
+   if(!data_socket_options(fd)){close_reason=WD_CLOSE_OPTIONS;break;}
+   data_uart=next_uart;
+  }
+#endif
   // Limit each batch so commands and mode changes are serviced under full CAN load.
-  uint8_t batch[20*CAN_WIFI_TLS_BATCH];unsigned count=collect_batch(batch);
+  uint8_t batch[20*CAN_WIFI_BATCH_CAPACITY];unsigned count=collect_batch(batch);
   wifi_diag_queue(WD_LAN_RAW_DEPTH,WD_LAN_RAW_HIGH,uxQueueMessagesWaiting(raw_out));
   wifi_diag_queue(WD_LAN_CONTROL_DEPTH,WD_LAN_CONTROL_HIGH,uxQueueMessagesWaiting(control_out));
   if(count&&!tls_write_batch(tls,batch,count)){close_reason=WD_CLOSE_WRITE;break;}
@@ -298,7 +317,7 @@ static void serve_client(int fd){
    wifi_diag_set(WD_SOCKET_LAST_ERRNO,errno,WD_NOW_SEQUENCE);close_reason=WD_CLOSE_READ;break;
   }
   if((uint32_t)(millis()-last_rx)>12000){close_reason=WD_CLOSE_HEARTBEAT;break;}
-  vTaskDelay(pdMS_TO_TICKS(2));
+  vTaskDelay(pdMS_TO_TICKS(2)?pdMS_TO_TICKS(2):1);
  }
  wifi_diag_add(WD_TCP_CLOSES,1,WD_NOW_SEQUENCE);wifi_diag_set(WD_TCP_CLOSE_REASON,close_reason,WD_NOW_SEQUENCE);
  atomic_store(&linked,false);discard_network_queue(raw_out);discard_network_queue(control_out);if(epoch==atomic_load(&network_epoch))ble_bridge_reset_session();
@@ -313,6 +332,15 @@ static void server_task(void *arg){
  int tcp=bound_socket(SOCK_STREAM),udp=bound_socket(SOCK_DGRAM);if(tcp<0||udp<0){if(tcp>=0)close(tcp);if(udp>=0)close(udp);set_status(4,9);vTaskDelete(NULL);return;}listen(tcp,1);
  for(;;){discovery(udp);int fd=accept(tcp,NULL,NULL);if(fd>=0){if(network_wifi_mode()&&atomic_load(&online)&&atomic_load(&identity_ready))serve_client(fd);else close(fd);}vTaskDelay(pdMS_TO_TICKS(20));}
 }
+#if defined(CAN_WIFI_CAN_NO_PS) && CAN_WIFI_CAN_NO_PS
+static bool can_wifi_power_update(bool streaming){
+ wifi_ps_type_t current,target=streaming?WIFI_PS_NONE:WIFI_PS_MIN_MODEM;
+ if(esp_wifi_get_ps(&current)!=ESP_OK)return false;
+ if(current==target)return true;
+ if(esp_wifi_set_ps(target)!=ESP_OK)return false;
+ return esp_wifi_get_ps(&current)==ESP_OK&&current==target;
+}
+#endif
 static void manager_task(void *arg){
  bool credentials_ok=network_credentials_valid(&saved);uint32_t retry=0,keep_until=0,dual_retry=0;request_t r;unsigned dual_role=0;
  for(;;){
@@ -337,6 +365,13 @@ static void manager_task(void *arg){
    }
    vTaskDelay(pdMS_TO_TICKS(100));continue;
   }
+#if defined(CAN_WIFI_CAN_NO_PS) && CAN_WIFI_CAN_NO_PS
+  if(atomic_load(&radio_on)&&!can_wifi_power_update(wanted==1&&atomic_load(&linked)&&!uart_bridge_selected())){
+   // An unchecked experimental power setting cannot leave a CAN session live.
+   if(atomic_exchange(&linked,false))atomic_fetch_add(&network_epoch,1);
+   set_status(4,9);vTaskDelay(pdMS_TO_TICKS(100));continue;
+  }
+#endif
   if(xQueueReceive(requests,&r,pdMS_TO_TICKS(100))==pdTRUE){
    if(network_dual_mode()||network_usb_mode()){dual_zero(&r,sizeof(r));continue;}
    if(r.op!=NET_SCAN){atomic_fetch_add(&network_epoch,1);atomic_store(&linked,false);ble_bridge_reset_session();}

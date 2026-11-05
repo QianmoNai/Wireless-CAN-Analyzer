@@ -39,6 +39,7 @@ BaseType_t xTaskCreate(void(*f)(void*),const char*n,unsigned s,void*a,unsigned p
 static int last_poll_reason,last_poll_detail;
 static int scenario,now_ms,tx_num,final_stage,final_count,rate_changes,driver_state;
 static bool link_up,busy,stop_flag,timer_active;
+static unsigned owner_priority;
 static twai_event_callbacks_t driver_callbacks;
 static const twai_frame_t *inflight;
 static uint8_t snapshot[8];static uint32_t snapshot_id;static size_t snapshot_len;
@@ -56,6 +57,7 @@ static jmp_buf done;
 int64_t esp_timer_get_time(void){return (int64_t)now_ms*1000;}
 const char *esp_err_to_name(int e){return "simulation";}
 void vTaskDelay(unsigned ms){
+ assert(owner_priority>5);
  now_ms+=ms;
  if(inflight){assert(inflight->header.id==snapshot_id);assert(inflight->buffer_len==snapshot_len);assert(!memcmp(inflight->buffer,snapshot,snapshot_len));if(!(scenario==16&&now_ms<400)){bool failed=((scenario==4||scenario==9)&&tx_num==2)||scenario==10||scenario==11||(scenario==12&&tx_num<4);
  if(failed&&driver_callbacks.on_error){twai_error_event_data_t error={0};if(scenario==11||scenario==12)error.err_flags.arb_lost=true;else error.err_flags.ack_err=true;driver_callbacks.on_error((void*)1,&error,NULL);}
@@ -89,6 +91,7 @@ void vTaskDelay(unsigned ms){
  if(now_ms>=(scenario>=13?2300:1000))longjmp(done,1);
 }
 TaskHandle_t xTaskGetCurrentTaskHandle(void){return (void*)1;}
+void vTaskPrioritySet(TaskHandle_t task,unsigned priority){assert(task==(void*)1&&priority==6);owner_priority=priority;}
 void xTaskNotifyGive(TaskHandle_t t){}
 void vTaskNotifyGiveFromISR(TaskHandle_t t,BaseType_t*w){}
 unsigned ulTaskNotifyTake(BaseType_t clear,unsigned ms){vTaskDelay(timer_active?1:ms);return 0;}

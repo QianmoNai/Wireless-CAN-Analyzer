@@ -10,8 +10,8 @@ bool bridge_ble_policy_next(bridge_ble_policy_t *s,uint32_t generation,int64_t n
 {
     if(generation!=s->generation||!ready){s->finished=true;return false;}
     if(s->finished||s->attempts>=2||now_ms<s->due_ms)return false;
-    if(profile!=1&&profile!=2){s->finished=true;return false;}
-    uint16_t low=profile==1?12:6,high=profile==1?24:12; // 1.25 ms units.
+    if(profile!=1&&profile!=2&&profile!=3){s->finished=true;return false;}
+    uint16_t low=profile==1?12:6,high=profile==1?24:profile==3?6:12; // 1.25 ms units.
     if(interval>=low&&interval<=high&&latency==0){s->finished=true;return false;}
     // Latency zero: timeout(10ms) > 2 * max interval(1.25ms).
     // Preserve the current legal timeout, avoiding another A/B variable.

@@ -29,14 +29,34 @@ public class LanTransportTest {
     // Suspended channels still need a round-trip heartbeat with no telemetry.
     byte[] heartbeat=new byte[20];in.readFully(heartbeat);check(heartbeat[0]==1&&heartbeat[1]==0x7f);out.write(heartbeat);out.flush();Thread.sleep(30);
    }catch(IOException expected){if(correctPin)errors.add(expected);}catch(Throwable e){errors.add(e);}finally{try{server.close();}catch(Exception ignored){}}});peer.start();
+   java.util.concurrent.atomic.AtomicInteger opened=new java.util.concurrent.atomic.AtomicInteger();
    LanTransport transport=new LanTransport(new LanTransport.Listener(){
     public void connected(LanTransport source){check(correctPin);byte[] p=new byte[20];p[0]=1;p[1]=0x12;p[19]=42;check(source.send(p));p[19]=0;}
     public void packet(LanTransport source,byte[] p){check(p.length==20&&p[0]==1&&p[1]==4-packets.getCount());packets.countDown();}
     public void failed(LanTransport source,String message){failed.countDown();}
-   });transport.connect("127.0.0.1",server.getLocalPort(),correctPin?pin:token,token);
+   },ip->{check(ip.equals("127.0.0.1"));opened.incrementAndGet();return new java.net.Socket();});transport.connect("127.0.0.1",server.getLocalPort(),correctPin?pin:token,token);
    if(correctPin){check(packets.await(10,TimeUnit.SECONDS));check(command.await(10,TimeUnit.SECONDS));}
-   if(!failed.await(10,TimeUnit.SECONDS))throw new AssertionError("No failure callback, pinned="+correctPin);transport.close();peer.join(10000);check(!peer.isAlive());if(!errors.isEmpty())throw new AssertionError(errors.toString());if(!correctPin)check(packets.getCount()==3);
+   if(!failed.await(10,TimeUnit.SECONDS))throw new AssertionError("No failure callback, pinned="+correctPin);transport.close();peer.join(10000);check(!peer.isAlive());check(opened.get()==1);if(!errors.isEmpty())throw new AssertionError(errors.toString());if(!correctPin)check(packets.getCount()==3);
   }
-  System.out.println("LAN transport: pinned TLS, token handshake, fragmented/coalesced frames, copied writes and disconnect PASS");
+  // An idle telemetry stream must be cancellable without waiting for the read
+  // timeout. The Android acceptance separately exercises Conscrypt/StrictMode.
+  SSLServerSocket idleServer=(SSLServerSocket)ctx.getServerSocketFactory().createServerSocket(0);
+  CountDownLatch idleReady=new CountDownLatch(1),idleEnded=new CountDownLatch(1);
+  List<Throwable> idleErrors=new CopyOnWriteArrayList<>();
+  Thread idlePeer=new Thread(()->{boolean authenticated=false;try(SSLSocket sock=(SSLSocket)idleServer.accept()){
+   sock.setSoTimeout(4000);DataInputStream in=new DataInputStream(sock.getInputStream());byte[] auth=new byte[36];in.readFully(auth);
+   check(Arrays.equals(Arrays.copyOfRange(auth,4,36),LanTransport.unhex(token)));
+   sock.getOutputStream().write(new byte[]{'O','K','0','1'});sock.getOutputStream().flush();authenticated=true;
+   check(in.read()==-1);
+  }catch(IOException expected){if(!authenticated)idleErrors.add(expected);}catch(Throwable error){idleErrors.add(error);}finally{idleEnded.countDown();}});idlePeer.start();
+  LanTransport idle=new LanTransport(new LanTransport.Listener(){
+   public void connected(LanTransport source){idleReady.countDown();}
+   public void packet(LanTransport source,byte[] packet){idleErrors.add(new AssertionError("Unexpected idle packet"));}
+   public void failed(LanTransport source,String message){idleErrors.add(new AssertionError("Explicit close reported failure"));}
+  });idle.connect("127.0.0.1",idleServer.getLocalPort(),pin,token);
+  check(idleReady.await(5,TimeUnit.SECONDS));long before=System.nanoTime();idle.close();idle.close();
+  check(System.nanoTime()-before<TimeUnit.MILLISECONDS.toNanos(500));
+  check(idleEnded.await(2,TimeUnit.SECONDS));idlePeer.join(2000);idleServer.close();check(idleErrors.isEmpty());
+  System.out.println("LAN transport: pinned TLS, token handshake, fragmented/coalesced frames, copied writes and idle disconnect PASS");
  }
 }
