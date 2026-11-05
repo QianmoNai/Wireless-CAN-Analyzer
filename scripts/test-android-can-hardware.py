@@ -16,9 +16,12 @@ p.add_argument('--cdp', default='http://127.0.0.1:35013')
 p.add_argument('--output', type=Path, required=True)
 p.add_argument('--seconds', type=int, default=15)
 p.add_argument('--mode', choices=['ble', 'wifi'], default='ble')
+p.add_argument('--restore-wifi-trust', action='store_true', help='BLE only: use the actual settings read button to recover local TLS trust after config import')
 a = p.parse_args()
 if not 5 <= a.seconds <= 300:
     p.error('--seconds must be 5..300')
+if a.restore_wifi_trust and a.mode != 'ble':
+    p.error('--restore-wifi-trust requires --mode ble')
 root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(root / 'desktop'))
 from can_scope.connection_store import connection_folder, load_connection
@@ -68,6 +71,14 @@ with hardware_bench_lock():
                 page.wait_for_function('connected', timeout=30000)
                 page.evaluate("closeDevices();showTab('live')")
                 page.wait_for_function('gotStatus', timeout=10000)
+                if a.restore_wifi_trust:
+                    report['wifi_trust_before'] = page.evaluate("$('wifiKnown').textContent.includes('已保存')")
+                    page.evaluate("showTab('settings')")
+                    from android_pairing import recover_wifi_trust
+                    device_name=saved.get('name')or page.evaluate("$('deviceName').textContent")
+                    report['wifi_pairing'] = recover_wifi_trust(page,a.phone,a.port,saved['id'],device_name)
+                    report['wifi_trust_restored'] = True
+                    page.evaluate("showTab('live')")
                 report['initial_device_drops'] = page.evaluate('firmwareDrops')
                 for name, action in [('raw', None), ('dji-detail', 'dashboardOpen(JSON.stringify(watchedMotors[0].config))'), ('imu-detail', 'dashboardOpen(JSON.stringify(watchedMotors[7].config))'), ('dm-detail', 'dashboardOpen(JSON.stringify(watchedMotors[3].config));setMotorPolling(JSON.stringify(watchedMotors[3].config),true)'), ('pause-filter', "showTab('live');togglePause();$('filter').value='201';renderFrames()"), ('home', "togglePause();$('filter').value='';showTab('motor')")]:
                     if action:
@@ -92,6 +103,7 @@ with hardware_bench_lock():
                 report['ok'] = report['home_extra_raw'] == 0 and (not report['js_errors']) and all((r['connected'] and (not r['appDrops']) and (not r['device_drop_delta']) and (not r['errors']) for r in report['phases'])) and all(((r['detail'] or {}).get('count', 0) >= a.seconds * 60 for r in report['phases'][1:4]))
             except Exception as e:
                 report['failure'] = type(e).__name__
+                report['failure_message'] = str(e)[:300]
                 report['ok'] = False
                 save()
                 raise

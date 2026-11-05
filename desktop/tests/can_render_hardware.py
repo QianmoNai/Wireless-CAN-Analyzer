@@ -4,7 +4,7 @@ Exercises raw monitor, DJI/IMU/DM details, status-only DM query, pause/filter an
 quiet overview. Uses a private temporary profile; restores USB + CAN on exit.
 Run with desktop/.venv/bin/python from a graphical Linux session.
 """
-import argparse,asyncio,hashlib,importlib.util,json,os,sys,tempfile,time
+import argparse,asyncio,atexit,hashlib,importlib.util,json,os,sys,tempfile,time
 from datetime import datetime,timezone
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[2]
@@ -46,6 +46,11 @@ if args.detail_script:
 mode=args.mode;out=args.output.resolve();out.parent.mkdir(parents=True,exist_ok=True)
 spec=importlib.util.spec_from_file_location('can_hardware_bench',ROOT/'scripts/test-can-hardware.py')
 bench=importlib.util.module_from_spec(spec);spec.loader.exec_module(bench)
+from hardware_bench_lock import hardware_bench_lock
+# Keep setup at module scope: other benches reuse its AST literal. Hold the
+# shared process lock before opening Qt or changing any physical device mode.
+hardware_guard=hardware_bench_lock();hardware_guard.__enter__()
+atexit.register(hardware_guard.__exit__,None,None,None)
 app=QApplication([]);app.setOrganizationName('Qianmo');app.setApplicationName('CAN Scope Desktop')
 saved=load_connection(connection_folder()/f'connection-{args.channel}.json')
 asyncio.run(bench.select(args.port,mode))
