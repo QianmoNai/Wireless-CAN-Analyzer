@@ -14,8 +14,6 @@ from usb_management import LocalUsb
 
 
 def recover_wifi_trust(page, phone, port, identity, name, timeout=65):
-    if not isinstance(name,str) or not name or len(name.encode())>16:
-        raise ValueError('Expected an explicit valid analyzer name')
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 
     def adb(*items):
@@ -71,6 +69,8 @@ def recover_wifi_trust(page, phone, port, identity, name, timeout=65):
             if code is None or handled:
                 page.wait_for_timeout(100)
                 continue
+            if not isinstance(name,str) or not name or len(name.encode())>16:
+                raise ValueError('Expected an explicit valid analyzer name for first pairing')
             # The physical display is active. Find the actual Settings input,
             # excluding all editable fields belonging to the WebView.
             ui = dump()

@@ -59,10 +59,14 @@ def main():
     parser.add_argument('--reset-usb-reconnect',type=Path,metavar='ESPTOOL',
                         help='USB only: watchdog-reset this analyzer and test packaged identity reconnect')
     parser.add_argument('--all-bitrates',action='store_true',help='Rate-enabled fixture only: apply all four rates through the actual GUI')
+    parser.add_argument('--monitor-seconds',type=int,default=0,help='Also exercise six physical motor/IMU display phases (5..60 seconds each)')
+    parser.add_argument('--detail-window',choices=['0.1','0.5','1','5','10','30','60'],default='1',help='Visible detail history in seconds; sampling remains unchanged')
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     if args.reset_usb_reconnect and args.mode!='usb':
         parser.error('--reset-usb-reconnect requires --mode usb')
+    if args.monitor_seconds and not 5<=args.monitor_seconds<=60:
+        parser.error('--monitor-seconds must be zero or 5..60')
     import asyncio
     bench = module('can_bench', ROOT/'scripts/test-can-hardware.py')
     fixture = module('dual_fixture', ROOT/'scripts/test-dual-can-hardware.py').Fixture(args.elf)
@@ -73,6 +77,9 @@ def main():
     args.output.parent.mkdir(parents=True, exist_ok=True)
     proc = browser = page = None
     try:
+        report['fixture_health_before']=fixture.health()
+        if any(report['fixture_health_before'].values()):
+            raise RuntimeError('Fixture has existing CAN errors')
         asyncio.run(bench.select(args.port, args.mode))
         if args.mode == 'wifi':
             time.sleep(10)
@@ -103,6 +110,8 @@ def main():
                 with sync_playwright() as pw:
                     browser = pw.chromium.connect_over_cdp(f'http://127.0.0.1:{port}', no_defaults=True)
                     page = browser.contexts[0].pages[0]
+                    report['js_errors']=[]
+                    page.on('pageerror',lambda error:report['js_errors'].append(str(error)))
                     page.wait_for_function("window.CanAndroid&&typeof CanAndroid.connect==='function'")
                     tree = ast.parse((ROOT/'desktop/tests/can_render_hardware.py').read_text())
                     setup = next(ast.literal_eval(n.value) for n in tree.body if isinstance(n, ast.Assign)
@@ -154,6 +163,43 @@ def main():
                             raise AssertionError('Packaged reconnect used a different hardware identity or port')
                         report['usb_reconnect']=dict(before_port=original,after_port=after['usb_port'],
                                                      same_identity=True,ready=True)
+                    if args.monitor_seconds:
+                        page.evaluate("()=>{window.monitorRaw=0;window.monitorModeSeen=null;const prior=onNative;onNative=(k,d)=>{prior(k,d);if(k==='telemetryMode')monitorModeSeen=d.mode;if(k==='packets')for(const x of d.items||[]){const p=parsePacket(x.hex||x);if(p&&p[1]===1)monitorRaw++}}}")
+                        report['monitor_phases']=[]
+                        baseline=page.evaluate('firmwareDrops')
+                        for name,action in [('raw',"showTab('live')"),
+                                ('dji-detail','dashboardOpen(JSON.stringify(watchedMotors[0].config))'),
+                                ('imu-detail','dashboardOpen(JSON.stringify(watchedMotors[7].config))'),
+                                ('dm-detail','dashboardOpen(JSON.stringify(watchedMotors[3].config));setMotorPolling(JSON.stringify(watchedMotors[3].config),true)'),
+                                ('pause-filter',"showTab('live');togglePause();$('filter').value='201';renderFrames()"),
+                                ('home',"togglePause();$('filter').value='';showTab('motor')")]:
+                            report['active_operation']='monitor-'+name
+                            page.evaluate(action)
+                            if name in ('dji-detail','imu-detail','dm-detail'):
+                                page.locator('#detailWindow').select_option(args.detail_window)
+                                page.wait_for_function("value=>$('detailWindow').value===value",arg=args.detail_window)
+                            if name=='home':
+                                page.wait_for_function('monitorModeSeen===1',timeout=5000)
+                                page.wait_for_timeout(1000)
+                                home_before=page.evaluate('monitorRaw')
+                            page.evaluate('for(const key in perf)perf[key]=[]')
+                            page.wait_for_timeout(args.monitor_seconds*1000)
+                            row=page.evaluate("({connected,appDrops,firmwareDrops,raw:monitorRaw,roster:dashboardSnapshot(),detail:detailMotor?{ready:detailReady,count:detailSamples.length,values:detailMotor.feedback&&detailMotor.feedback.values,canRate:$('detailCanRate').textContent,appRate:$('detailAppRate').textContent}:null,draw:perf.draw})")
+                            row['name']=name
+                            report['monitor_phases'].append(row)
+                            if not row['connected']or row['appDrops']or row['firmwareDrops']!=baseline:
+                                raise AssertionError('Packaged monitor lost connection or CAN data')
+                            if name in ('dji-detail','imu-detail','dm-detail'):
+                                detail=row['detail']or{}
+                                if not detail.get('ready')or detail.get('count',0)<args.monitor_seconds*60 or not detail.get('values'):
+                                    raise AssertionError('Packaged detail samples/parameters missing')
+                            if name=='home'and row['raw']!=home_before:
+                                raise AssertionError('Packaged overview did not silence raw CAN')
+                            args.output.write_text(json.dumps(report,indent=2)+'\n')
+                        page.evaluate('setMotorPolling(JSON.stringify(watchedMotors[3].config),false)')
+                        page.wait_for_function('!watchedMotors[3].polling',timeout=5000)
+                        page.wait_for_timeout(200)
+                        page.evaluate("showTab('live')")
                     base = fixture.symbols['can_bench']+(args.bus-1)*52
                     for identifier, extended, remote, dlc in [(0x6a0, False, False, 8),
                             (0x1abcde, True, False, 8), (0x6a1, False, True, 8), (0x1abcdf, True, True, 0)]:
@@ -260,6 +306,8 @@ def main():
                     actual = page.evaluate("ConfigIO.exportChannel(1,'','').motors")
                     if actual != exported['channels'][0]['motors']:
                         raise AssertionError('Native configuration import changed motor settings')
+                    if report['js_errors']:
+                        raise AssertionError('Packaged UI JavaScript errors')
                     report.update(native_config_import=True, ok=True)
                     browser.close()
                     browser = None
@@ -299,6 +347,12 @@ def main():
             report['restored_usb_can'] = True
         except Exception as exc:
             report.update(ok=False, restore_failed=type(exc).__name__)
+        try:
+            report['fixture_health_after']=fixture.health()
+            if any(report['fixture_health_after'].values()):
+                report.update(ok=False,failure='Physical CAN error')
+        except Exception as exc:
+            report.update(ok=False,health_failed=type(exc).__name__)
         args.output.write_text(json.dumps(report, indent=2)+'\n')
     print(json.dumps(report))
     raise SystemExit(0 if report['ok'] else 1)

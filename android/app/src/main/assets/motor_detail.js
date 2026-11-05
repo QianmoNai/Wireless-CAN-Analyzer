@@ -256,8 +256,11 @@ function detailPeakPoints(points,key,span,start,width=400){
  const out=[];let first=0,lo=0,hi=0,bucket=-1,last=null;
  function flush(end){
   if(end<first)return;
-  const indices=[first,lo,hi,end].sort((a,b)=>a-b);let previous=-1;
-  for(const i of indices)if(i!==previous){out.push(points[i]);previous=i;}
+  out.push(points[first]);
+  const a=lo<hi?lo:hi,b=lo<hi?hi:lo;
+  if(a>first&&a<end)out.push(points[a]);
+  if(b>a&&b<end)out.push(points[b]);
+  if(end>first)out.push(points[end]);
  }
  for(let i=0;i<points.length;i++){
   const p=points[i],b=Math.floor((p.t-start)*width/span);

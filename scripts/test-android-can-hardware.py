@@ -17,6 +17,7 @@ p.add_argument('--output', type=Path, required=True)
 p.add_argument('--seconds', type=int, default=15)
 p.add_argument('--mode', choices=['ble', 'wifi'], default='ble')
 p.add_argument('--restore-wifi-trust', action='store_true', help='BLE only: use the actual settings read button to recover local TLS trust after config import')
+p.add_argument('--verify-import-guard', action='store_true', help='Require native config import to refuse an active connection without disconnecting it')
 a = p.parse_args()
 if not 5 <= a.seconds <= 300:
     p.error('--seconds must be 5..300')
@@ -75,10 +76,19 @@ with hardware_bench_lock():
                     report['wifi_trust_before'] = page.evaluate("$('wifiKnown').textContent.includes('已保存')")
                     page.evaluate("showTab('settings')")
                     from android_pairing import recover_wifi_trust
-                    device_name=saved.get('name')or page.evaluate("$('deviceName').textContent")
+                    device_name=page.evaluate("currentBleName||$('deviceName').textContent")
                     report['wifi_pairing'] = recover_wifi_trust(page,a.phone,a.port,saved['id'],device_name)
                     report['wifi_trust_restored'] = True
                     page.evaluate("showTab('live')")
+                if a.verify_import_guard:
+                    home.evaluate('HomeAndroid.importConfig()')
+                    home.wait_for_function("$('configStatus').textContent==='请先断开所有通道连接，再导入配置'",polling=100,timeout=3000)
+                    if not page.evaluate('connected'):
+                        raise AssertionError('Import guard interrupted the active connection')
+                    focus=subprocess.check_output(['adb','-s',a.phone,'shell','dumpsys','window'],timeout=15).decode()
+                    if any('documentsui'in line.lower()for line in focus.splitlines()if 'mCurrentFocus'in line):
+                        raise AssertionError('Import guard opened the system file picker')
+                    report['connected_import_blocked']=True
                 report['initial_device_drops'] = page.evaluate('firmwareDrops')
                 for name, action in [('raw', None), ('dji-detail', 'dashboardOpen(JSON.stringify(watchedMotors[0].config))'), ('imu-detail', 'dashboardOpen(JSON.stringify(watchedMotors[7].config))'), ('dm-detail', 'dashboardOpen(JSON.stringify(watchedMotors[3].config));setMotorPolling(JSON.stringify(watchedMotors[3].config),true)'), ('pause-filter', "showTab('live');togglePause();$('filter').value='201';renderFrames()"), ('home', "togglePause();$('filter').value='';showTab('motor')")]:
                     if action:

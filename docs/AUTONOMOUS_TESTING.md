@@ -11,8 +11,8 @@
 | 双机配对 | 指定两个 USB 身份、已知 MAC、双方独立校验后分别确认 | 实物通过，失败保留旧绑定，不选择不明设备 |
 | 双机传输与重启 | SWD 双控制器逐帧核对，USB ROM/看门狗复位 | 1.24.6候选5000组及离线帧不补发通过；默认速率失败与候选结果分别保留 |
 | USB 编号变化后重连 | VID/PID/序列号解析，握手后复核 | Desktop 1.2.16 源码跨 ACM1/ACM2 重连并收到 CAN；发行包页面重启重连通过，该轮编号未变 |
-| 桌面文件与操作 | 实际发行包、Qt 原生文件对话框、Niri 焦点 | 1.2.16 三种传输下配置导出/导入、CSV、手动发送通过；双实物9种通信组合63段切换/静默/独有帧核对通过；50次离线Qt全屏切换通过 |
-| Android 文件与操作 | ADB 原生界面＋实际 WebView | 1.21.5 台架包 BLE/Wi-Fi、旋转/返回/前后台通过；原生导出及键盘操作SAF导入16配置逐项一致，无需触摸授权 |
+| 桌面文件与操作 | 实际发行包、Qt 原生文件对话框、Niri 焦点 | 1.2.17三种传输配置导出/导入、CSV、四类手动帧、四档速率及六阶段显示通过，Wi-Fi各阶段60秒；双实物9组合63段核对及50次离线Qt全屏证据仍为1.2.16 |
+| Android 文件与操作 | ADB 原生界面＋实际 WebView | 1.21.6 台架包两台BLE/Wi-Fi各六阶段通过，在线导入均被拦截且保持连接；断开后的原生SAF导入16配置逐项一致，无需触摸授权；旋转/返回/前后台证据仍为1.21.5 |
 | Windows | GitHub Actions 原生构建和测试 | 878c694 的CI通过；没有本机Windows物理台架，不能代替硬件验证 |
 | CAN四档速率 | SWD停控制器，协议改分析仪速率，再启动同速率 | 1.24.6两台各12组合、四种帧双向唯一ID/载荷复验通过，CAN错误零；桌面三种连接下实际界面四档切换、双机16种独立速率组合800帧通过 |
 | 持续高负载、距离 | 需要扩展可控台架或测试场景 | 双机逐帧成功不等于满负载和距离通过 |
@@ -28,8 +28,8 @@
 - `scripts/test-usb-reconnect-hardware.py`：桌面按 USB 身份跨复位重连；必须指定模拟器台架、已核对设备端口及esptool路径。
 - `scripts/test-android-config-import-hardware.py`：独立台架包的原生SAF键盘导入；核对ADB/CDP进程、已有数字文件名备份及断开状态，只确认一次。导入清除网络信任，随后`test-android-can-hardware.py --mode ble --restore-wifi-trust`从实际设置按钮重新认证；首次配对由`android_pairing.py`读取身份核对的物理USB当前临时码并操作原生通知/确认，仅内存处理。
 - `desktop/tests/multichannel_hardware.py`：实际发行包两路实物并存，原生标签切换、隐藏流静默、独有测试帧归属；端口按顺序对应已保存通道1/2及STM32 CAN1/2。
-- `scripts/test-android-can-hardware.py`：Android台架包实际WebView、六阶段CAN显示和清理。
-- `desktop/tests/can_operations_hardware.py`：发行包原生文件操作与实际CAN发送核对；`--all-bitrates`在速率台架上通过界面应用四档并收取物理CAN。
+- `scripts/test-android-can-hardware.py`：Android台架包实际WebView、六阶段CAN显示和清理；`--verify-import-guard`通过真实原生桥接确认在线导入被拒绝且保持连接。
+- `desktop/tests/can_operations_hardware.py`：发行包原生文件操作与实际CAN发送核对；`--all-bitrates`在速率台架上通过界面应用四档并收取物理CAN；`--monitor-seconds 5..60`加入六阶段参数/曲线观察，`--detail-window 60`扩大可见历史，不修改采样。
 
 主要物理测试入口共用进程锁，第二个测试会在改变模式前被拒绝，防止两个测试互相干扰。锁在正常结束或进程退出时释放。
 

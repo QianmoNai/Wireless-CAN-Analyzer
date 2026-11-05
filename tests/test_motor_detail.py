@@ -123,6 +123,16 @@ with sync_playwright() as p:
  if(gapReduced.length!==expected.length||!expected.every((i,n)=>gapReduced[n]===gapPoints[i]))throw Error('lost gap boundaries, extrema order or sample identity');
  const short=gapPoints.slice(0,1600);if(detailPeakPoints(short,'position',100000,0,1)!==short)throw Error('small history was copied');
  if(gapPoints.length!==3202||gapPoints[1700].values.position!==-100)throw Error('input history mutated');
+ // Both extremum orders, flat buckets and extrema at the boundary must retain
+ // their original chronological references without duplicating endpoints.
+ for(const [value,expectedIndices]of [
+  [i=>i===10?100:i===20?-100:0,[0,10,20,3201]],
+  [i=>i===0?100:i===3201?-100:0,[0,3201]],
+  [i=>7,[0,3201]]]){
+  const flat=Array.from({length:3202},(_,i)=>({t:i,values:{position:value(i)}}));
+  const result=detailPeakPoints(flat,'position',100000,0,1);
+  if(result.length!==expectedIndices.length||!expectedIndices.every((i,n)=>result[n]===flat[i]))throw Error('bucket extrema/edge order changed');
+ }
  detailSamples=points;detailSampleHead=0;detailClock=59999;detailLastStamp=59999;detailLastArrival=Date.now();$('detailWindow').value='60';drawDetail();
  }""")
  send(key,bytes([0x13,0x80,0,0x80,0,0,43,44]),60000)

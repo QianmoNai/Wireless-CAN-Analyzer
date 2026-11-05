@@ -375,7 +375,7 @@ public class MainActivity extends Activity {
         configMessage=message;configBusy=busy;
         if(homeReady)home.evaluateJavascript("window.configStatus("+JSONObject.quote(message)+","+busy+")",null);
     }
-    private boolean devicesDisconnected(){for(DevicePanel p:panels)if(p.gatt!=null)return false;return true;}
+    private boolean devicesDisconnected(){for(DevicePanel p:panels)if(p.gatt!=null||p.lan!=null||p.lanConnecting||p.ready)return false;return true;}
     private void beginExport(){
         if(configBusy)return;
         for(DevicePanel p:panels)if(!p.pageReady){configNotice("通道仍在载入，请稍后重试",false);return;}
@@ -420,7 +420,7 @@ public class MainActivity extends Activity {
     }
     private void beginImport(){
         if(configBusy)return;
-        if(!devicesDisconnected()){configNotice("请先断开所有通道的蓝牙连接，再导入配置",false);return;}
+        if(!devicesDisconnected()){configNotice("请先断开所有通道连接，再导入配置",false);return;}
         try{configGeneration++;configNotice("请选择 CAN Scope JSON 配置文件",true);Intent intent=new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*");startActivityForResult(intent,IMPORT_CONFIG);}
         catch(Exception e){configNotice("无法打开文件选择器："+e.getMessage(),false);}
     }
