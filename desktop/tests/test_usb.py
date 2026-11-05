@@ -1,6 +1,7 @@
 import asyncio
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -173,19 +174,48 @@ class BootstrapTests(unittest.IsolatedAsyncioTestCase):
             serial.assert_not_called()
 
     async def test_bootstrap_does_not_replay_unconfirmed_setting(self):
+        clock = 0.0
         class NoSetReply(FakeSerial):
             def write(self, frame):
+                nonlocal clock
                 self.writes.append(frame)
                 for session, p in self.decoder.feed(frame):
                     if p[2] == 0:
                         self.input.extend(encode(session,packet(22,b=4,y=115200,token=u32(p,16))))
+                    else:
+                        # Expire only after the setting was submitted. Thread
+                        # pool startup can exceed a short wall-clock timeout
+                        # on Windows before the initial read has completed.
+                        clock = 2.0
                 return len(frame)
         port=NoSetReply()
-        with patch('can_scope.serial_port.NativeUsbSerial',return_value=port):
+        with patch('can_scope.serial_port.NativeUsbSerial',return_value=port), \
+             patch('can_scope.usb_transport.time', SimpleNamespace(monotonic=lambda: clock)):
             with self.assertRaisesRegex(ConnectionError,'设置结果可能未知'):
-                await prepare_usb('TEST',data=1,timeout=.04)
+                await prepare_usb('TEST',data=1,timeout=1)
         commands=[Decoder().feed(frame)[0][1] for frame in port.writes]
         self.assertEqual([p[2] for p in commands],[0,1])
+        self.assertFalse(port.is_open)
+
+    async def test_bootstrap_does_not_submit_setting_after_query_budget_expires(self):
+        clock = 0.0
+        class SlowQuery(FakeSerial):
+            def write(self, frame):
+                nonlocal clock
+                self.writes.append(frame)
+                for session, p in self.decoder.feed(frame):
+                    if p[2] != 0:
+                        raise AssertionError('Expired bootstrap submitted a setting')
+                    self.input.extend(encode(session,packet(22,b=4,y=115200,token=u32(p,16))))
+                    clock = 2.0
+                return len(frame)
+        port = SlowQuery()
+        with patch('can_scope.serial_port.NativeUsbSerial',return_value=port), \
+             patch('can_scope.usb_transport.time', SimpleNamespace(monotonic=lambda: clock)):
+            with self.assertRaises(ConnectionError):
+                await prepare_usb('TEST',data=1,timeout=1)
+        commands = [Decoder().feed(frame)[0][1] for frame in port.writes]
+        self.assertEqual([p[2] for p in commands], [0])
         self.assertFalse(port.is_open)
 
     async def test_bootstrap_surfaces_admission_rejection(self):
