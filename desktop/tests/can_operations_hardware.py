@@ -58,6 +58,7 @@ def main():
     parser.add_argument('--screenshots', action='store_true', help='Capture native dialogs using ffmpeg')
     parser.add_argument('--reset-usb-reconnect',type=Path,metavar='ESPTOOL',
                         help='USB only: watchdog-reset this analyzer and test packaged identity reconnect')
+    parser.add_argument('--all-bitrates',action='store_true',help='Rate-enabled fixture only: apply all four rates through the actual GUI')
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     if args.reset_usb_reconnect and args.mode!='usb':
@@ -109,6 +110,28 @@ def main():
                     page.evaluate(setup)
                     page.evaluate("target=>invoke('connect',target)", target)
                     page.wait_for_function('connected&&gotStatus&&frames.length>20', timeout=35000)
+                    if args.all_bitrates:
+                        fixture.quiet(0)
+                        time.sleep(.1)
+                        page.evaluate("()=>{window.rateRx=0;const ratePriorNative=onNative;onNative=(kind,data)=>{if(kind==='packets')for(const item of data.items||[]){const bytes=parsePacket(item.hex||item);if(bytes&&bytes[1]===1)rateRx++}return ratePriorNative(kind,data)}}")
+                        report['gui_bitrates']=[]
+                        for rate in [125000,250000,500000,1000000]:
+                            fixture.set_rate(args.bus-1,0)
+                            page.evaluate("showTab('settings')")
+                            page.locator('#busBitrate').select_option(str(rate))
+                            page.locator('#saveBitrate').click()
+                            page.wait_for_function("rate=>!deviceSettingsBusy&&bridgeBitrate===rate&&$('rateResult').textContent==='波特率已应用'",arg=rate,timeout=10000)
+                            before=page.evaluate('rateRx')
+                            fixture.set_rate(args.bus-1,rate)
+                            fixture.quiet(1)
+                            page.evaluate("showTab('live')")
+                            page.wait_for_function('before=>rateRx>before+20',arg=before,timeout=5000)
+                            health=fixture.health()
+                            if any(health.values()):raise AssertionError('CAN error at GUI bitrate')
+                            report['gui_bitrates'].append(dict(bitrate=rate,received=page.evaluate('rateRx')-before,health=health))
+                            fixture.quiet(0)
+                            time.sleep(.1)
+                        fixture.quiet(1)
                     if args.reset_usb_reconnect:
                         cache=folder/'Qianmo/CAN Scope Desktop/connection-1.json'
                         initial=load_connection(cache)
@@ -252,6 +275,27 @@ def main():
                 proc.wait()
         try:
             asyncio.run(bench.select(args.port, 'usb'))
+            if args.all_bitrates:
+                from can_scope.usb_transport import UsbTransport
+                from can_scope.protocol import packet,u32
+                async def restore_rate():
+                    fixture.quiet(0)
+                    fixture.set_rate(args.bus-1,0)
+                    received=[]
+                    link=UsbTransport(received.append,lambda _:None)
+                    try:
+                        await link.connect(args.port)
+                        await link.write(packet(0x12,x=1000000,token=0x3ffffffe))
+                        deadline=time.monotonic()+5
+                        while time.monotonic()<deadline:
+                            if any(p[1]==5 and p[2]==0 and u32(p,4)==1000000 and u32(p,16)==0x3ffffffe for p in received):break
+                            await asyncio.sleep(.01)
+                        else:raise TimeoutError('GUI test bitrate restoration missing')
+                    finally:await link.close()
+                    fixture.set_rate(args.bus-1,1000000)
+                    fixture.quiet(1)
+                asyncio.run(restore_rate())
+                report['restored_1mbps']=True
             report['restored_usb_can'] = True
         except Exception as exc:
             report.update(ok=False, restore_failed=type(exc).__name__)

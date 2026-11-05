@@ -12,6 +12,8 @@ extern FDCAN_HandleTypeDef hfdcan1;
 extern FDCAN_HandleTypeDef hfdcan2;
 HAL_StatusTypeDef CAN_Bus2_Send(const CAN_Frame *frame);
 HAL_StatusTypeDef CAN_Bus2_Receive(CAN_Frame *frame);
+/* Bench only: rate=0 stops; otherwise 125/250/500/1000 kbit/s. No pending TX. */
+HAL_StatusTypeDef CAN_BusBench_SetRate(unsigned bus, uint32_t rate);
 #endif
 /* Call after HAL_Init and HSE clock setup. Single foreground caller only. */
 HAL_StatusTypeDef CAN_Bus_Init(void);

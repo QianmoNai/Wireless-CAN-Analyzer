@@ -79,7 +79,8 @@ static atomic_bool subscribed;
 static atomic_bool wifi_paused, wifi_pause_ready;
 static struct ble_npl_event wifi_radio_event;
 static atomic_uint dropped;
-static atomic_bool motor_busy, stop_requested;
+static atomic_bool motor_busy;
+static atomic_uint stop_requested;
 static void advertise(void);
 typedef struct {
     bridge_packet_t packet;
@@ -228,14 +229,14 @@ int ble_bridge_command(const uint8_t bytes[20])
         return 0;
     }
     if (p[1] == 0x21) {
-        atomic_store(&stop_requested, true);
+        atomic_fetch_or(&stop_requested, BLE_STOP_EXPLICIT);
         return 0;
     }
     if (atomic_load(&motor_busy) && !(p[1]==0x15 || (p[1]==0x14 && wire_u32(p+8)==0)))
         return BLE_ATT_ERR_INSUFFICIENT_RES;
     if (p[1] == 0x13) {
         if (p[3] != 0 || !bridge_name_valid(p + 4, p[2])) return BLE_ATT_ERR_VALUE_NOT_ALLOWED;
-        atomic_store(&stop_requested, true);
+        atomic_fetch_or(&stop_requested, BLE_STOP_EXPLICIT);
         rename_device(p + 4, p[2]);
         return 0;
     }
@@ -266,7 +267,9 @@ int ble_bridge_command(const uint8_t bytes[20])
 
 void ble_bridge_reset_session(void){
     atomic_fetch_add(&notify_generation,1);wake_notify();
-    reset_home();uart_bridge_disconnect();atomic_store(&stop_requested,true);
+    // This reset clears both old queues below, including any earlier explicit
+    // stop. The owner must not perform that purge again after new admission.
+    reset_home();uart_bridge_disconnect();atomic_store(&stop_requested,BLE_STOP_SESSION);
     if(notify_queue)discard_raw_queue();
     if(control_notify_queue)xQueueReset(control_notify_queue);
     if(ack_notify_queue)xQueueReset(ack_notify_queue);
@@ -785,7 +788,7 @@ void ble_bridge_wifi_resume(void) {
     ble_npl_eventq_put(nimble_port_get_dflt_eventq(),&wifi_radio_event);
 }
 bool ble_bridge_connected(void) { if(network_dual_mode())return false;return network_usb_mode()?usb_link_connected():network_wifi_mode()?network_connected():atomic_load(&subscribed); }
-bool ble_bridge_take_stop(void) { return atomic_exchange(&stop_requested, false); }
+unsigned ble_bridge_take_stop(void) { return atomic_exchange(&stop_requested, 0); }
 void ble_bridge_set_motor_busy(bool busy) { atomic_store(&motor_busy, busy); }
 
 void ble_bridge_init(QueueHandle_t commands, QueueHandle_t queries)

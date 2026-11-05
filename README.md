@@ -129,7 +129,7 @@ Android 需 Android 8.0+；Windows 支持 Windows 10 / 11 x64；Linux 桌面包�
 
 | 组件 | 源码版本 | 入口 |
 | --- | --- | --- |
-| ESP32-S3 固件 | **1.24.5** | [构建与烧录](#build) |
+| ESP32-S3 固件 | **1.24.6** | [构建与烧录](#build) |
 | Android App | **1.21.5** | [Android 构建](#build-android) |
 | CAN Scope Desktop | **1.2.16** | [桌面使用说明](desktop/README.md) |
 

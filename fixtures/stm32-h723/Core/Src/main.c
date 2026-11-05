@@ -24,8 +24,31 @@ volatile struct {
   CAN_Frame last_rx;
   uint32_t received;
 } can_bench[2];
+/* SWD request/done handshake; rate=0 holds this controller stopped while the
+ * analyzer changes rate. This prevents intentional mismatches causing bus-off. */
+volatile struct {
+  uint32_t rate, request, done, result, current, paused;
+} can_bitrate_bench[2]={{.current=1000000},{.current=1000000}};
+static void bench_rate(unsigned bus)
+{
+  uint32_t request=can_bitrate_bench[bus].request;
+  if (!request || request==can_bitrate_bench[bus].done) return;
+  uint32_t rate=can_bitrate_bench[bus].rate;
+  HAL_StatusTypeDef result=CAN_BusBench_SetRate(bus,rate);
+  if (result==HAL_BUSY) return;
+  can_bitrate_bench[bus].result=result;
+  if (result==HAL_OK) {
+    can_bitrate_bench[bus].current=rate;
+    can_bitrate_bench[bus].paused=!rate;
+  } else {
+    /* An unexpected HAL failure must not resume sending on an unknown rate. */
+    can_bitrate_bench[bus].paused=1;
+  }
+  can_bitrate_bench[bus].done=request;
+}
 static void bench_send(unsigned bus)
 {
+  if (can_bitrate_bench[bus].paused) return;
   uint32_t trigger=can_bench[bus].trigger;
   if (!trigger || trigger==can_bench[bus].done) return;
   CAN_Frame frame=can_bench[bus].request;
@@ -37,6 +60,7 @@ static void bench_send(unsigned bus)
 }
 static void second_bus_process(void)
 {
+  if (can_bitrate_bench[1].paused) return;
   static bool prefer_imu;
   CAN_Frame frame;
   FDCAN_ProtocolStatusTypeDef status;
@@ -126,6 +150,9 @@ int main(void)
 #endif
   bool prefer_imu = false;
   while (1) {
+#if CAN_DUAL_BENCH
+    bench_rate(0);bench_rate(1);
+#endif
     FDCAN_ProtocolStatusTypeDef status;
     if (HAL_FDCAN_GetProtocolStatus(&hfdcan1, &status) == HAL_OK)
       can_bus_off = status.BusOff;
@@ -134,7 +161,11 @@ int main(void)
       __HAL_FDCAN_CLEAR_FLAG(&hfdcan1, FDCAN_FLAG_RX_FIFO0_MESSAGE_LOST);
     }
     /* Bounded work: keep the periodic sender responsive under bus load. */
-    for (uint32_t i = 0; i < 16; ++i) {
+    for (uint32_t i = 0; i < 16
+#if CAN_DUAL_BENCH
+         && !can_bitrate_bench[0].paused
+#endif
+         ; ++i) {
       HAL_StatusTypeDef result = CAN_Bus_Receive(&rx);
       if (result == HAL_BUSY) break;
       if (result != HAL_OK) { ++can_errors; break; }
@@ -153,7 +184,7 @@ int main(void)
     ImuSim_Update(&imu_sim, HAL_GetTick());
     if (!can_bus_off
 #if CAN_DUAL_BENCH
-        && can1_periodic
+        && can1_periodic && !can_bitrate_bench[0].paused
 #endif
     ) {
       for (unsigned i = 0; i < 8; ++i) {

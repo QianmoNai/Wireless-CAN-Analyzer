@@ -20,6 +20,10 @@ bash fixtures/stm32-h723/tests/run.sh
 
 默认 `CAN_DUAL_BENCH=OFF`，保留原单路配置。双路构建额外导出 `can1_periodic`、`can2_periodic` 和 `can_bench[2]`，通过 SWD 暂停周期上报、逐帧注入并读取另一总线实际收到的完整帧。仅在明确的模拟台架运行这些测试。测试脚本先核对正在运行的 Flash 与所给 ELF/BIN 一致，不依赖固定 RAM 地址。
 
+双路台架还提供`can_bitrate_bench[2]`，每项六个u32：`rate/request/done/result/current/paused`。写`rate`后最后递增非零`request`，等待`done`匹配及`result=HAL_OK`；`rate=0`先在发送FIFO排空后停控制器，其他有效值仅125000/250000/500000/1000000。改变分析仪速率期间保持STM32停止，再启动相同速率，避免有意制造速率不匹配。请求由前台处理，不在SWD直接篡改HAL句柄或运行中的时序寄存器。单路构建不提供这一测试入口。
+
+`scripts/test-can-bitrates-hardware.py --fixture stm32h723-dual --elf <ELF> --port <USB身份> --bus 1 --channel 1 --modes usb ble wifi --output /tmp/can-rates.json`测试四档速率，每档标准/扩展、数据/远程帧双向实际核对，最后停止STM32、将分析仪恢复1Mbps、再恢复STM32与周期上报。USB、BLE、Wi-Fi切换及恢复仍使用产品协议。脚本共用台架互斥锁，不能与双机或其他硬件测试并行运行。
+
 在启动双机测试前，通过对应 ELF 符号把两个周期开关置零；测试结束先恢复两台分析仪 USB＋CAN，再恢复周期开关。双机转发期间同时运行两套相同反馈 ID 会混合测试数据。
 
 ```bash

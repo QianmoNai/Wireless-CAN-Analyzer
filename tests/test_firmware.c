@@ -115,6 +115,8 @@ int twai_node_recover(twai_node_handle_t n){if(scenario!=17)driver_state=0;retur
 int twai_node_receive_from_isr(twai_node_handle_t n,twai_frame_t*f){if(!receive_ready)return 2;receive_ready=false;f->header=receive_header;return 0;}
 int twai_node_transmit(twai_node_handle_t n,const twai_frame_t*f,int wait){assert(!inflight);assert(f->buffer_len<=8);snapshot_id=f->header.id;snapshot_len=f->buffer_len;memcpy(snapshot,f->buffer,f->buffer_len);memset(last_data,0,8);memcpy(last_data,f->buffer,f->buffer_len);tx_num++;last_tx_ms=now_ms;if(scenario==19)return ESP_ERR_INVALID_STATE;inflight=f;return 0;}
 void ble_bridge_init(QueueHandle_t q,QueueHandle_t queries){
+ if(scenario==22){bridge_packet_t rate={.bytes={1,0x12}};wire_put_u32(rate.bytes+4,1000000);wire_put_u32(rate.bytes+16,0x622);xQueueSend(q,&rate,0);stop_flag=true;return;}
+ if(scenario==23){bridge_packet_t query={.bytes={1,0x14}};wire_put_u32(query.bytes+4,0x123);wire_put_u32(query.bytes+8,20);wire_put_u32(query.bytes+16,0x623);xQueueSend(queries,&query,0);stop_flag=true;return;}
  if(scenario==0||scenario==13||scenario==14||scenario==17||scenario==20)return;
  if(scenario>=7){bridge_packet_t c={.bytes={1,0x14}};wire_put_u32(c.bytes+4,scenario==19?0x456:0x123);wire_put_u32(c.bytes+8,1000);if(scenario==16)wire_put_u32(c.bytes+16,0x111);if(scenario==19)wire_put_u32(c.bytes+16,0x411);if(scenario==18){wire_put_u32(c.bytes+16,0x311);stop_flag=true;}xQueueSend(queries,&c,0);return;}
  bridge_packet_t p={.bytes={1,0x20,0x40,8}};wire_put_u32(p.bytes+4,0x200);p.bytes[9]=100;wire_put_u32(p.bytes+16,42);
@@ -143,7 +145,7 @@ void ble_bridge_publish(const bridge_packet_t*p){
 }
 uint32_t ble_bridge_dropped(void){return 0;}
 bool ble_bridge_connected(void){return link_up;}
-bool ble_bridge_take_stop(void){bool v=stop_flag;stop_flag=false;return v;}
+unsigned ble_bridge_take_stop(void){bool v=stop_flag;stop_flag=false;return v?(scenario>=22?BLE_STOP_SESSION:BLE_STOP_EXPLICIT):0;}
 void ble_bridge_set_motor_busy(bool value){busy=value;}
 #include "../firmware/main/feedback_poll.c"
 #include "../firmware/main/can_rates.c"
@@ -278,6 +280,20 @@ int main(void){
  assert(query_ack_count==1&&wire_u32(query_acks[0].bytes+16)==0x511&&query_acks[0].bytes[2]==1);
  for(unsigned i=0;i<allocated_count;i++)free(allocated[i]);allocated_count=0;
  puts("PASS: UART selection stops active CAN queries, rejects queued enables, drains CAN ISR without forwarding and never resumes queries automatically.");
+ scenario=22;simulated_uart=false;link_up=true;timer_active=false;busy=false;stop_flag=false;inflight=NULL;receive_ready=false;
+ now_ms=tx_num=rate_changes=driver_state=0;completed_tx_bits=emitted_load_count=raw_tx_events=query_ack_count=0;
+ tx_count=tx_failed=tx_arbitration=raw_tx_success_events=raw_tx_failure_events=raw_tx_arbitration_events=raw_query_events=tx_uart_logs=0;
+ if(setjmp(done)==0)app_main();
+ assert(rate_changes==1&&tx_num==0);
+ for(unsigned i=0;i<allocated_count;i++)free(allocated[i]);allocated_count=0;
+ puts("PASS: delayed session-stop cleanup preserves the first newly admitted bitrate command; explicit stop still cancels queues.");
+ scenario=23;link_up=true;timer_active=false;busy=false;stop_flag=false;inflight=NULL;receive_ready=false;
+ now_ms=tx_num=rate_changes=driver_state=0;completed_tx_bits=emitted_load_count=raw_tx_events=query_ack_count=0;
+ tx_count=tx_failed=tx_arbitration=raw_tx_success_events=raw_tx_failure_events=raw_tx_arbitration_events=raw_query_events=tx_uart_logs=0;
+ if(setjmp(done)==0)app_main();
+ assert(tx_num>=40&&tx_num<=47&&query_ack_count==1&&query_acks[0].bytes[2]==0&&wire_u32(query_acks[0].bytes+16)==0x623);
+ for(unsigned i=0;i<allocated_count;i++)free(allocated[i]);allocated_count=0;
+ puts("PASS: first status-query lease after session reset survives delayed owner cleanup.");
  assert(rate_events>0);
  puts("PASS: actual firmware owner loop: boot silence, bounded pulse, disconnect stop, explicit stop, TX failure abort, bitrate timing, queued pulse cancellation, TX buffer lifetime, 1000 Hz polling payload/pacing, polling disconnect and TX failure; device-timed rate publication.");
  puts("PASS: CAN load owner integration: all successful TX origins, no duplicate/failed TX, queue-full RX, periodic wire events, rate-change window and real query TX telemetry without UART flood.");

@@ -241,12 +241,18 @@ void app_main(void)
         }
         if(!ble_bridge_connected())poll_clear(&polls,1);
         poll_expire(&polls,esp_timer_get_time());
-        if (ble_bridge_take_stop()) {
+        unsigned stop_reason=ble_bridge_take_stop();
+        if (stop_reason) {
             poll_clear(&polls,1);
-            xQueueReset(command_queue);
-            bridge_packet_t cancelled;
-            for(unsigned i=0;i<16&&xQueueReceive(query_command_queue,&cancelled,0)==pdTRUE;i++)
-                poll_cancel_command(&cancelled);
+            // Session reset already clears old queues synchronously before
+            // HELLO/reconnect succeeds. A delayed owner must preserve commands
+            // admitted by that new session. Explicit stop still cancels work.
+            if (stop_reason & BLE_STOP_EXPLICIT) {
+                xQueueReset(command_queue);
+                bridge_packet_t cancelled;
+                for(unsigned i=0;i<16&&xQueueReceive(query_command_queue,&cancelled,0)==pdTRUE;i++)
+                    poll_cancel_command(&cancelled);
+            }
             demo = false;
             if (pulse) ending = 3;
             else ble_bridge_set_motor_busy(false);

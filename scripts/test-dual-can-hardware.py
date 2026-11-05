@@ -23,6 +23,29 @@ from usb_management import LocalUsb
 from can_scope.usb_transport import prepare_usb
 
 
+async def configure_rate(device,rate):
+    """Submit one rate change and require its correlated completion."""
+    from can_scope.usb_transport import UsbTransport
+    from can_scope.protocol import packet,u32
+    received=[]
+    link=UsbTransport(received.append,lambda _:None)
+    token=secrets.randbelow(0xffffffff)+1
+    try:
+        await link.connect(device)
+        await link.write(packet(0x12,x=rate,token=token))
+        deadline=time.monotonic()+5
+        while time.monotonic()<deadline:
+            response=next((p for p in received if p[1]==5 and u32(p,16)==token),None)
+            if response is not None:
+                if response[2] or u32(response,4)!=rate:
+                    raise RuntimeError('Analyzer rejected CAN bitrate')
+                return
+            await asyncio.sleep(.01)
+        raise TimeoutError('Analyzer bitrate completion missing; outcome unknown')
+    finally:
+        await link.close()
+
+
 class Fixture:
     def __init__(self, elf):
         output=subprocess.check_output(['arm-none-eabi-nm','-n',str(elf)],text=True)
@@ -69,6 +92,26 @@ class Fixture:
     def quiet(self,value):
         for symbol in ['can1_periodic','can2_periodic']:
             self.write(self.symbols[symbol],[value])
+
+    def set_rate(self,bus,rate):
+        """Bench-only stop/start handshake; caller coordinates analyzer timing."""
+        if bus not in (0,1)or rate not in (0,125000,250000,500000,1000000):
+            raise ValueError('Unsupported fixture rate/bus')
+        if 'can_bitrate_bench'not in self.symbols:
+            raise ValueError('Fixture does not support bitrate control')
+        base=self.symbols['can_bitrate_bench']+bus*24
+        request=secrets.randbelow(0xffffffff)+1
+        if request==self.read(base+8)[0]:request=(request%0xffffffff)+1
+        self.write(base,[rate,request])
+        deadline=time.monotonic()+2
+        while time.monotonic()<deadline:
+            state=self.read(base,6)
+            if state[2]==request:
+                if state[3] or state[4]!=rate or bool(state[5])!=(rate==0):
+                    raise RuntimeError('Fixture rejected bitrate transition')
+                return
+            time.sleep(.005)
+        raise TimeoutError('Fixture bitrate handshake missing')
 
     def health(self):
         names=['fatal_error','can_bus_off','can_errors','can_rx_lost',
@@ -169,9 +212,13 @@ def main():
     ap.add_argument('--repeat',type=int,default=1,help='Repeat the 50-case physical matrix (1..100)')
     ap.add_argument('--simultaneous',action='store_true',help='Start both controllers before awaiting physical delivery')
     ap.add_argument('--connect-stored',action='store_true',help='Quiet fixture first, then enter A/B mode with the saved binding')
+    ap.add_argument('--rates',nargs=2,type=int,choices=[125000,250000,500000,1000000],metavar=('A','B'),
+                    help='Rate-enabled fixture: independent CAN bitrates; requires --connect-stored; restores 1 Mbps')
     args=ap.parse_args()
     if not 1<=args.repeat<=100:
         ap.error('--repeat must be 1..100')
+    if args.rates and not args.connect_stored:
+        ap.error('--rates requires --connect-stored')
     report=dict(ok=False,scope='physical independent STM32 CAN1/CAN2 and two ESP32 analyzers',
                 cases=[],latency_scope='SWD observer upper bound; not pure wireless latency')
     fixture=None
@@ -195,6 +242,15 @@ def main():
         if identities[0]==identities[1]:
             raise ValueError('Two independent USB identities are required')
         report['identities']=[m.hex(':') for m in identities]
+        if args.rates:
+            if 'can_bitrate_bench'not in fixture.symbols:
+                raise ValueError('Fixture does not support coordinated bitrate changes')
+            report['can_bitrates']=args.rates
+            for bus,(device,rate)in enumerate(zip([args.a,args.b],args.rates)):
+                asyncio.run(prepare_usb(device,data=0))
+                fixture.set_rate(bus,0)
+                asyncio.run(configure_rate(device,rate))
+                fixture.set_rate(bus,rate)
         if args.connect_stored:
             spec=importlib.util.spec_from_file_location('pair_setup',Path(__file__).with_name('dual-can-pair.py'))
             pairing=importlib.util.module_from_spec(spec)
@@ -300,7 +356,19 @@ def main():
             except Exception:
                 restored.append(False)
         report['restored_usb_can']=restored
-        if fixture and all(restored):
+        if fixture and args.rates and all(restored):
+            rate_restored=[]
+            for bus,device in enumerate([args.a,args.b]):
+                try:
+                    fixture.set_rate(bus,0)
+                    asyncio.run(configure_rate(device,1000000))
+                    fixture.set_rate(bus,1000000)
+                    rate_restored.append(True)
+                except Exception:
+                    rate_restored.append(False)
+            report['restored_1mbps']=rate_restored
+            if not all(rate_restored):report['ok']=False
+        if fixture and all(restored) and all(report.get('restored_1mbps',[True])):
             fixture.quiet(1)
             report['periodic_restored']=True
         args.output.parent.mkdir(parents=True,exist_ok=True)

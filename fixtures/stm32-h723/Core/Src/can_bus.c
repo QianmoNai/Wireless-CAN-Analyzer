@@ -13,7 +13,7 @@ static const uint32_t dlc[9] = {
   FDCAN_DLC_BYTES_6, FDCAN_DLC_BYTES_7, FDCAN_DLC_BYTES_8
 };
 
-static HAL_StatusTypeDef controller_init(FDCAN_HandleTypeDef *h, FDCAN_GlobalTypeDef *instance, uint32_t offset);
+static HAL_StatusTypeDef controller_init(FDCAN_HandleTypeDef *h, FDCAN_GlobalTypeDef *instance, uint32_t offset, uint32_t rate);
 
 HAL_StatusTypeDef CAN_Bus_Init(void)
 {
@@ -31,7 +31,7 @@ HAL_StatusTypeDef CAN_Bus_Init(void)
   gpio.Alternate = GPIO_AF9_FDCAN1;
   HAL_GPIO_Init(GPIOD, &gpio);
 
-  if (controller_init(&hfdcan1, FDCAN1, 0) != HAL_OK) return HAL_ERROR;
+  if (controller_init(&hfdcan1, FDCAN1, 0, 1000000) != HAL_OK) return HAL_ERROR;
 #if CAN_DUAL_BENCH
   __HAL_RCC_GPIOB_CLK_ENABLE();
   gpio.Pin = GPIO_PIN_12 | GPIO_PIN_13;
@@ -39,13 +39,13 @@ HAL_StatusTypeDef CAN_Bus_Init(void)
   HAL_GPIO_Init(GPIOB, &gpio);
   /* Each controller uses <= 615 words. Keep independent nonoverlapping banks. */
   if (hfdcan1.msgRam.EndAddress > SRAMCAN_BASE + 1024U * 4U) return HAL_ERROR;
-  return controller_init(&hfdcan2, FDCAN2, 1024);
+  return controller_init(&hfdcan2, FDCAN2, 1024, 1000000);
 #else
   return HAL_OK;
 #endif
 }
 
-static HAL_StatusTypeDef controller_init(FDCAN_HandleTypeDef *h, FDCAN_GlobalTypeDef *instance, uint32_t offset)
+static HAL_StatusTypeDef controller_init(FDCAN_HandleTypeDef *h, FDCAN_GlobalTypeDef *instance, uint32_t offset, uint32_t rate)
 {
   FDCAN_FilterTypeDef filter = {0};
   h->Instance = instance;
@@ -55,7 +55,7 @@ static HAL_StatusTypeDef controller_init(FDCAN_HandleTypeDef *h, FDCAN_GlobalTyp
   h->Init.TransmitPause = DISABLE;
   h->Init.ProtocolException = DISABLE;
   /* 25 MHz / (1 * (1 + 19 + 5)) = 1 Mbit/s, sample point 80%. */
-  h->Init.NominalPrescaler = 1;
+  h->Init.NominalPrescaler = 1000000U / rate;
   h->Init.NominalSyncJumpWidth = 4;
   h->Init.NominalTimeSeg1 = 19;
   h->Init.NominalTimeSeg2 = 5;
@@ -155,6 +155,19 @@ static HAL_StatusTypeDef controller_receive(FDCAN_HandleTypeDef *h, CAN_Frame *f
 HAL_StatusTypeDef CAN_Bus_Send(const CAN_Frame *frame) { return controller_send(&hfdcan1, frame); }
 HAL_StatusTypeDef CAN_Bus_Receive(CAN_Frame *frame) { return controller_receive(&hfdcan1, frame); }
 #if CAN_DUAL_BENCH
+HAL_StatusTypeDef CAN_BusBench_SetRate(unsigned bus, uint32_t rate)
+{
+  if (bus>1 || (rate && rate!=125000 && rate!=250000 && rate!=500000 && rate!=1000000))
+    return HAL_ERROR;
+  FDCAN_HandleTypeDef *h=bus?&hfdcan2:&hfdcan1;
+  if (h->State==HAL_FDCAN_STATE_BUSY) {
+    if (HAL_FDCAN_GetTxFifoFreeLevel(h)!=8) return HAL_BUSY;
+    if (HAL_FDCAN_Stop(h)!=HAL_OK) return HAL_ERROR;
+  }
+  if (h->State!=HAL_FDCAN_STATE_READY) return HAL_ERROR;
+  if (!rate) return HAL_OK;
+  return controller_init(h,bus?FDCAN2:FDCAN1,bus?1024:0,rate);
+}
 HAL_StatusTypeDef CAN_Bus2_Send(const CAN_Frame *frame) { return controller_send(&hfdcan2, frame); }
 HAL_StatusTypeDef CAN_Bus2_Receive(CAN_Frame *frame) { return controller_receive(&hfdcan2, frame); }
 #endif
