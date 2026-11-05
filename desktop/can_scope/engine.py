@@ -133,6 +133,9 @@ class Channel:
         except asyncio.QueueFull:
             if name == 'uartSend':
                 self.uart_progress = dict(id=args[0] if args else 0, confirmed=0, total=0, done=True, message='命令队列已满，未发送')
+            elif name == 'setPolling' and len(args)==4:
+                self.emit('queryState',dict(key=args[0],enabled=args[0] in self.polls,
+                                           message='命令队列已满，查询配置未提交，保持已确认状态'))
             self.emit('error', dict(message='命令队列已满，请等待当前操作完成'))
 
     async def owner(self):
@@ -319,18 +322,18 @@ class Channel:
                 self.emit('manualResult', dict(token=token, status='提交失败；结果未知'))
                 raise
         elif name == 'setPolling':
-            if self.uart:raise ValueError('UART 模式不支持 CAN 查询')
             key, identifier, enabled, hz = args
-            if not self.capabilities & 8:
-                raise ValueError('当前固件不支持定时查询')
-            if type(identifier) is not int or not 1 <= identifier <= 0x7fe or type(hz) is not int or not 1 <= hz <= 1000:
-                raise ValueError('查询 ID 或频率无效')
-            if enabled and (key not in [m['key'] for m in self.roster] or json.loads(key)['id'] != identifier):
-                raise ValueError('查询对象不在当前电机列表')
-            if enabled and any(k != key and p[0] == identifier for k, p in self.polls.items()):
-                raise ValueError('此电机 ID 已开启查询')
-            self.polls.pop(key, None)
             try:
+                if self.uart:raise ValueError('UART 模式不支持 CAN 查询')
+                if not self.capabilities & 8:
+                    raise ValueError('当前固件不支持定时查询')
+                if type(identifier) is not int or not 1 <= identifier <= 0x7fe or type(hz) is not int or not 1 <= hz <= 1000:
+                    raise ValueError('查询 ID 或频率无效')
+                if enabled and (key not in [m['key'] for m in self.roster] or json.loads(key)['id'] != identifier):
+                    raise ValueError('查询对象不在当前电机列表')
+                if enabled and any(k != key and p[0] == identifier for k, p in self.polls.items()):
+                    raise ValueError('此电机 ID 已开启查询')
+                self.polls.pop(key, None)
                 result = await self.acknowledge(packet(0x14, x=identifier, y=hz if enabled else 0, token=self.next_token()), 8, self.token)
                 if result[2] != (0 if enabled else 1):
                     raise ValueError('设备未接受查询配置，状态码 '+str(result[2]))
@@ -338,7 +341,8 @@ class Channel:
                     self.polls[key] = (identifier, hz, time.monotonic())
                 self.emit('queryState', dict(key=key, enabled=enabled, message=f'{hz} Hz · 已确认' if enabled else '查询已关闭'))
             except Exception:
-                self.emit('queryState', dict(key=key, enabled=False, message='未确认，停止续租；设备最多 3 秒后到期'))
+                retained = key in self.polls
+                self.emit('queryState', dict(key=key, enabled=retained, message='配置未应用，保持原查询' if retained else '未确认，停止续租；设备最多 3 秒后到期'))
                 raise
         elif name == 'renew':
             if not self.ready:

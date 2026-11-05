@@ -50,3 +50,8 @@ Android与四档速率入口可加`--monitor-diagnostics`（要求固件1.24.7�
 ### 绘图与窗口恢复
 
 `tests/test_motor_curve.cjs`随主机检查运行，校验电机合并扫描的主/副值边界及完整曲线路径语义。`desktop/tests/test_chart_window.py`模拟合成器延后确认退出全屏、快速跨通道新开全屏、普通窗口基准、隐藏通道请求及关闭/删除，验证不会覆盖原始最大化状态或执行过期恢复。实际Qt用`desktop/tests/fullscreen_tabs.py --switches 50 --settle-ms 250 --output <报告>`复验；该入口使用合成连接状态、不打开硬件。Desktop1.2.19源码在Niri/XWayland的50次切换通过，包含窗口修复的最终包单次实际XCB及离屏smoke均通过；物理CAN功能以独立硬件报告为准。
+
+
+### 定时查询开关的确认状态
+
+`scripts/test-can-query-toggle-hardware.py --fixture stm32h723-dual --elf <ELF> --surface android|desktop --mode usb|ble|wifi --port <by-id> --channel 1|2 --bus 1|2 --repeat 20 --output <报告>`，桌面另加`--binary`，Android不支持USB Host。需要固件1.24.7诊断及STM32模拟达妙反馈，沿用已保存的身份、Android独立台架包/CDP；身份不符不会执行模式或清理写入。实际点击开关后分别核对等待锁定、最终原生确认、最终DOM及实际反馈；退出恢复配置、USB/周期数据，新增丢弃失败，不把未知结果当作成功或自动重发。

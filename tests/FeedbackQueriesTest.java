@@ -89,5 +89,15 @@ public final class FeedbackQueriesTest {
         byte[] p=r.packet.clone();p[4]=0;check(!MonitorCommands.allowed(p));p=r.packet.clone();p[8]=(byte)0xe9;p[9]=3;check(!MonitorCommands.allowed(p));
         p=r.packet.clone();p[2]=2;check(!MonitorCommands.allowed(p));p=r.packet.clone();p[12]=1;check(!MonitorCommands.allowed(p));
     }
-    public static void main(String[] args){busyThenRecovery();boundedBusyAndStopFailure();writeAndAckStagesAndLostStopAck();earlyAckAndDelayedUi();disabledEditedAndLateAck();terminalArrivalOrderAndSessions();lateGlobalStopSummaries();fourChannelsAndLimits();System.out.println("PASS: bounded GATT retries, distinct write/ACK deadlines, early ACK/UI stall, finite stop recovery, entry/session isolation, edits/disable, 4 channels and 32-motor validation.");}
+    static void disablePendingState(){
+        FeedbackQueries q=new FeedbackQueries();check(!q.disable("absent"));
+        check(q.enable("one",1,100,0));FeedbackQueries.Request enable=submit(q,0);ack(q,enable,10,20);
+        check(q.disable("one"));check(q.disable("one"));
+        FeedbackQueries.Request stop=submit(q,30);check(q.disable("one"));
+        q.written(stop,40);check(!q.complete(stop.token,1,50).enabled);check(!q.disable("one"));
+        check(q.poll(100,true)==null); // A repeated stop never invents a new request.
+        check(q.enable("one",1,100,100));enable=submit(q,100);ack(q,enable,110,120);
+        q.stopAll(130);check(!q.disable("one")&&!q.canEnable(130));
+    }
+    public static void main(String[] args){busyThenRecovery();boundedBusyAndStopFailure();writeAndAckStagesAndLostStopAck();earlyAckAndDelayedUi();disabledEditedAndLateAck();terminalArrivalOrderAndSessions();lateGlobalStopSummaries();fourChannelsAndLimits();disablePendingState();System.out.println("PASS: bounded GATT retries, distinct write/ACK deadlines, early ACK/UI stall, finite stop recovery, entry/session isolation, edits/disable, 4 channels and 32-motor validation, queued versus absent stop.");}
 }

@@ -639,8 +639,11 @@ public class MainActivity extends Activity {
     }}
     private String packetHex(byte[] data){char[] out=new char[data.length*2];final String digits="0123456789abcdef";for(int i=0;i<data.length;i++){out[i*2]=digits.charAt((data[i]&255)>>>4);out[i*2+1]=digits.charAt(data[i]&15);}return new String(out);}
     private void queryStatus(String key,boolean enabled,String message){
+        queryStatus(key,enabled,message,false);
+    }
+    private void queryStatus(String key,boolean enabled,String message,boolean pending){
         int session=generation;long version=++queryUiSequence;queryUiVersions.put(key,version);
-        JSONObject data=obj("key",key,"enabled",enabled,"message",message);
+        JSONObject data=obj("key",key,"enabled",enabled,"message",message,"pending",pending);
         main.post(()->{
             boolean current;synchronized(transportLock){current=session==generation&&Objects.equals(queryUiVersions.get(key),version);}
             if(current&&!closed&&pageReady)web.evaluateJavascript("window.onNative(\"queryState\","+data.toString()+")",null);
@@ -808,14 +811,14 @@ public class MainActivity extends Activity {
         @JavascriptInterface public void disconnect() { main.post(() -> { disconnectDevice(); state("idle", "已断开连接"); }); }
         @JavascriptInterface public void setPolling(String key,int motorId,boolean enabled,int hz){int session=generation;control.post(()->{synchronized(transportLock){
             if(closed||session!=generation)return;
-            if(!enabled){queries.disable(key);queryStatus(key,false,"正在关闭查询，等待设备确认…");return;}
             long now=SystemClock.elapsedRealtime();
+            if(!enabled){boolean pending=queries.disable(key);queryStatus(key,false,pending?"正在关闭查询，等待设备确认…":queries.canEnable(now)?"查询未开启":"等待已有停止确认或租约到期后再开启",pending);return;}
             if(!ready||!pageReady){queryStatus(key,false,"请先连接 ESP32");return;}
             if(configBusy||now<settingsHoldUntil){queryStatus(key,false,"请等待设备设置完成");return;}
             if(!devicePolling){queryStatus(key,false,"请先更新 ESP32 固件，才能使用可调频率查询");return;}
             if(!queries.canEnable(now)){queryStatus(key,false,"正在停止查询，请等待停止确认或查询租约到期后重开");return;}
             if(!queries.enable(key,motorId,hz,now)){queryStatus(key,false,"无法开启：电机 ID 重复、无效或超过数量限制");return;}
-            queryStatus(key,false,"正在应用 "+hz+" Hz…");
+            queryStatus(key,false,"正在应用 "+hz+" Hz…",true);
         }});}
         @JavascriptInterface public void send(String hex) { int session=generation;control.post(() -> {synchronized(transportLock){
             if(closed||session!=generation)return;

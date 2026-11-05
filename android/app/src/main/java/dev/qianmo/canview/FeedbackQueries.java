@@ -28,10 +28,14 @@ final class FeedbackQueries {
         if(!entries.containsKey(key)&&entries.size()>=32)return false;
         entries.put(key,new Entry(key,id,hz));return true;
     }
-    synchronized void disable(String key){
-        Entry e=entries.remove(key);if(e==null)return;
+    synchronized boolean disable(String key){
+        Entry e=entries.remove(key);if(e==null){
+            if(pending!=null&&pending.entry.hz==0&&pending.key.equals(key))return true;
+            for(Entry stop:stops)if(stop.key.equals(key))return true;
+            return false;
+        }
         if(pending!=null&&pending.entry==e&&pending.stage<=Request.OFFERED)pending=null;
-        stops.add(new Entry(key,e.id,0));
+        stops.add(new Entry(key,e.id,0));return true;
     }
     synchronized Set<String> keys(){return new LinkedHashSet<>(entries.keySet());}
     synchronized void reset(){epoch++;entries.clear();stops.clear();pending=null;next=holdUntil=lastDelivery=0;recoveryKeys.clear();recovered.clear();}

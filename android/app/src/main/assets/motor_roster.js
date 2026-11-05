@@ -34,12 +34,12 @@ function commitWatch(raw,existing=null){
  if(conflict)throw Error('与「'+(conflict.config.name||Motors.profiles[conflict.config.profile].name)+'」的反馈地址重复或无法区分；请检查返回帧 ID 和电机 ID');
  if(watchedMotors.some(m=>m!==existing&&Motors.profiles[m.config.profile].family===Motors.profiles[c.profile].family&&m.config.id===c.id&&(Motors.profiles[c.profile].feedbackBase===Motors.profiles[m.config.profile].feedbackBase)))throw Error('此型号的电机 ID 已在列表中，请编辑已有电机');
  if(existing)stopMotorPolling(existing,"配置已更新，查询已停止");
- const m=existing||{};Object.assign(m,{config:c,feedback:null,time:0,homeTemperature:null,temperatureAt:0,mode:null,polling:false,queryMessage:''});
+ const m=existing||{};Object.assign(m,{config:c,feedback:null,time:0,homeTemperature:null,temperatureAt:0,mode:null,polling:false,queryPending:false,queryTarget:false,queryMessage:''});
  if(!existing)watchedMotors.push(m);
  saveWatchedMotors();renderWatchedMotors();return m;
 }
 function openWatchEditor(m=null){
- if(m&&m.polling)stopMotorPolling(m,"正在编辑配置，查询已停止");
+ if(m&&(m.polling||m.queryPending))stopMotorPolling(m,"正在编辑配置，查询已停止");
  if(watchBusy()){watchMessage('请等待设备设置保存完成后编辑');return}
  editingWatch=m;$('watchEditorTitle').textContent=m?'编辑监控设备':'添加监控设备';$('watchSave').textContent=m?'保存修改':'添加到列表';
  $('watchEditorError').textContent='';$('watchName').value=m?m.config.name:'';
@@ -119,7 +119,7 @@ function watchedPacket(a,age=0){
   m.feedback=f;m.time=Date.now()-Math.max(0,age);watchedDirty=true;
  }catch(e){/* An invalid packet must not interrupt other motors or raw CAN monitoring. */}}
 }
-function resetWatchedFeedback(){homeQuiet=false;summaryAt=0;for(const m of watchedMotors){m.feedback=null;m.time=0;m.homeTemperature=null;m.temperatureAt=0;m.mode=null;m.polling=false;m.queryMessage="查询已关闭"}refreshWatchedMotors()}
+function resetWatchedFeedback(){homeQuiet=false;summaryAt=0;for(const m of watchedMotors){m.feedback=null;m.time=0;m.homeTemperature=null;m.temperatureAt=0;m.mode=null;m.polling=false;m.queryPending=false;m.queryTarget=false;m.queryMessage="查询已关闭"}refreshWatchedMotors()}
 populateWatchProfiles('c620');
 (function(){try{const saved=ConfigIO.readField('watchedMotors');if(Array.isArray(saved))for(const raw of saved.slice(0,32)){try{const c=validateWatch(raw);if(!watchedMotors.some(m=>watchConflict(c,m.config)))watchedMotors.push({config:c,feedback:null,time:0,mode:null})}catch(e){}}}catch(e){}renderWatchedMotors()})();
 // Batch DOM work independently of bus packet rate; stale status updates even without packets.
@@ -160,15 +160,17 @@ setInterval(()=>{if(!dashboardTimer&&Date.now()-dashboardPublishedAt>=950)publis
 function stopMotorPolling(m,message){
  if(Motors.profiles[m.config.profile].family!=='dm')return;
  if(window.CanAndroid&&typeof CanAndroid.setPolling==='function')CanAndroid.setPolling(JSON.stringify(m.config),m.config.id,false,m.config.pollHz||100);
- m.polling=false;m.queryMessage=message;watchedDirty=true;
+ m.polling=false;m.queryPending=false;m.queryTarget=false;m.queryMessage=message;watchedDirty=true;
 }
 window.setMotorPolling=function(key,enabled){
  const m=watchedMotors.find(m=>JSON.stringify(m.config)===key);if(!m||Motors.profiles[m.config.profile].family!=='dm')return;
+ if(m.queryPending&&(enabled||m.queryTarget===false))return;
  if(enabled&&(!connected||watchBusy()||!window.devicePollingSupported)){m.queryMessage='请连接支持定时查询的新固件，并等待设置完成';m.polling=false;refreshWatchedMotors();publishDashboard();return}
  if(!window.CanAndroid||typeof CanAndroid.setPolling!=='function'){m.queryMessage='请使用新版安卓 App 开启查询';m.polling=false;refreshWatchedMotors();return}
- m.queryMessage=enabled?'正在开启查询…':'正在关闭查询…';CanAndroid.setPolling(key,m.config.id,!!enabled,m.config.pollHz);
+ m.queryPending=true;m.queryTarget=!!enabled;m.queryMessage=enabled?'正在开启查询…':'正在关闭查询…';
+ if(window.refreshDetail)refreshDetail();CanAndroid.setPolling(key,m.config.id,!!enabled,m.config.pollHz);
 };
-window.motorQueryState=function(data){const m=watchedMotors.find(m=>JSON.stringify(m.config)===data.key);if(!m)return;m.polling=connected&&!!data.enabled;m.queryMessage=data.message;refreshWatchedMotors();publishDashboard()};
+window.motorQueryState=function(data){const m=watchedMotors.find(m=>JSON.stringify(m.config)===data.key);if(!m)return;m.queryPending=connected&&!!data.pending;m.polling=connected&&!!data.enabled;if(!m.queryPending)m.queryTarget=m.polling;m.queryMessage=data.message;refreshWatchedMotors();publishDashboard()};
 
 window.setMotorQueryHz=function(key,hz){
  const m=watchedMotors.find(m=>JSON.stringify(m.config)===key);if(!m||Motors.profiles[m.config.profile].family!=='dm')return;

@@ -164,6 +164,35 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         await c.handle('setPolling',[self.key,1,False,100])
         self.assertFalse(self.events[-1][1]['enabled'])
 
+    async def test_query_validation_and_timeout_resolve_ui_state(self):
+        c=self.channel
+        for changes,args in [({'uart':True},[self.key,1,True,100]),
+                             ({'capabilities':0},[self.key,1,True,100]),
+                             ({},[self.key,0,True,100]),({},[self.key,2,True,100])]:
+            with patch.multiple(c,**changes) if changes else patch.object(c,'ready',True):
+                with self.assertRaises(ValueError):await c.handle('setPolling',args)
+            kind,state=self.events[-1]
+            self.assertEqual((kind,state['key'],state['enabled']),('queryState',self.key,False))
+        await c.handle('setPolling',[self.key,1,True,100])
+        with self.assertRaises(ValueError):await c.handle('setPolling',[self.key,1,True,0])
+        self.assertIn(self.key,c.polls)
+        self.assertTrue(self.events[-1][1]['enabled'])
+        with patch.object(c,'acknowledge',side_effect=TimeoutError):
+            with self.assertRaises(TimeoutError):await c.handle('setPolling',[self.key,1,False,100])
+        self.assertFalse(c.polls)
+        self.assertFalse(self.events[-1][1]['enabled'])
+
+    async def test_full_command_queue_resolves_query_ui_without_writing(self):
+        c=self.channel
+        for _ in range(c.commands.maxsize):c.enqueue('renew',[])
+        c.enqueue('setPolling',[self.key,1,True,100])
+        self.assertEqual(self.events[-2][0],'queryState')
+        self.assertFalse(self.events[-2][1]['enabled'])
+        c.polls[self.key]=(1,100,0)
+        c.enqueue('setPolling',[self.key,1,False,100])
+        self.assertTrue(self.events[-2][1]['enabled'])
+        self.assertFalse(c.transport.writes)
+
     async def test_detail_revision_filters_stale_samples(self):
         c = self.channel
         await c.handle('showDetail',[self.key])

@@ -14,7 +14,7 @@ npm exec --prefix tests -- playwright install --with-deps --only-shell chromium
 PATH="$PWD/.venv/bin:$PATH" bash scripts/test-host.sh
 ```
 
-入口包含 `test_uart_ui.cjs`、`test_uart_render.cjs` 与 `test_motor_curve.cjs`。电机曲线检查覆盖合并扫描的有限值边界、双温度共享坐标、极值引用顺序、NaN/真实时间间隔、60000采样及暂停几何，不访问物理CAN。独立的 `checks.yml` workflow 对 firmware、scripts、tests、desktop 及共享 App 资源变更运行主机与桌面单测，不创建 Release，也不访问实机串口。
+入口包含 `test_uart_ui.cjs`、`test_uart_render.cjs` 、`test_motor_curve.cjs` 与 `test_motor_query.cjs`。电机曲线检查覆盖合并扫描的有限值边界、双温度共享坐标、极值引用顺序、NaN/真实时间间隔、60000采样及暂停几何，不访问物理CAN。独立的 `checks.yml` workflow 对 firmware、scripts、tests、desktop 及共享 App 资源变更运行主机与桌面单测，不创建 Release，也不访问实机串口。
 
 覆盖 CAN 所有者循环、轮询查询、错误计数、速率和估算负载、BLE 数据筛选、ACK 调度、电机/IMU 订阅、蓝牙名称存储、本机按键与屏幕逻辑、App 查询和重连配置，以及有界接收、连接优先级、环形历史、WebView 资源路由和构建脚本保护。
 
@@ -161,3 +161,5 @@ Wi-Fi 另加 `--discover-wifi` 会先搜索并要求缓存列表项以外的新 
 `--observe-rendering` 可选记录每阶段 WebView 的 `onNative`、曲线绘制、详情报文绘制及长任务耗时，以及可见页面的 rAF 间隔。观察器不改变绘图或接收频率，用有界直方图保留计数、平均、最大值和 p95 上界（步长 1/16 ms，1000 ms 以上溢出时 p95 为 null）。阶段切换清空统计，退出恢复原函数并停止观察；测量自身也有少量开销。`--detail-window 60 --seconds 45` 可在真实详情逐渐累积历史后测量长时间窗，默认窗口 1 秒。rAF 间隔不是实体屏幕帧率，回调耗时不包含合成器或屏幕显示，不能用离线结果替代真实手机观察。
 
 Android 实机报告还保留最多 128 个原生连接状态及相对 JS 观察起点的时间，用于区分发现失败与连接后中断；该时间不是物理 CAN 延迟。
+
+`test_motor_query.cjs`：实际共享界面的查询等待状态，覆盖延迟开启/关闭确认、重复提交拦截、显式取消、拒绝/超时、两台电机隔离、配置编辑和断线清理，随主机检查运行。
