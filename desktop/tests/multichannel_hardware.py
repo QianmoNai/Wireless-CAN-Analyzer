@@ -37,6 +37,8 @@ def main(a):
     bench = module('bench', 'scripts/test-can-hardware.py')
     fixture = module('fixture', 'scripts/test-dual-can-hardware.py').Fixture(a.elf)
     report = dict(ok=False, modes=a.modes, scope='installed Qt package, two physical analyzers and independent STM32 CAN controllers', binary_sha256=hashlib.sha256(a.binary.read_bytes()).hexdigest(), fixture_image_sha256=fixture.image_sha256, phases=[], js_errors=[])
+    report.update(detail_fullscreen=a.detail_fullscreen,query_dm=a.query_dm,
+                  detail_profile='dm4310'if a.query_dm else'c620')
     a.output.parent.mkdir(parents=True, exist_ok=True)
     proc = None
     verified = False
@@ -116,6 +118,11 @@ def main(a):
                         target = 'usb:' + a.ports[i] if a.modes[i] == 'usb' else 'wifi:' + saved[i]['ip'] if a.modes[i] == 'wifi' else saved[i]['address']
                         p.evaluate("target=>invoke('connect',target)", target)
                         p.wait_for_function('connected&&gotStatus', timeout=35000, polling=100)
+                    if a.query_dm:
+                        for p in pages:
+                            p.wait_for_function('window.devicePollingSupported',timeout=8000,polling=100)
+                            p.evaluate('setMotorPolling(JSON.stringify(watchedMotors[3].config),true)')
+                            p.wait_for_function('watchedMotors[3].polling&&!watchedMotors[3].queryPending',timeout=8000,polling=100)
                     window = subprocess.check_output(['xdotool', 'search', '--onlyvisible', '--pid', str(proc.pid), '--name', '^CAN Scope Desktop'], env=env, text=True).split()
                     if len(window) != 1:
                         raise RuntimeError('Expected one package window owned by this process')
@@ -146,10 +153,12 @@ def main(a):
                         delta = [v['rawCount'] - b for v, b in zip(states, before)]
                         if not all((s['connected'] and (not s['appDrops']) and (not s['errors']) and (s['firmwareDrops'] == baseline[i]) and all((x['id'] == 0x6c1 + i for x in s['sentinels'])) for i, s in enumerate(states))) or delta[active] < 300 or delta[hidden] != 0:
                             raise AssertionError('Channel switch did not isolate and resume physical telemetry')
+                        if a.query_dm and not all(p.evaluate('watchedMotors[3].polling&&!watchedMotors[3].queryPending')for p in pages):
+                            raise AssertionError('Tab switch stopped a confirmed independent query lease')
                         report['phases'].append(dict(turn=turn, active_channel=active + 1, raw_delta=delta, states=states))
                         if a.detail_fullscreen:
                             page=pages[active]
-                            page.evaluate('dashboardOpen(JSON.stringify(watchedMotors[0].config))')
+                            page.evaluate('index=>dashboardOpen(JSON.stringify(watchedMotors[index].config))',3 if a.query_dm else 0)
                             page.wait_for_function('detailReady&&detailSamples.length-detailSampleHead>=50',timeout=8000,polling=100)
                             page.evaluate('openDetailChart(detailSeries[0].key)')
                             page.wait_for_function('detailChartKey!==null',timeout=5000,polling=100)
@@ -168,6 +177,10 @@ def main(a):
                             report['phases'][-1]['fullscreen_detail']=dict(detail,native_x11_fullscreen=True)
                         a.output.write_text(json.dumps(report, indent=2) + '\n')
                     for p in pages:
+                        if a.query_dm:
+                            p.evaluate('setMotorPolling(JSON.stringify(watchedMotors[3].config),false)')
+                            p.wait_for_function('!watchedMotors[3].polling&&!watchedMotors[3].queryPending',timeout=8000,polling=100)
+                            report.setdefault('query_stop_confirmed',[]).append(True)
                         if a.detail_fullscreen:p.evaluate('closeMotorDetail()')
                         p.evaluate("invoke('disconnect')")
                         p.wait_for_function('!connected', polling=100)
@@ -222,6 +235,7 @@ if __name__ == '__main__':
     p.add_argument('--modes', nargs=2, required=True, choices=['usb', 'ble', 'wifi'])
     p.add_argument('--switches', type=int, default=6)
     p.add_argument('--detail-fullscreen',action='store_true',help='Also receive physical DJI details in native X11 fullscreen and verify tab handoff')
+    p.add_argument('--query-dm',action='store_true',help='Keep independent simulated DM queries active on both channels; fullscreen selects DM feedback')
     p.add_argument('--output', required=True, type=Path)
     a = p.parse_args()
     if not 2 <= a.switches <= 30:
