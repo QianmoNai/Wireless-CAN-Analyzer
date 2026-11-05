@@ -108,19 +108,22 @@ const frameTimeFormatter={format(ms){const second=Math.floor(ms/1000);if(second!
 const frameRows=[];
 function renderFrames(){
  updateFrameViewState();
- if(!paused){displayedFrameHistory=frames.slice();dirty=false;}
+ // FrameHistory creates a new snapshot when its rings advance. Keep the last
+ // displayed snapshot for Pause without copying the full history each paint.
+ if(!paused){displayedFrameHistory=frames;dirty=false;}
  else if(frozenFrameHistory!==null)frozenFrameHistory=boundedFrameHistory(frozenFrameHistory);
- const history=paused?(frozenFrameHistory||[]):frames;
+ const history=paused?(frozenFrameHistory||[]):displayedFrameHistory;
  const query=$('filter').value.trim().replace(/^0x/i,'').toUpperCase(),kind={rx:1,tx:2,fail:3}[frameFilter];
- const list=history.filter(frame=>(!kind||frame.kind===kind)&&(!query||frame.id.toString(16).toUpperCase().includes(query)));
- $('frameCount').textContent=list.length+' 条';
+ let count=history.length,visible;
+ if(!kind&&!query)visible=history.slice(0,80);
+ else{count=0;visible=[];for(const frame of history)if((!kind||frame.kind===kind)&&(!query||frame.id.toString(16).toUpperCase().includes(query))){count++;if(visible.length<80)visible.push(frame)}}
+ $('frameCount').textContent=count+' 条';
  const root=$('frames');
- if(!list.length){
+ if(!count){
   const empty=document.createElement('div');empty.className='empty';
   empty.textContent=query?'没有匹配此 CAN ID 的'+(frameFilter==='fail'?'失败事件。':'报文。'):frameFilter==='fail'?'暂无保留的失败事件。设备累计次数可能与此列表不同。':paused?'暂停快照中暂无'+(frameFilter==='rx'?'RX':frameFilter==='tx'?'成功 TX':'CAN')+'报文。':!connected?'连接 ESP32 后，CAN 帧会显示在这里。':frameFilter==='rx'?'等待接收 RX 报文…':frameFilter==='tx'?'等待成功发送的 TX 报文…':'等待 CAN 数据；请检查对端是否正在发送。';
   root.replaceChildren(empty);return;
  }
- const visible=list.slice(0,80);
  if(root.firstElementChild&&!root.firstElementChild.classList.contains('frame'))root.replaceChildren();
  while(root.children.length>visible.length)root.lastChild.remove();
  visible.forEach((frame,i)=>{const row=frameRows[i]||(frameRows[i]=createFrameRow());updateFrameRow(row,frame,frameFilter==='fail');if(root.children[i]!==row)root.append(row)});

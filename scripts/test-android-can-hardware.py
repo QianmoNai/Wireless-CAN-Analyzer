@@ -18,6 +18,7 @@ p.add_argument('--seconds', type=int, default=15)
 p.add_argument('--mode', choices=['ble', 'wifi'], default='ble')
 p.add_argument('--restore-wifi-trust', action='store_true', help='BLE only: use the actual settings read button to recover local TLS trust after config import')
 p.add_argument('--verify-import-guard', action='store_true', help='Require native config import to refuse an active connection without disconnecting it')
+p.add_argument('--history-limit',type=int,choices=[300,10000],default=300,help='Independent RX/TX retention in the bench app')
 a = p.parse_args()
 if not 5 <= a.seconds <= 300:
     p.error('--seconds must be 5..300')
@@ -89,6 +90,8 @@ with hardware_bench_lock():
                     if any('documentsui'in line.lower()for line in focus.splitlines()if 'mCurrentFocus'in line):
                         raise AssertionError('Import guard opened the system file picker')
                     report['connected_import_blocked']=True
+                page.evaluate("limit=>{$('rxLimit').value=limit;$('txLimit').value=limit;applyHistoryLimits()}",a.history_limit)
+                report['history_limit']=a.history_limit
                 report['initial_device_drops'] = page.evaluate('firmwareDrops')
                 for name, action in [('raw', None), ('dji-detail', 'dashboardOpen(JSON.stringify(watchedMotors[0].config))'), ('imu-detail', 'dashboardOpen(JSON.stringify(watchedMotors[7].config))'), ('dm-detail', 'dashboardOpen(JSON.stringify(watchedMotors[3].config));setMotorPolling(JSON.stringify(watchedMotors[3].config),true)'), ('pause-filter', "showTab('live');togglePause();$('filter').value='201';renderFrames()"), ('home', "togglePause();$('filter').value='';showTab('motor')")]:
                     if action:
@@ -97,9 +100,11 @@ with hardware_bench_lock():
                         page.wait_for_function('telemetryEvents.at(-1)?.mode===1', timeout=5000)
                         page.wait_for_timeout(1000)
                         report['home_raw_before'] = page.evaluate('rawReceived')
+                    if name=='pause-filter':
+                        frozen_before=page.evaluate("({html:$('frames').innerHTML,raw:rawReceived})")
                     page.evaluate('for(const key in perf)perf[key]=[]')
                     page.wait_for_timeout(a.seconds * 1000)
-                    row = page.evaluate("({connected,appDrops,firmwareDrops,rawReceived,telemetryEvents:[...telemetryEvents],frames:frames.length,errors:[...nativeErrors],roster:dashboardSnapshot(),detail:detailMotor?{ready:detailReady,count:detailSamples.length,values:detailMotor.feedback&&detailMotor.feedback.values,state:$('detailState').textContent,canRate:$('detailCanRate').textContent,appRate:$('detailAppRate').textContent}:null,perf:Object.fromEntries(Object.entries(perf).map(([k,a])=>[k,{count:a.length,max:a.length?Math.max(...a):0,p95:[...a].sort((a,b)=>a-b)[Math.floor(a.length*.95)]||0}]))})")
+                    row = page.evaluate("({connected,appDrops,firmwareDrops,rawReceived,telemetryEvents:[...telemetryEvents],frames:frames.length,history:{rx:frameHistory.rx.length,tx:frameHistory.tx.length},errors:[...nativeErrors],roster:dashboardSnapshot(),detail:detailMotor?{ready:detailReady,count:detailSamples.length,values:detailMotor.feedback&&detailMotor.feedback.values,state:$('detailState').textContent,canRate:$('detailCanRate').textContent,appRate:$('detailAppRate').textContent}:null,perf:Object.fromEntries(Object.entries(perf).map(([k,a])=>[k,{count:a.length,max:a.length?Math.max(...a):0,p95:[...a].sort((a,b)=>a-b)[Math.floor(a.length*.95)]||0}]))})")
                     row['name'] = name
                     row['device_drop_delta'] = row['firmwareDrops'] - report['initial_device_drops'] & 4294967295
                     report['phases'].append(row)
@@ -109,6 +114,12 @@ with hardware_bench_lock():
                     subprocess.run(['adb', '-s', a.phone, 'exec-out', 'screencap', '-p'], stdout=shot.open('wb'), check=True)
                     if not row['connected']:
                         raise ConnectionError('Phone disconnected')
+                    if name=='raw'and a.history_limit==10000 and a.seconds>=20 and row['history']['rx']!=10000:
+                        raise AssertionError('Physical RX history did not reach its configured maximum')
+                    if name=='pause-filter':
+                        if not page.evaluate("paused&&$('filter').value==='201'")or page.evaluate("$('frames').innerHTML")!=frozen_before['html']or row['rawReceived']<=frozen_before['raw']+20:
+                            raise AssertionError('Paused filter changed its display or stopped receiving physical CAN')
+                        row['frozen_display_with_live_can']=True
                 report['home_extra_raw'] = report['phases'][-1]['rawReceived'] - report['home_raw_before']
                 report['ok'] = report['home_extra_raw'] == 0 and (not report['js_errors']) and all((r['connected'] and (not r['appDrops']) and (not r['device_drop_delta']) and (not r['errors']) for r in report['phases'])) and all(((r['detail'] or {}).get('count', 0) >= a.seconds * 60 for r in report['phases'][1:4]))
             except Exception as e:

@@ -61,6 +61,7 @@ def main():
     parser.add_argument('--all-bitrates',action='store_true',help='Rate-enabled fixture only: apply all four rates through the actual GUI')
     parser.add_argument('--monitor-seconds',type=int,default=0,help='Also exercise six physical motor/IMU display phases (5..60 seconds each)')
     parser.add_argument('--detail-window',choices=['0.1','0.5','1','5','10','30','60'],default='1',help='Visible detail history in seconds; sampling remains unchanged')
+    parser.add_argument('--history-limit',type=int,choices=[300,10000],default=300,help='Independent RX/TX retention in the disposable profile')
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     if args.reset_usb_reconnect and args.mode!='usb':
@@ -164,6 +165,8 @@ def main():
                         report['usb_reconnect']=dict(before_port=original,after_port=after['usb_port'],
                                                      same_identity=True,ready=True)
                     if args.monitor_seconds:
+                        page.evaluate("limit=>{ $('rxLimit').value=limit;$('txLimit').value=limit;applyHistoryLimits()}",args.history_limit)
+                        report.update(history_limit=args.history_limit,monitor_seconds=args.monitor_seconds,detail_window=args.detail_window)
                         page.evaluate("()=>{window.monitorRaw=0;window.monitorModeSeen=null;const prior=onNative;onNative=(k,d)=>{prior(k,d);if(k==='telemetryMode')monitorModeSeen=d.mode;if(k==='packets')for(const x of d.items||[]){const p=parsePacket(x.hex||x);if(p&&p[1]===1)monitorRaw++}}}")
                         report['monitor_phases']=[]
                         baseline=page.evaluate('firmwareDrops')
@@ -182,9 +185,11 @@ def main():
                                 page.wait_for_function('monitorModeSeen===1',timeout=5000)
                                 page.wait_for_timeout(1000)
                                 home_before=page.evaluate('monitorRaw')
+                            if name=='pause-filter':
+                                frozen_before=page.evaluate("({html:$('frames').innerHTML,raw:monitorRaw})")
                             page.evaluate('for(const key in perf)perf[key]=[]')
                             page.wait_for_timeout(args.monitor_seconds*1000)
-                            row=page.evaluate("({connected,appDrops,firmwareDrops,raw:monitorRaw,roster:dashboardSnapshot(),detail:detailMotor?{ready:detailReady,count:detailSamples.length,values:detailMotor.feedback&&detailMotor.feedback.values,canRate:$('detailCanRate').textContent,appRate:$('detailAppRate').textContent}:null,draw:perf.draw})")
+                            row=page.evaluate("({connected,appDrops,firmwareDrops,raw:monitorRaw,history:{rx:frameHistory.rx.length,tx:frameHistory.tx.length},roster:dashboardSnapshot(),detail:detailMotor?{ready:detailReady,count:detailSamples.length,values:detailMotor.feedback&&detailMotor.feedback.values,canRate:$('detailCanRate').textContent,appRate:$('detailAppRate').textContent}:null,draw:perf.draw})")
                             row['name']=name
                             report['monitor_phases'].append(row)
                             if not row['connected']or row['appDrops']or row['firmwareDrops']!=baseline:
@@ -195,6 +200,12 @@ def main():
                                     raise AssertionError('Packaged detail samples/parameters missing')
                             if name=='home'and row['raw']!=home_before:
                                 raise AssertionError('Packaged overview did not silence raw CAN')
+                            if name=='raw'and args.history_limit==10000 and args.monitor_seconds>=20 and row['history']['rx']!=10000:
+                                raise AssertionError('Physical RX history did not reach its configured maximum')
+                            if name=='pause-filter':
+                                if not page.evaluate("paused&&$('filter').value==='201'")or page.evaluate("$('frames').innerHTML")!=frozen_before['html']or row['raw']<=frozen_before['raw']+20:
+                                    raise AssertionError('Paused filter changed its display or stopped receiving physical CAN')
+                                row['frozen_display_with_live_can']=True
                             args.output.write_text(json.dumps(report,indent=2)+'\n')
                         page.evaluate('setMotorPolling(JSON.stringify(watchedMotors[3].config),false)')
                         page.wait_for_function('!watchedMotors[3].polling',timeout=5000)
@@ -293,6 +304,8 @@ def main():
                     expected = page.evaluate('exportExpected')
                     if written != [HEADER]+[[str(v) for v in row] for row in rows(expected)]:
                         raise AssertionError('Native CSV export differs from retained CAN frames')
+                    if args.history_limit==10000 and args.monitor_seconds>=20 and len(written)-1<10000:
+                        raise AssertionError('Native CSV did not include the maximum physical RX history')
                     report.update(native_csv_export=True, csv_rows=len(written)-1)
                     report['active_operation']='disconnect'
                     page.evaluate("invoke('disconnect')")
@@ -306,6 +319,8 @@ def main():
                     actual = page.evaluate("ConfigIO.exportChannel(1,'','').motors")
                     if actual != exported['channels'][0]['motors']:
                         raise AssertionError('Native configuration import changed motor settings')
+                    if page.evaluate('({rx:rxSaveLimit,tx:txSaveLimit})')!=exported['channels'][0]['historyLimits']:
+                        raise AssertionError('Native configuration import changed history limits')
                     if report['js_errors']:
                         raise AssertionError('Packaged UI JavaScript errors')
                     report.update(native_config_import=True, ok=True)

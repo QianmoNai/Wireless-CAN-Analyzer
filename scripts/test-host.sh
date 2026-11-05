@@ -76,6 +76,7 @@ python3 tests/test_wifi_tls_check.py
 node tests/test_imu.js
 node tests/test_motor_catalog.js
 node tests/test_history.js
+node tests/test_can_monitor.cjs
 node tests/test_uart_ui.cjs
 node tests/test_uart_render.cjs
 java_src=android/app/src/main/java/dev/qianmo/canview
