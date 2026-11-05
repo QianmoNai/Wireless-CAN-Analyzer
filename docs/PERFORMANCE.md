@@ -306,3 +306,10 @@ Android 1.21.7台架包配合最终固件，从干净页面完成两台BLE/Wi-Fi
 1.21.8无诊断改动台架包与正式包除包名、标签、调试标志及Activity全名外源码/资源一致，二者均构建签名通过。完整主机回归通过。两台BLE/Wi-Fi四场景、共24阶段通过；每轮含三类参数详情、暂停筛选仍持续收CAN、首页原始流静默、在线导入拦截和断开恢复。B端Wi-Fi每阶段20秒、独立RX/TX上限10000且RX填满，其他场景每阶段5秒、上限300。每轮14次USB分项取样覆盖模式选择前至恢复，全程无新增，App丢弃与JS错误零；报告`android-1.21.8-matrix.json`及四份原始报告。本组不证明偶发BLE建连丢弃的根因已全部消除，也不将探索性固件的延迟结果当作此正式包性能收益。
 
 正式包已在手机原位更新至1.21.8/48，已安装正式APK SHA256为 `d0f2a9abaf05c66038642a128cac91e67db8f2de6752655739d3c815e7f51505`，与构建产物一致，原生首页前台启动通过；台架包已安装SHA同样与无诊断改动产物一致。证据`android-1.21.8-{artifacts,installed}.json`。
+
+
+### 参数数值及异常反馈的物理核验
+
+Android1.21.8的A端BLE、B端Wi-Fi，及已安装Desktop1.2.18的USB/BLE/Wi-Fi各完成19配置、58组原始反馈和58组详情反馈。STM32周期模拟暂时关闭，通过SWD在对应物理CAN总线上注入已知反馈；Python独立参考逐字段比较正负数、量程端点、自定义量程、温度与不可用字段、IMU三类向量和四元数共用字节边界。实际详情DOM数字按显示精度核对，未替换产品解码器或伪造页面输入。五场景共580次有效反馈核验，设备三项丢弃新增零、CAN错误零、JS错误零，恢复USB及周期模拟通过。报告`feedback-physical-matrix.json`及五份原始数据。
+
+Android BLE/Wi-Fi与Desktop USB/BLE另各验证91组异常输入：先在实际原始接收包中核对扩展/远程标志、DLC与地址，随后断言全部监控参数值和接收时间均未改变；每轮再次完成58组有效详情反馈。报告`feedback-invalid-physical-matrix.json`及四份`*-invalid.json`。新增可复用入口`scripts/test-can-feedback-hardware.py`和独立参考模块；最终版本另核对产品完整型号目录及预设量程，避免目录变化后漏测。首次Android异常帧观察器有JS语法错误，在发送测试帧前退出并恢复，失败记录`android-1.21.8-feedback-2-wifi-invalid-observer-syntax-failure.json`保留；修复后通过，不计入有效物理结果。此处仍为模拟设备经真实CAN的验证，未宣称测试真实电机/IMU。
