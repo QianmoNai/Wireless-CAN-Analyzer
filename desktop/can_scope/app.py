@@ -11,7 +11,7 @@ from .rendering import configure
 configure()
 from shiboken6 import delete, isValid
 
-from PySide6.QtCore import QObject, Signal, Slot, QTimer, QUrl, QFile, QIODevice, QStandardPaths, QEvent
+from PySide6.QtCore import QObject, Signal, Slot, QTimer, QUrl, QFile, QIODevice, QStandardPaths, QEvent, Qt
 from PySide6.QtGui import QColor, QKeySequence
 from PySide6.QtWidgets import QApplication, QMainWindow, QTabWidget, QToolBar, QFileDialog, QMessageBox
 from PySide6.QtWebChannel import QWebChannel
@@ -136,6 +136,8 @@ class Window(QMainWindow):
         self.channel_states = {}
         self.chart_window_state = None
         self.chart_window_slot = None
+        self.chart_restore_generation = 0
+        self.chart_restore_pending = None
         self.views = {}
         self.profiles = []
         self.folder = folder
@@ -175,8 +177,11 @@ class Window(QMainWindow):
         if enabled:
             if slot != self.tabs.currentIndex()+1:
                 return
-            if self.chart_window_state is None or (self.chart_window_slot is None and not self.isFullScreen()):
+            if self.chart_window_state is None or (self.chart_window_slot is None and
+                    self.chart_restore_pending is None and not self.isFullScreen()):
                 self.chart_window_state = self.windowState()
+            self.chart_restore_generation += 1
+            self.chart_restore_pending = None
             self.chart_window_slot = slot
             self.showFullScreen()
             # A tab switch can restore and enter in the same event turn.
@@ -188,8 +193,23 @@ class Window(QMainWindow):
             # tab can enter while windowState still reports the old fullscreen.
             state = self.chart_window_state
             self.chart_window_slot = None
+            self.chart_restore_generation += 1
+            generation = self.chart_restore_generation
+            self.chart_restore_pending = generation
             self.setWindowState(state)
             self.show()
+            # XWayland may acknowledge leaving fullscreen by clearing the
+            # simultaneous maximize request. Preserve the baseline while this
+            # restore is pending, including a quick handoff to another chart.
+            def finish_restore():
+                if (isValid(self) and self.isVisible() and
+                        self.chart_restore_generation == generation and
+                        self.chart_window_slot is None):
+                    if (state & Qt.WindowState.WindowMaximized and
+                            not self.isFullScreen() and not self.isMaximized()):
+                        self.showMaximized()
+                    self.chart_restore_pending = None
+            QTimer.singleShot(100, finish_restore)
 
     def changeEvent(self, event):
         super().changeEvent(event)
@@ -335,6 +355,8 @@ class Window(QMainWindow):
     def closeEvent(self, event):
         # Any queued window-state reconciliation must stop with this window.
         self.chart_window_slot = None
+        self.chart_restore_generation += 1
+        self.chart_restore_pending = None
         # Stop WebChannel callbacks before joining workers or destroying Chromium.
         for view in self.views.values():
             view.page().setWebChannel(None)

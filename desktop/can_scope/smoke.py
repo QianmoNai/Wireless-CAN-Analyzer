@@ -53,12 +53,19 @@ def run(app, window, output):
     def fullscreen():
         window.showMaximized()
         def enter():
+            # A tiling compositor may decline maximize. Restore the actual
+            # accepted state; do not assume the request changed the window.
+            checks['maximize_request_accepted']=window.isMaximized()
+            checks['fullscreen_baseline_state']=window.windowState().value
             js("openDetailChart(detailSeries[0].key);true;",lambda _:QTimer.singleShot(300,leave))
         def leave():
             checks['native_fullscreen']=window.isFullScreen()
             js("closeDetailChartFullscreen();true;",lambda _:QTimer.singleShot(300,restored))
         def restored():
             checks['maximized_restored']=window.isMaximized() and not window.isFullScreen()
+            checks['restored_window_state']=window.windowState().value
+            checks['fullscreen_state_restored']=(not window.isFullScreen() and
+                checks['restored_window_state']==checks['fullscreen_baseline_state'])
             window.showNormal()
             QTimer.singleShot(300,live)
         QTimer.singleShot(300,enter)
@@ -151,7 +158,7 @@ def run(app, window, output):
         output.with_suffix('.json').write_text(json.dumps(report,ensure_ascii=False,indent=2), encoding='utf-8')
         ok=(not window.js_errors and checks.get('isolated') and checks.get('overview',{}).get('cards')==1 and checks.get('detail',{}).get('samples')==50 and checks.get('detail',{}).get('connectionHidden') and checks.get('detail',{}).get('toolsHidden') and checks.get('detail',{}).get('sampleCompact') and checks.get('live',{}).get('visible'))
         ok=ok and checks.get('overview',{}).get('version')==__version__ and ('Desktop '+__version__+' ·') in checks.get('overview',{}).get('versionLabel','')
-        ok=ok and checks.get('native_fullscreen') and checks.get('maximized_restored')
+        ok=ok and checks.get('native_fullscreen') and checks.get('fullscreen_state_restored')
         uart=checks.get('uart',{})
         ok=ok and all(uart.get(k) for k in ('visible','canHidden','motorsHidden','sendEnabled','bitrateDisabled','csvDisabled')) and uart.get('binary')=='00 FF 41 E4 B8 AD' and '中' in checks.get('uart_text','') and all(checks.get('uart_restored',{}).get(k) for k in ('can','motorsVisible'))
         usb=checks.get('usb',{})

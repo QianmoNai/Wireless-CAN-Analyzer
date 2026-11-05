@@ -45,3 +45,8 @@ Android与四档速率入口可加`--monitor-diagnostics`（要求固件1.24.7�
 `scripts/test-can-feedback-hardware.py`需要显式指定`--fixture stm32h723-dual --elf <运行镜像对应ELF> --port <分析仪by-id路径> --bus 1|2 --channel <已保存身份通道> --surface desktop|android --mode usb|ble|wifi --output <报告>`。桌面另指定`--binary <实际安装包可执行文件>`；Android仅BLE/Wi-Fi，需独立台架包已获ADB授权、配置已保存且CDP端口已转发（默认35013，可用`--cdp`覆盖）。测试不读取/打印配对口令，不重新发出结局未知的CAN指令。
 
 脚本核对USB与保存身份及STM32运行镜像，暂停两路周期模拟，经SWD让STM32在对应物理总线发送已知反馈；Python参考值不调用产品JS解码器。覆盖全部19个预设/自定义/IMU配置、58组有效反馈，分别验证原始接收与详情值，再核对实际DOM数字的显示精度及不可用字段。`--invalid-frames`追加扩展、远程、短帧、错误地址/电机/IMU组号，先证明原始帧确实到达，再检查全部监控值和时间未变化。报告逐组保留载荷、期望、观测和详情显示文本。共用硬件锁，退出恢复配置、断开通道、USB＋CAN及周期模拟；属于模拟设备经实体CAN传输的证据，不代表真实电机/IMU。
+
+
+### 绘图与窗口恢复
+
+`tests/test_motor_curve.cjs`随主机检查运行，校验电机合并扫描的主/副值边界及完整曲线路径语义。`desktop/tests/test_chart_window.py`模拟合成器延后确认退出全屏、快速跨通道新开全屏、普通窗口基准、隐藏通道请求及关闭/删除，验证不会覆盖原始最大化状态或执行过期恢复。实际Qt用`desktop/tests/fullscreen_tabs.py --switches 50 --settle-ms 250 --output <报告>`复验；该入口使用合成连接状态、不打开硬件。Desktop1.2.19源码在Niri/XWayland的50次切换通过，包含窗口修复的最终包单次实际XCB及离屏smoke均通过；物理CAN功能以独立硬件报告为准。

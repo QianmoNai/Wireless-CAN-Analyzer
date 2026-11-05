@@ -123,6 +123,18 @@ with sync_playwright() as p:
  if(gapReduced.length!==expected.length||!expected.every((i,n)=>gapReduced[n]===gapPoints[i]))throw Error('lost gap boundaries, extrema order or sample identity');
  const short=gapPoints.slice(0,1600);if(detailPeakPoints(short,'position',100000,0,1)!==short)throw Error('small history was copied');
  if(gapPoints.length!==3202||gapPoints[1700].values.position!==-100)throw Error('input history mutated');
+ // Fused motor bounds must match the existing reducer's chronological object
+ // identities, including gaps/NaN, and include secondary temperature bounds.
+ for(const source of [[],short,gapPoints,points,
+  Array.from({length:3202},(_,i)=>({t:i+(i>1500?600:0),values:{position:i%17?Math.sin(i):NaN,mos:i%19?-i:NaN}}))]){
+  const bounds={},before=JSON.stringify(source);
+  const actual=detailBoundedPeakPoints(source,'position',100000,0,1,bounds,'mos');
+  const expected=detailPeakPoints(source,'position',100000,0,1);
+  if(actual.length!==expected.length||!actual.every((point,i)=>point===expected[i]))throw Error('fused curve changed extrema/gap/sample order');
+  let count=0,lo=Infinity,hi=-Infinity;for(const p of source)for(const key of ['position','mos']){const v=p.values[key];if(Number.isFinite(v)){count++;lo=Math.min(lo,v);hi=Math.max(hi,v);}}
+  if(bounds.count!==count||bounds.lo!==lo||bounds.hi!==hi||JSON.stringify(source)!==before)throw Error('fused curve bounds or input mutation');
+  if(source.length<=1600&&actual!==source)throw Error('fused small history was copied');
+ }
  // Both extremum orders, flat buckets and extrema at the boundary must retain
  // their original chronological references without duplicating endpoints.
  for(const [value,expectedIndices]of [

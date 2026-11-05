@@ -14,7 +14,7 @@ npm exec --prefix tests -- playwright install --with-deps --only-shell chromium
 PATH="$PWD/.venv/bin:$PATH" bash scripts/test-host.sh
 ```
 
-入口包含 `test_uart_ui.cjs` 与 `test_uart_render.cjs`。独立的 `checks.yml` workflow 对 firmware、scripts、tests、desktop 及共享 App 资源变更运行主机与桌面单测，不创建 Release，也不访问实机串口。
+入口包含 `test_uart_ui.cjs`、`test_uart_render.cjs` 与 `test_motor_curve.cjs`。电机曲线检查覆盖合并扫描的有限值边界、双温度共享坐标、极值引用顺序、NaN/真实时间间隔、60000采样及暂停几何，不访问物理CAN。独立的 `checks.yml` workflow 对 firmware、scripts、tests、desktop 及共享 App 资源变更运行主机与桌面单测，不创建 Release，也不访问实机串口。
 
 覆盖 CAN 所有者循环、轮询查询、错误计数、速率和估算负载、BLE 数据筛选、ACK 调度、电机/IMU 订阅、蓝牙名称存储、本机按键与屏幕逻辑、App 查询和重连配置，以及有界接收、连接优先级、环形历史、WebView 资源路由和构建脚本保护。
 

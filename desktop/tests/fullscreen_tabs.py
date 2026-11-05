@@ -17,7 +17,7 @@ def open_next():
  global iteration
  if iteration>=options.switches:
   slot=w.tabs.currentIndex()+1
-  js(slot,'closeDetailChartFullscreen();true;',lambda _:QTimer.singleShot(100,closed));return
+  js(slot,'closeDetailChartFullscreen();true;',lambda _:QTimer.singleShot(options.settle_ms,closed));return
  slot=iteration%2+1;iteration+=1;w.tabs.setCurrentIndex(slot-1)
  js(slot,"openDetailChart(detailSeries[0].key);true;",lambda _:QTimer.singleShot(options.settle_ms,lambda:sample(slot)))
 def sample(slot):
