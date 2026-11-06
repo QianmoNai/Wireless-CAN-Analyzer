@@ -71,6 +71,11 @@
  $('uartCancel').onclick=()=>{if(uartActive){invoke('uartCancel',uartActive);$('uartResult').textContent='正在停止后续发送，等待已提交分段的结果…';}};
  const original=window.onNative;
  window.onNative=(type,d)=>{
+  if(type==='queryMetrics'){
+   const m=watchedMotors.find(m=>JSON.stringify(m.config)===d.key);
+   if(connected&&m&&m.polling&&!m.queryPending&&m.config.pollHz===d.requested){m.queryMessage=d.message;refreshWatchedMotors()}
+   return;
+  }
   if(type==='state'){if(uartActive)$('uartResult').textContent='连接状态改变；已提交分段结果未知，未自动重发';uartActive=null;}
   if(type==='manualResult')showManualResult(d);else original(type,d);
   if(d.uartTx&&d.uartTx.id===uartActive){const t=d.uartTx;

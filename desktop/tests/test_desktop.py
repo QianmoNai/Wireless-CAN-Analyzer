@@ -164,6 +164,53 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         await c.handle('setPolling',[self.key,1,False,100])
         self.assertFalse(self.events[-1][1]['enabled'])
 
+    async def test_query_metrics_are_confirmed_rate_statistics_only(self):
+        c=self.channel
+        await c.handle('setPolling',[self.key,1,True,700])
+        self.events.clear()
+        for p in [packet(8,x=1,y=700,z=633,token=123),packet(8,x=2,y=700,z=633),
+                  packet(8,x=1,y=500,z=450)]:c.receive(p)
+        self.assertFalse(self.events)
+        p=packet(8,x=1,y=700,z=633)
+        c.receive(p);c.receive(p)
+        self.assertEqual(len(self.events),1)
+        kind,state=self.events[-1]
+        self.assertEqual((kind,state['key'],state['requested'],state['actual']),
+                         ('queryMetrics',self.key,700,633))
+        self.assertIn('实际查询 633 Hz',state['message'])
+        self.assertNotIn('enabled',state)
+        c.receive(packet(8,b=2,x=1,y=700,z=600))
+        self.assertIn('未收到 CAN ACK',self.events[-1][1]['message'])
+        self.assertIn(self.key,c.polls)
+        await c.handle('setPolling',[self.key,1,False,700])
+        self.assertFalse(c.query_metrics)
+        count=len(self.events);c.receive(p);self.assertEqual(len(self.events),count)
+        await c.handle('setPolling',[self.key,1,True,700])
+        c.receive(p);self.assertEqual(self.events[-1][0],'queryMetrics')
+        c.receive(packet(8,a=4,b=64,x=1))
+        self.assertIn('Bus-off',self.events[-1][1]['message'])
+        self.assertFalse(c.polls);self.assertFalse(c.query_metrics)
+
+    async def test_query_metrics_do_not_cross_motors_or_disconnect(self):
+        c=self.channel;other=json.dumps(dict(profile='dm4310',id=2,feedbackId=3))
+        c.polls={self.key:(1,100,0),other:(2,500,0)}
+        c.receive(packet(8,x=1,y=100,z=98));c.receive(packet(8,x=2,y=500,z=470))
+        self.assertEqual([(d['key'],d['actual'])for k,d in self.events if k=='queryMetrics'],
+                         [(self.key,98),(other,470)])
+        await c.disconnect();self.assertFalse(c.query_metrics)
+        count=len(self.events);c.receive(packet(8,x=1,y=100,z=97))
+        self.assertEqual(len(self.events),count)
+
+    async def test_query_metrics_cleared_when_dashboard_or_data_mode_changes(self):
+        c=self.channel
+        await c.handle('setPolling',[self.key,1,True,100])
+        c.receive(packet(8,x=1,y=100,z=98))
+        self.assertTrue(c.query_metrics)
+        c.submit('dashboard',['[]']);self.assertFalse(c.query_metrics)
+        c.polls[self.key]=(1,100,0);c.receive(packet(8,x=1,y=100,z=98))
+        c.receive(packet(21,a=1,x=115200))
+        self.assertFalse(c.query_metrics);self.assertFalse(c.polls)
+
     async def test_query_validation_and_timeout_resolve_ui_state(self):
         c=self.channel
         for changes,args in [({'uart':True},[self.key,1,True,100]),

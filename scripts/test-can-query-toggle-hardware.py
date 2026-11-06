@@ -40,10 +40,13 @@ def main():
     parser.add_argument('--display',default=':1')
     parser.add_argument('--cdp',default='http://127.0.0.1:35013')
     parser.add_argument('--repeat',type=int,default=20)
+    parser.add_argument('--verify-query-metrics',action='store_true',help='Desktop only: compare rendered actual query frequency with native device statistics')
+    parser.add_argument('--query-hz',type=int,choices=[100,500,1000],default=100)
     parser.add_argument('--output',type=Path,required=True)
     args=parser.parse_args()
     if not 1<=args.repeat<=100:parser.error('--repeat must be 1..100')
     if args.surface=='android'and args.mode=='usb':parser.error('Android USB Host is not available on this bench')
+    if args.verify_query_metrics and args.surface!='desktop':parser.error('--verify-query-metrics requires the desktop client')
     if args.surface=='desktop'and(not args.binary or not args.binary.is_file()):parser.error('--binary must name the actual desktop executable')
     args.output.parent.mkdir(parents=True,exist_ok=True)
     report=dict(ok=False,surface=args.surface,mode=args.mode,channel=args.channel,bus=args.bus,
@@ -77,8 +80,10 @@ def main():
                 page.on('pageerror',lambda e:report['js_errors'].append(str(e)))
                 backup=page.evaluate('watchedMotors.map(m=>m.config)')
                 try:
-                    page.evaluate("()=>{window.queryAudit=[];window.queryMode=null;window.queryPriorNative=onNative;onNative=(k,d)=>{if(k==='queryState'||k==='error'){queryAudit.push({kind:k,data:d,at:Date.now()});if(queryAudit.length>32)queryAudit.shift()}if(k==='telemetryMode')queryMode=d.mode;return queryPriorNative(k,d)};watchedMotors.splice(0);commitWatch({profile:'dm4310',id:1,master:17,pollHz:100,mode:'mit',limits:{p:12.5,v:30,t:10},name:'Query switch bench'});publishDashboard();showTab('live')}")
+                    page.evaluate("()=>{window.queryAudit=[];window.queryMetricsAudit=[];window.queryMode=null;window.queryPriorNative=onNative;onNative=(k,d)=>{if(k==='queryState'||k==='error'){queryAudit.push({kind:k,data:d,at:Date.now()});if(queryAudit.length>32)queryAudit.shift()}if(k==='queryMetrics'){queryMetricsAudit.push(d);if(queryMetricsAudit.length>24)queryMetricsAudit.shift()}if(k==='telemetryMode')queryMode=d.mode;return queryPriorNative(k,d)};watchedMotors.splice(0);commitWatch({profile:'dm4310',id:1,master:17,pollHz:100,mode:'mit',limits:{p:12.5,v:30,t:10},name:'Query switch bench'});publishDashboard();showTab('live')}")
                     page.wait_for_function('window.devicePollingSupported',polling=100,timeout=8000)
+                    page.evaluate('hz=>{const m=watchedMotors[0];m.config={...m.config,pollHz:hz};m.dashboardMetadata=null;publishDashboard()}',args.query_hz)
+                    report['query_hz']=args.query_hz
                     def state():
                         return page.evaluate("({connected,hidden:document.hidden,focused:document.hasFocus(),appDrops,firmwareDrops,polling:detailMotor&&detailMotor.polling,pending:detailMotor&&detailMotor.queryPending,target:detailMotor&&detailMotor.queryTarget,checked:$('detailQuery').checked,disabled:$('detailQuery').disabled,message:$('detailQueryNote').textContent,events:queryAudit})")
                     def wait(expression,**kw):
@@ -86,6 +91,7 @@ def main():
                         except Exception:report['failure_state']=state();save();raise
                     for turn in range(args.repeat):
                         row=dict(turn=turn+1);report['rounds'].append(row);save()
+                        page.evaluate('queryMetricsAudit.length=0')
                         page.evaluate('dashboardOpen(JSON.stringify(watchedMotors[0].config))')
                         wait('detailReady');page.wait_for_function("!$('detailQuery').disabled",polling=100,timeout=8000)
                         for enabled in [True,False]:
@@ -102,6 +108,9 @@ def main():
                             row[label+'_ms']=round((time.monotonic()-start)*1000,2);row[label+'_state']=state();save()
                             if enabled:
                                 wait('detailSamples.length-detailSampleHead>=20&&detailMotor.feedback!==null')
+                                if args.verify_query_metrics:
+                                    wait("()=>{const key=JSON.stringify(detailMotor.config),d=queryMetricsAudit.findLast(d=>d.key===key&&d.requested===detailMotor.config.pollHz&&d.actual>0);return d&&$('detailQueryNote').textContent===d.message&&detailMotor.polling&&!detailMotor.queryPending}")
+                                    row['metrics']=page.evaluate("queryMetricsAudit.findLast(d=>d.key===JSON.stringify(detailMotor.config)&&d.requested===detailMotor.config.pollHz&&d.actual>0)")
                                 page.wait_for_timeout(200)
                             if row[label+'_state']['checked']!=enabled or row[label+'_state']['disabled']or not row[label+'_state']['connected']or row[label+'_state']['appDrops']:
                                 raise AssertionError('Confirmed query UI state differs from actual channel')

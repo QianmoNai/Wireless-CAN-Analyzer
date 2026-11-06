@@ -1,2 +1,2 @@
 """CAN Scope desktop client for Linux and Windows."""
-__version__ = '1.2.20'
+__version__ = '1.2.21'

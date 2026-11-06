@@ -80,6 +80,7 @@ node tests/test_history.js
 node tests/test_can_monitor.cjs
 node tests/test_motor_curve.cjs
 node tests/test_motor_query.cjs
+node tests/test_desktop_query_metrics.cjs
 node tests/test_uart_ui.cjs
 node tests/test_uart_render.cjs
 java_src=android/app/src/main/java/dev/qianmo/canview

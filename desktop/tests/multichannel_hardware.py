@@ -37,7 +37,7 @@ def main(a):
     bench = module('bench', 'scripts/test-can-hardware.py')
     fixture = module('fixture', 'scripts/test-dual-can-hardware.py').Fixture(a.elf)
     report = dict(ok=False, modes=a.modes, scope='installed Qt package, two physical analyzers and independent STM32 CAN controllers', binary_sha256=hashlib.sha256(a.binary.read_bytes()).hexdigest(), fixture_image_sha256=fixture.image_sha256, phases=[], js_errors=[])
-    report.update(detail_fullscreen=a.detail_fullscreen,query_dm=a.query_dm,
+    report.update(detail_fullscreen=a.detail_fullscreen,query_dm=a.query_dm,query_metrics=a.query_metrics,query_rates=a.query_rates if a.query_dm else None,
                   detail_profile='dm4310'if a.query_dm else'c620')
     a.output.parent.mkdir(parents=True, exist_ok=True)
     proc = None
@@ -114,10 +114,18 @@ def main(a):
                     for i, p in enumerate(pages):
                         p.on('pageerror', lambda e: report['js_errors'].append(str(e)))
                         p.evaluate(setup)
+                        if a.query_dm:
+                            p.evaluate("hz=>{const m=watchedMotors[3];m.config={...m.config,pollHz:hz};m.dashboardMetadata=null;publishDashboard()}",a.query_rates[i])
+                        if a.query_metrics:
+                            p.evaluate("()=>{window.queryMetricEvents=[];const prior=onNative;onNative=(k,d)=>{prior(k,d);if(k==='queryMetrics'){queryMetricEvents.push(d);if(queryMetricEvents.length>64)queryMetricEvents.shift()}}}")
                         p.evaluate("()=>{window.rawCount=0;window.nativeFailures=[];window.modes=[];window.sentinels=[];const prior=onNative;onNative=(k,d)=>{prior(k,d);if(k==='telemetryMode')modes.push(d.mode);if(k==='error')nativeFailures.push(d.message);if(k==='packets')for(const x of d.items||[]){const p=parsePacket(x.hex||x);if(p&&p[1]===1){rawCount++;if(u32(p,4)===0x6c1||u32(p,4)===0x6c2)sentinels.push({id:u32(p,4),data:Array.from(p.slice(8,16))})}}}}")
                         target = 'usb:' + a.ports[i] if a.modes[i] == 'usb' else 'wifi:' + saved[i]['ip'] if a.modes[i] == 'wifi' else saved[i]['address']
                         p.evaluate("target=>invoke('connect',target)", target)
-                        p.wait_for_function('connected&&gotStatus', timeout=35000, polling=100)
+                        try:
+                            p.wait_for_function('connected&&gotStatus', timeout=35000, polling=100)
+                        except Exception:
+                            report['connection_failure']=dict(channel=i+1,mode=a.modes[i],state=p.evaluate('({connected,gotStatus,errors:nativeFailures,modes})'))
+                            raise
                     if a.query_dm:
                         for p in pages:
                             p.wait_for_function('window.devicePollingSupported',timeout=8000,polling=100)
@@ -142,20 +150,45 @@ def main(a):
                         identifier = 1729 + active
                         payload = struct.pack('<II', turn + 1, identifier)
                         base = fixture.symbols['can_bench'] + active * 52
-                        sequence = 0x39000000 + turn
+                        requested,completed=fixture.read(base+16,2)
+                        if requested!=completed:
+                            raise AssertionError('Existing fixture CAN request has an unknown outcome')
+                        sequence=(requested+1)&0xffffffff or 1
                         fixture.write(base, list(struct.unpack('<IIII', struct.pack('<IBB8sBB', identifier, 0, 8, payload, 0, 0))))
                         fixture.write(base + 16, [sequence])
-                        pages[active].wait_for_function('e=>sentinels.some(s=>s.id===e.id&&JSON.stringify(s.data)===JSON.stringify(e.data))', arg=dict(id=identifier, data=list(payload)), polling=100, timeout=5000)
+                        try:
+                            pages[active].wait_for_function('e=>sentinels.some(s=>s.id===e.id&&JSON.stringify(s.data)===JSON.stringify(e.data))', arg=dict(id=identifier, data=list(payload)), polling=100, timeout=5000)
+                        except Exception:
+                            report['sentinel_failure']=dict(channel=active+1,sequence=sequence,fixture_result=fixture.read(base+16,3),states=[p.evaluate('({connected,rawCount,mode:modes.at(-1),sentinels,errors:nativeFailures})')for p in pages])
+                            raise
                         if fixture.read(base + 20, 2) != [sequence, 0]:
                             raise AssertionError('Fixture CAN transmit failed')
                         pages[active].wait_for_timeout(2000)
                         states = [p.evaluate('({connected,rawCount,appDrops,firmwareDrops,errors:nativeFailures,mode:modes.at(-1),sentinels,motors:dashboardSnapshot()})') for p in pages]
                         delta = [v['rawCount'] - b for v, b in zip(states, before)]
                         if not all((s['connected'] and (not s['appDrops']) and (not s['errors']) and (s['firmwareDrops'] == baseline[i]) and all((x['id'] == 0x6c1 + i for x in s['sentinels'])) for i, s in enumerate(states))) or delta[active] < 300 or delta[hidden] != 0:
+                            report['channel_switch_failure']=dict(turn=turn,active_channel=active+1,raw_delta=delta,states=states)
                             raise AssertionError('Channel switch did not isolate and resume physical telemetry')
                         if a.query_dm and not all(p.evaluate('watchedMotors[3].polling&&!watchedMotors[3].queryPending')for p in pages):
                             raise AssertionError('Tab switch stopped a confirmed independent query lease')
                         report['phases'].append(dict(turn=turn, active_channel=active + 1, raw_delta=delta, states=states))
+                        if a.query_metrics:
+                            metrics=[]
+                            for i,p in enumerate(pages):
+                                hz=a.query_rates[i]
+                                # Firmware mode 3 suppresses nonterminal query statistics
+                                # on hidden channels while keeping their CAN timers alive.
+                                if i==active:
+                                    try:
+                                        p.wait_for_function("hz=>queryMetricEvents.some(e=>e.requested===hz&&e.actual>0)&&watchedMotors[3].queryMessage.includes('设定 '+hz+' Hz · 实际查询 ')",arg=hz,timeout=8000,polling=100)
+                                    except Exception:
+                                        report['query_metrics_failure_channel']=i+1
+                                        report['query_metrics_failure_state']=[x.evaluate('({connected,polling:watchedMotors[3].polling,pending:watchedMotors[3].queryPending,config:watchedMotors[3].config,message:watchedMotors[3].queryMessage,events:queryMetricEvents})')for x in pages]
+                                        raise
+                                metrics.append(p.evaluate('({message:watchedMotors[3].queryMessage,events:queryMetricEvents.slice(-8)})'))
+                                if any(e['requested']!=hz for e in metrics[-1]['events']):
+                                    raise AssertionError('Query statistics crossed independent channels')
+                            report['phases'][-1]['query_metrics']=metrics
                         if a.detail_fullscreen:
                             page=pages[active]
                             page.evaluate('index=>dashboardOpen(JSON.stringify(watchedMotors[index].config))',3 if a.query_dm else 0)
@@ -172,6 +205,11 @@ def main(a):
                             detail=page.evaluate('({connected,ready:detailReady,count:detailSamples.length-detailSampleHead,key:detailChartKey,values:detailMotor.feedback&&detailMotor.feedback.values,appDrops,firmwareDrops})')
                             if not detail['connected']or not detail['ready']or not detail['values']or detail['appDrops']or detail['firmwareDrops']!=baseline[active]:
                                 raise AssertionError('Physical fullscreen detail lost feedback')
+                            if a.query_metrics:
+                                page.wait_for_function("$('detailQueryNote').textContent===detailMotor.queryMessage",timeout=5000,polling=100)
+                                detail['query_note']=page.locator('#detailQueryNote').text_content()
+                                if not detail['query_note'].startswith('设定 '+str(a.query_rates[active])+' Hz · 实际查询 '):
+                                    raise AssertionError('Fullscreen detail rendered another channel query rate')
                             if pages[hidden].evaluate('detailChartKey!==null'):
                                 raise AssertionError('Hidden channel retained its fullscreen chart')
                             report['phases'][-1]['fullscreen_detail']=dict(detail,native_x11_fullscreen=True)
@@ -236,9 +274,19 @@ if __name__ == '__main__':
     p.add_argument('--switches', type=int, default=6)
     p.add_argument('--detail-fullscreen',action='store_true',help='Also receive physical DJI details in native X11 fullscreen and verify tab handoff')
     p.add_argument('--query-dm',action='store_true',help='Keep independent simulated DM queries active on both channels; fullscreen selects DM feedback')
+    p.add_argument('--query-metrics',action='store_true',help='Verify Desktop 1.2.21 actual-rate messages using independent queries')
+    p.add_argument('--query-rates',nargs=2,type=int,help='Per-channel CAN query Hz (metrics default 100 500; otherwise 100 100)')
     p.add_argument('--output', required=True, type=Path)
     a = p.parse_args()
     if not 2 <= a.switches <= 30:
         p.error('--switches must be 2..30')
+    if a.query_metrics and not a.query_dm:
+        p.error('--query-metrics requires --query-dm')
+    if a.query_rates is not None and not a.query_dm:
+        p.error('--query-rates requires --query-dm')
+    if a.query_rates is None:
+        a.query_rates=[100,500]if a.query_metrics else[100,100]
+    if any(not 1<=hz<=1000 for hz in a.query_rates):
+        p.error('--query-rates must each be 1..1000')
     with hardware_bench_lock():
         raise SystemExit(0 if main(a) else 1)

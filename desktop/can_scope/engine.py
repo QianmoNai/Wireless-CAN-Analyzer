@@ -6,6 +6,7 @@ import time
 from .protocol import packet, u32, setting_command, can_command, secret, device_settings_command, device_settings_status
 from .transports import BleTransport, LanTransport, scan_ble, discover
 from .usb_transport import UsbTransport, scan_usb, usb_identity, resolve_usb
+from .polling_status import message as polling_message
 
 
 UART_ACK_TIMEOUT = 3.0
@@ -29,6 +30,7 @@ class Channel:
         self.controls = deque(maxlen=64)
         self.dropped = 0
         self.polls = {}
+        self.query_metrics = {}
         self.uart = False
         self.waiters = {}
         self.pending_tx = {}
@@ -112,6 +114,7 @@ class Channel:
             for key, (identifier, hz, _) in list(self.polls.items()):
                 if key not in keys:
                     self.polls.pop(key, None)
+                    self.query_metrics.pop(key, None)
                     self.enqueue('setPolling', [key, identifier, False, hz])
             if signature != self.signature:
                 self.signature = signature
@@ -298,6 +301,7 @@ class Channel:
             self.uart_task = asyncio.create_task(self.send_uart(job))
         elif name == 'send':
             self.polls.clear()
+            self.query_metrics.clear()
             command = setting_command(args[0])
             if command[1] == 0x18 and not self.uart:
                 raise ValueError('请先在设备屏幕选择 UART 数据')
@@ -334,6 +338,7 @@ class Channel:
                 if enabled and any(k != key and p[0] == identifier for k, p in self.polls.items()):
                     raise ValueError('此电机 ID 已开启查询')
                 self.polls.pop(key, None)
+                self.query_metrics.pop(key, None)
                 result = await self.acknowledge(packet(0x14, x=identifier, y=hz if enabled else 0, token=self.next_token()), 8, self.token)
                 if result[2] != (0 if enabled else 1):
                     raise ValueError('设备未接受查询配置，状态码 '+str(result[2]))
@@ -357,6 +362,7 @@ class Channel:
                     self.polls[key] = (identifier, hz, time.monotonic())
                 except Exception:
                     self.polls.pop(key, None)
+                    self.query_metrics.pop(key, None)
                     self.emit('queryState', dict(key=key, enabled=False, message='查询确认超时，已停止续租'))
         elif name in ('setMonitorVisible', 'setChannelVisible'):
             if len(args) != 1 or type(args[0]) is not bool:
@@ -379,6 +385,7 @@ class Channel:
             if not self.ready or not isinstance(self.transport, BleTransport):
                 raise ValueError('请先通过蓝牙连接设备')
             self.polls.clear()
+            self.query_metrics.clear()
             self.busy = True
             self.emit('wifiResult', dict(busy=True, message='请在系统蓝牙配对提示中输入 ESP32 屏幕上的六位码'))
             try:
@@ -493,6 +500,7 @@ class Channel:
             if self.uart:
                 for key in list(self.polls):self.emit('queryState',dict(key=key,enabled=False,message='UART 模式，查询已停止'))
                 self.polls.clear()
+                self.query_metrics.clear()
                 self.detail = ''
             elif previous_uart:
                 if self.uart_job:
@@ -504,11 +512,24 @@ class Channel:
             self.max_hz = min(1000, u32(p, 12))
             if old != self.capabilities:
                 self.enqueue('subscribe', [])
+        # Periodic statistics cannot acknowledge a command or change its state.
+        # Match the confirmed rate as well as ID to reject old configuration data.
+        if kind == 8 and self.ready and not self.uart and not u32(p, 16) and p[2] == 0:
+            for key, (identifier, hz, _) in list(self.polls.items()):
+                if identifier != u32(p, 4) or hz != u32(p, 8):
+                    continue
+                message = polling_message(p[2], p[3], hz, u32(p, 12))
+                if self.query_metrics.get(key) != message:
+                    self.query_metrics[key] = message
+                    self.emit('queryMetrics', dict(key=key, requested=hz, actual=u32(p, 12),
+                                                   detail=p[3], message=message))
         if kind == 8 and p[2] not in (0, 1):
             for key, (identifier, _, _) in list(self.polls.items()):
                 if identifier == u32(p, 4):
                     self.polls.pop(key, None)
-                    self.emit('queryState', dict(key=key, enabled=False, message='设备停止查询，状态码 '+str(p[2])))
+                    self.query_metrics.pop(key, None)
+                    self.emit('queryState', dict(key=key, enabled=False,
+                        message=polling_message(p[2], p[3], u32(p, 8), u32(p, 12))))
         if kind in (2, 3) and u32(p, 16) in self.pending_tx:
             self.pending_tx.pop(u32(p, 16))
             status = ('CAN 发送成功（已收到 ACK）' if kind == 2 else
@@ -627,6 +648,7 @@ class Channel:
         self.epoch += 1
         self.ready = False
         self.polls.clear()
+        self.query_metrics.clear()
         self.capabilities = 0
         self.subscription = None
         self.applied_roster = []

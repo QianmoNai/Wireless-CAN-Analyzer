@@ -1,6 +1,6 @@
 # CAN 模式自主测试台架
 
-2026-11-06按用户要求暂停。当前安装Android1.21.10、Desktop1.2.20，物理固件保持1.24.7；已完成查询开关140轮、手机四场景及导入后四场景、桌面三传输整包和两台同时达妙查询九组合。两台恢复USB＋CAN/1Mbps、STM32双路周期模拟，手机回到正式版；收尾快照为`pause-checkpoint.json`。恢复前先核对实时设备状态；Wi-Fi后台场景及实际查询频率显示候选尚未完成产品验收，详见性能记录。
+2026-11-06曾按用户要求暂停，后续已获指令恢复。暂停时安装Android1.21.10、Desktop1.2.20，物理固件保持1.24.7；已完成查询开关140轮、手机四场景及导入后四场景、桌面三传输整包和两台同时达妙查询九组合。收尾快照为`pause-checkpoint.json`。恢复后已重新核对ADB、两台USB、J-Link及运行镜像；Android Wi-Fi后台租约专项补验通过，Desktop1.2.21实际查询频率显示完成78轮开关、三路整包操作和双通道63轮显示/全屏；无线压力及初始化仍出现转发丢弃，整体无丢弃门槛未通过，本机入口保留1.2.20、候选1.2.21单独保存，详见性能记录。
 
 当前台架为两台原生 USB ESP32-S3、J-Link/STM32H723 独立双 CAN、ADB Android 手机和 Linux 桌面。测试只对虚拟电机/IMU及专用测试 ID 操作。原始报告保存于本机 `dist/can-go-20261106/autonomy-audit/`；构建、模拟与物理结果分别记录在 [性能记录](PERFORMANCE.md)。
 
@@ -31,7 +31,7 @@
 - `scripts/test-dual-can-recovery.py`：保存绑定的重启恢复、离线帧不补发。
 - `scripts/test-usb-reconnect-hardware.py`：桌面按 USB 身份跨复位重连；必须指定模拟器台架、已核对设备端口及esptool路径。
 - `scripts/test-android-config-import-hardware.py`：独立台架包的原生SAF键盘导入；核对ADB/CDP进程、已有数字文件名备份及断开状态，只确认一次。导入清除网络信任，随后`test-android-can-hardware.py --mode ble --restore-wifi-trust`从实际设置按钮重新认证；首次配对由`android_pairing.py`读取身份核对的物理USB当前临时码并操作原生通知/确认，仅内存处理。
-- `desktop/tests/multichannel_hardware.py`：实际发行包两路实物并存，原生标签切换、隐藏流静默、独有测试帧归属；端口按顺序对应已保存通道1/2及STM32 CAN1/2，写入前核对物理身份与保存身份一致；要求固件1.24.7并比较两台只读三项丢弃。`--detail-fullscreen`在每轮原始流后打开物理DJI反馈详情、核对X11全屏属性及隐藏通道退出，需要xprop及实际X11窗口管理器。追加`--query-dm`会在两通道同时开启独立达妙查询，切换期间检查两端仍续租，全屏选择达妙而非DJI，并在退出前分别等待停止确认。
+- `desktop/tests/multichannel_hardware.py`：实际发行包两路实物并存，原生标签切换、隐藏流静默、独有测试帧归属；端口按顺序对应已保存通道1/2及STM32 CAN1/2，写入前核对物理身份与保存身份一致；要求固件1.24.7并比较两台只读三项丢弃。`--detail-fullscreen`在每轮原始流后打开物理DJI反馈详情、核对X11全屏属性及隐藏通道退出，需要xprop及实际X11窗口管理器。追加`--query-dm`会在两通道同时开启独立达妙查询，切换期间检查两端仍续租，全屏选择达妙而非DJI，并在退出前分别等待停止确认。`--query-metrics`配合`--query-dm`检查Desktop1.2.21双通道独立实际频率与详情DOM；`--query-rates A B`可指定两路查询频率（度量专项默认100/500Hz，普通查询默认各100Hz）；隐藏通道按模式3静默，激活后才要求周期统计。专用帧先核对STM32请求/完成序号相等，再递增，避免重跑复用已完成请求或覆盖未知结局。
 - `scripts/test-android-can-hardware.py`：Android台架包实际WebView、六阶段CAN显示和清理；`--verify-import-guard`通过真实原生桥接确认在线导入被拒绝且保持连接；`--history-limit 10000 --seconds 20`填满RX历史，并检查暂停DOM不变时CAN仍持续到达。
 - `desktop/tests/can_operations_hardware.py`：发行包原生文件操作与实际CAN发送核对；有界保存最近24条查询/错误事件、关闭前后状态及失败位置，超时保留原报告；`--all-bitrates`在速率台架上通过界面应用四档并收取物理CAN；`--monitor-seconds 5..60`加入六阶段参数/曲线观察，`--detail-window 60`扩大可见历史，不修改采样；`--history-limit 10000 --monitor-seconds 20`检查填满RX、暂停及大历史CSV导出逐格核对。
 
