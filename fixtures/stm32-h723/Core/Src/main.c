@@ -32,6 +32,21 @@ volatile struct {
 } can_bitrate_bench[2]={{.current=1000000},{.current=1000000}};
 volatile CAN_LoadControl dual_load_bench;
 static CAN_LoadState dual_load_state;
+volatile uint32_t can_bench_clock_us;
+volatile uint32_t can_bench_tx_free[2];
+static uint32_t bench_previous_cycles,bench_fractional_cycles;
+static uint32_t load_micros(void)
+{
+  uint32_t value=can_bench_clock_us;
+  CAN_LoadClock(DWT->CYCCNT,SystemCoreClock/1000000U,
+      &bench_previous_cycles,&bench_fractional_cycles,&value);
+  can_bench_clock_us=value;
+  return value;
+}
+static uint32_t load_receive_time(void)
+{
+  return dual_load_state.clock_hz==1000000U?load_micros():HAL_GetTick();
+}
 static unsigned load_send(unsigned bus,const CAN_Frame *frame,void *context)
 {
   (void)context;
@@ -83,7 +98,7 @@ static void second_bus_process(void)
     if (result!=HAL_OK) { ++can2_errors; break; }
     ++can2_rx_count;
     can_bench[1].last_rx=frame;++can_bench[1].received;
-    if (CAN_LoadReceive(&dual_load_bench,&dual_load_state,1,&frame,HAL_GetTick())) continue;
+    if (CAN_LoadReceive(&dual_load_bench,&dual_load_state,1,&frame,load_receive_time())) continue;
     if (frame.remote) continue;
     if (SIM_IMU_ENABLED && (frame.id==SIM_IMU_CAN_ID || frame.id==0x6FF))
       (void)ImuSim_OnFrame(&imu_sim2,&frame,HAL_GetTick());
@@ -150,6 +165,11 @@ int main(void)
 
   HAL_Init();
   clock_init();
+#if CAN_DUAL_BENCH
+  CoreDebug->DEMCR|=CoreDebug_DEMCR_TRCENA_Msk;
+  DWT->CTRL|=DWT_CTRL_CYCCNTENA_Msk;
+  bench_previous_cycles=DWT->CYCCNT;
+#endif
   (void)LCD_Init(); /* Display failure must not prevent CAN operation. */
   if (CAN_Bus_Init() != HAL_OK) fail(4);
   MotorSim_Init(&motor_sim, HAL_GetTick());
@@ -181,7 +201,7 @@ int main(void)
       if (result != HAL_OK) { ++can_errors; break; }
 #if CAN_DUAL_BENCH
       can_bench[0].last_rx=rx;++can_bench[0].received;
-      if (CAN_LoadReceive(&dual_load_bench,&dual_load_state,0,&rx,HAL_GetTick())) continue;
+      if (CAN_LoadReceive(&dual_load_bench,&dual_load_state,0,&rx,load_receive_time())) continue;
       if (rx.remote) continue;
 #endif
       can_last_rx = rx;
@@ -225,7 +245,17 @@ int main(void)
         !can_bus_off && !can2_bus_off &&
         !can_bitrate_bench[0].paused && !can_bitrate_bench[1].paused &&
         can_bench[0].trigger==can_bench[0].done && can_bench[1].trigger==can_bench[1].done;
-    CAN_LoadPoll(&dual_load_bench,&dual_load_state,HAL_GetTick(),load_allowed,load_send,NULL);
+    uint32_t now_us=load_micros();
+    bool new_load_request=dual_load_bench.request && dual_load_bench.request!=dual_load_bench.done;
+    bool load_us=new_load_request && dual_load_bench.command?
+        dual_load_bench.command>=2:dual_load_state.clock_hz==1000000U;
+    if (load_us) CAN_LoadPollUs(&dual_load_bench,&dual_load_state,now_us,load_allowed,load_send,NULL);
+    else CAN_LoadPoll(&dual_load_bench,&dual_load_state,HAL_GetTick(),load_allowed,load_send,NULL);
+    can_bench_tx_free[0]=HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1);
+    can_bench_tx_free[1]=HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan2);
+    /* Fixture display work must not set the source rate ceiling. This affects
+     * only explicit microsecond stress runs; the analyzers and apps still draw. */
+    if (load_us && dual_load_bench.active) continue;
 #endif
     LCD_Status display = {
       .tx = can_tx_queued, .busy = can_tx_busy, .rx = can_rx_count,

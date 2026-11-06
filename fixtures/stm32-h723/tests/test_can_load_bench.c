@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
-_Static_assert(sizeof(CAN_LoadControl)==152,"SWD control layout");
+_Static_assert(sizeof(CAN_LoadControl)==160,"SWD control layout");
 _Static_assert(offsetof(CAN_LoadControl,request)==16,"SWD trigger offset");
 _Static_assert(offsetof(CAN_LoadControl,bus)==40,"SWD counter offset");
 static CAN_LoadState state;
@@ -37,8 +37,8 @@ int main(void) {
   poll(100,true);assert(calls[0]==1 && calls[1]==1);
   poll(101,true);busy[0]=1;poll(102,true);
   assert(control.bus[0].tx_queued==2 && control.bus[0].tx_busy==1 && control.bus[1].tx_queued==3);
-  poll(102,true);assert(control.active==2 && control.finished_ms==102);
-  assert(control.bus[0].tx_done_ms==102 && control.bus[1].tx_done_ms==102);
+  poll(102,true);assert(control.active==2 && control.finished_at==102);
+  assert(control.bus[0].tx_done_at==102 && control.bus[1].tx_done_at==102);
   // Physical sink validation is independent of source enqueue success.
   for (unsigned bus=0;bus<2;bus++) {
     assert(CAN_LoadReceive(&control,&state,bus,&frames[1-bus][0],103));
@@ -47,7 +47,7 @@ int main(void) {
     assert(CAN_LoadReceive(&control,&state,bus,&frames[1-bus][0],107));
     assert(control.bus[bus].rx_unique==3 && control.bus[bus].rx_duplicates==1);
     assert(control.bus[bus].rx_gap_events==1 && control.bus[bus].rx_out_of_order==1);
-    assert(control.bus[bus].rx_first_ms==103 && control.bus[bus].rx_last_ms==106);
+    assert(control.bus[bus].rx_first_at==103 && control.bus[bus].rx_last_at==106);
   }
   CAN_Frame bad=frames[0][0];bad.data[0]^=1;
   assert(CAN_LoadReceive(&control,&state,1,&bad,108) && control.bus[1].rx_stale==1);
@@ -87,5 +87,32 @@ int main(void) {
   bad=frames[0][0];uint32_t last=CAN_LOAD_MAX_FRAMES-1;
   for (unsigned i=0;i<4;i++) bad.data[4+i]=(uint8_t)(last>>(i*8));
   assert(CAN_LoadReceive(&control,&state,1,&bad,1) && control.bus[1].rx_unique==1);
+  // Microsecond source exceeds 1 kHz and can isolate either physical bus.
+  fresh(4000,3,9);control.command=2;
+  CAN_LoadPollUs(&control,&state,100,true,send_frame,&control);
+  assert(control.clock_hz==1000000 && control.bus_mask==1 && calls[0]==1 && !calls[1]);
+  CAN_LoadPollUs(&control,&state,349,true,send_frame,&control);assert(calls[0]==1);
+  CAN_LoadPollUs(&control,&state,350,true,send_frame,&control);
+  CAN_LoadPollUs(&control,&state,600,true,send_frame,&control);
+  assert(control.active==2 && control.bus[0].tx_done_at==600 && !calls[1]);
+  fresh(10000,3,9);control.command=3;
+  CAN_LoadPollUs(&control,&state,UINT32_MAX-99,true,send_frame,&control);
+  CAN_LoadPollUs(&control,&state,0,true,send_frame,&control);
+  CAN_LoadPollUs(&control,&state,100,true,send_frame,&control);
+  assert(control.active==2 && !calls[0] && calls[1]==3 && control.bus_mask==2);
+  fresh(10000,3,9);control.command=4;
+  CAN_LoadPollUs(&control,&state,0,true,send_frame,&control);
+  CAN_LoadPollUs(&control,&state,1000,true,send_frame,&control);
+  CAN_LoadPollUs(&control,&state,1000,true,send_frame,&control);
+  assert(calls[0]==2 && calls[1]==2 && control.bus[0].skipped_slots==9);
+  fresh(10001,3,9);control.command=2;
+  CAN_LoadPollUs(&control,&state,0,true,send_frame,&control);assert(control.result==1 && !calls[0]);
+  // DWT conversion carries fractional cycles and handles the 32-bit wrap.
+  uint32_t previous=UINT32_MAX-199,remainder=0,micros=UINT32_MAX;
+  assert(CAN_LoadClock(0,400,&previous,&remainder,&micros)==UINT32_MAX && remainder==200);
+  assert(CAN_LoadClock(200,400,&previous,&remainder,&micros)==0 && !remainder);
+  assert(CAN_LoadClock(399,400,&previous,&remainder,&micros)==0 && remainder==199);
+  assert(CAN_LoadClock(600,400,&previous,&remainder,&micros)==1 && !remainder);
+  assert(CAN_LoadClock(800,0,&previous,&remainder,&micros)==1 && previous==600);
   puts("CAN load bench: exact bytes, independent sinks, nonce/sequence bitmap, wrap, busy/error, no catch-up, stop and admission PASS");
 }
