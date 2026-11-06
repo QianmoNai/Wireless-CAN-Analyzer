@@ -37,9 +37,25 @@ final class LanTransport implements AutoCloseable {
    DataInputStream in=new DataInputStream(tls.getInputStream());byte[] accepted=new byte[4];in.readFully(accepted);if(!Arrays.equals(accepted,new byte[]{'O','K','0','1'}))throw new IOException("设备未接受局域网连接，请检查屏幕通信模式");
    tls.setSoTimeout(12000);listener.connected(this);
    new Thread(()->{try{while(!closed){byte[] p=writes.poll(3,TimeUnit.SECONDS);if(p==null){p=new byte[20];p[0]=1;p[1]=0x7f;}out.write(p);out.flush();}}catch(Exception e){failure(e);}},"CAN-LAN-write").start();
-   while(!closed){byte[] p=new byte[20];in.readFully(p);if(p[0]!=1)throw new IOException("局域网报文格式错误");if(p[1]!=0x7f)listener.packet(this,p);}
+   readPackets(in);
   }catch(Exception e){failure(e);}
  },"CAN-LAN-connect").start();}
+ void readPackets(InputStream in)throws IOException{
+  // Read available TLS plaintext in bulk, without waiting for a full batch.
+  // Firmware can combine 64 frames; retain a private array for each callback.
+  byte[] buffer=new byte[1280],packet=new byte[20];int filled=0;
+  while(!closed){
+   int count=in.read(buffer);if(count<0)throw new EOFException();
+   for(int offset=0;offset<count&&!closed;){
+    int n=Math.min(20-filled,count-offset);System.arraycopy(buffer,offset,packet,filled,n);filled+=n;offset+=n;
+    if(filled==20){
+     if(packet[0]!=1)throw new IOException("局域网报文格式错误");
+     if(packet[1]!=0x7f)listener.packet(this,packet);
+     packet=new byte[20];filled=0;
+    }
+   }
+  }
+ }
  boolean send(byte[] p){return !closed&&p.length==20&&writes.offer(p.clone());}
  static String failureMessage(Exception e){
   if(e instanceof SocketTimeoutException)return "局域网连接超时，请检查 Wi-Fi 和设备模式";
