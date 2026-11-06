@@ -2,6 +2,7 @@
 #include "lcd_display.h"
 #include "motor_sim.h"
 #include "imu_sim.h"
+#include "can_load_bench.h"
 
 /* Debugger watch variables. No UART or board LED dependency. */
 volatile uint32_t can_tx_queued, can_tx_busy, can_rx_count, can_errors;
@@ -29,6 +30,14 @@ volatile struct {
 volatile struct {
   uint32_t rate, request, done, result, current, paused;
 } can_bitrate_bench[2]={{.current=1000000},{.current=1000000}};
+volatile CAN_LoadControl dual_load_bench;
+static CAN_LoadState dual_load_state;
+static unsigned load_send(unsigned bus,const CAN_Frame *frame,void *context)
+{
+  (void)context;
+  HAL_StatusTypeDef result=bus?CAN_Bus2_Send(frame):CAN_Bus_Send(frame);
+  return result==HAL_OK?0:result==HAL_BUSY?1:2;
+}
 static void bench_rate(unsigned bus)
 {
   uint32_t request=can_bitrate_bench[bus].request;
@@ -74,6 +83,7 @@ static void second_bus_process(void)
     if (result!=HAL_OK) { ++can2_errors; break; }
     ++can2_rx_count;
     can_bench[1].last_rx=frame;++can_bench[1].received;
+    if (CAN_LoadReceive(&dual_load_bench,&dual_load_state,1,&frame,HAL_GetTick())) continue;
     if (frame.remote) continue;
     if (SIM_IMU_ENABLED && (frame.id==SIM_IMU_CAN_ID || frame.id==0x6FF))
       (void)ImuSim_OnFrame(&imu_sim2,&frame,HAL_GetTick());
@@ -171,6 +181,7 @@ int main(void)
       if (result != HAL_OK) { ++can_errors; break; }
 #if CAN_DUAL_BENCH
       can_bench[0].last_rx=rx;++can_bench[0].received;
+      if (CAN_LoadReceive(&dual_load_bench,&dual_load_state,0,&rx,HAL_GetTick())) continue;
       if (rx.remote) continue;
 #endif
       can_last_rx = rx;
@@ -210,6 +221,11 @@ int main(void)
 #if CAN_DUAL_BENCH
     bench_send(0);bench_send(1);
     second_bus_process();
+    bool load_allowed=!can1_periodic && !can2_periodic &&
+        !can_bus_off && !can2_bus_off &&
+        !can_bitrate_bench[0].paused && !can_bitrate_bench[1].paused &&
+        can_bench[0].trigger==can_bench[0].done && can_bench[1].trigger==can_bench[1].done;
+    CAN_LoadPoll(&dual_load_bench,&dual_load_state,HAL_GetTick(),load_allowed,load_send,NULL);
 #endif
     LCD_Status display = {
       .tx = can_tx_queued, .busy = can_tx_busy, .rx = can_rx_count,

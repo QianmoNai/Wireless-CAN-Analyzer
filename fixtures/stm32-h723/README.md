@@ -22,6 +22,8 @@ bash fixtures/stm32-h723/tests/run.sh
 
 双路台架还提供`can_bitrate_bench[2]`，每项六个u32：`rate/request/done/result/current/paused`。写`rate`后最后递增非零`request`，等待`done`匹配及`result=HAL_OK`；`rate=0`先在发送FIFO排空后停控制器，其他有效值仅125000/250000/500000/1000000。改变分析仪速率期间保持STM32停止，再启动相同速率，避免有意制造速率不匹配。请求由前台处理，不在SWD直接篡改HAL句柄或运行中的时序寄存器。单路构建不提供这一测试入口。
 
+`dual_load_bench`为双路持续负载入口，START只在两路周期模拟关闭、控制器正常且无未完成逐帧请求时允许。STM32内部定频发送标准ID 0x6A0/0x6B0、8字节运行nonce与序号，每路1..1000帧每秒、最多60000帧；错过时隙不突发补发。两路独立接收位图记录完整序号、重复、乱序和缺口，源入队与物理交付分别计数。显式STOP后才允许新一轮START，不清除旧计数，未知结果不得覆盖或重放。布局与状态见[can_load_bench.h](Core/Inc/can_load_bench.h)，自动验收入口及恢复要求见[自主测试](../../docs/AUTONOMOUS_TESTING.md#双机持续定频物理负载)。该入口不包含电机控制命令，单路构建不启用。
+
 `scripts/test-can-bitrates-hardware.py --fixture stm32h723-dual --elf <ELF> --port <USB身份> --bus 1 --channel 1 --modes usb ble wifi --output /tmp/can-rates.json`测试四档速率，每档标准/扩展、数据/远程帧双向实际核对，最后停止STM32、将分析仪恢复1Mbps、再恢复STM32与周期上报。USB、BLE、Wi-Fi切换及恢复仍使用产品协议。脚本共用台架互斥锁，不能与双机或其他硬件测试并行运行。
 
 在启动双机测试前，通过对应 ELF 符号把两个周期开关置零；测试结束先恢复两台分析仪 USB＋CAN，再恢复周期开关。双机转发期间同时运行两套相同反馈 ID 会混合测试数据。

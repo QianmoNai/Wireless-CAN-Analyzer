@@ -14,7 +14,7 @@ set(CMSIS_DIR "${STM32_CUBE_H7}/Drivers/CMSIS")
 if(NOT EXISTS "${HAL_DIR}/Src/stm32h7xx_hal_fdcan.c")
   message(FATAL_ERROR "Set STM32_CUBE_H7 to an installed STM32CubeH7 package")
 endif()
-add_executable(can_h723 Core/Src/main.c Core/Src/can_bus.c Core/Src/lcd_display.c Core/Src/motor_sim.c Core/Src/imu_sim.c startup_stm32h723xx.s
+add_executable(can_h723 Core/Src/main.c Core/Src/can_bus.c Core/Src/lcd_display.c Core/Src/motor_sim.c Core/Src/imu_sim.c Core/Src/can_load_bench.c startup_stm32h723xx.s
   "${CMSIS_DIR}/Device/ST/STM32H7xx/Source/Templates/system_stm32h7xx.c")
 foreach(driver hal hal_cortex hal_rcc hal_rcc_ex hal_gpio hal_pwr hal_pwr_ex hal_flash hal_flash_ex hal_fdcan hal_spi hal_spi_ex hal_dma)
   target_sources(can_h723 PRIVATE "${HAL_DIR}/Src/stm32h7xx_${driver}.c")

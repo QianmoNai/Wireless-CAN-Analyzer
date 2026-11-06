@@ -4,6 +4,8 @@ project_dir="$(cd "$(dirname "$0")/.." && pwd)"
 test_dir="$(mktemp -d)"
 trap 'rm -rf "$test_dir"' EXIT
 common=(-std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -g -I "$project_dir/Core/Inc")
+cc "${common[@]}" "$project_dir/tests/test_can_load_bench.c" "$project_dir/Core/Src/can_load_bench.c" -o "$test_dir/test_load"
+"$test_dir/test_load"
 for profile in 1 2 3 4 5 6 7; do
  cc "${common[@]}" -DSIM_PROFILE="$profile" "$project_dir/tests/test_motor_sim.c" "$project_dir/Core/Src/motor_sim.c" -o "$test_dir/test"
  "$test_dir/test"
