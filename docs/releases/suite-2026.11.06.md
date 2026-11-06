@@ -14,7 +14,11 @@
 
 Android直接安装`CAN-Scope-Android-1.21.10-debug.apk`，Android 8.0+，沿用正式包名/开发签名，升级保留配置；不包含独立台架调试包。手机支持BLE/Wi-Fi，尚未实现USB Host。
 
-桌面提供Windows 10/11 x64 ZIP和Ubuntu 24.04构建的Linux x64 tar.gz；GitHub直接下载完整压缩包，Gitee下载同平台的全部`.partNN`分卷并按`MERGE-INSTRUCTIONS.txt`合并。使用`SHA256SUMS`核验，再完整解压运行`CAN-Scope.exe`或`CAN-Scope`，无需Python。Windows未代码签名。请勿混用旧版或不同站点的分卷。
+桌面提供Windows 10/11 x64 ZIP和Ubuntu 24.04构建的Linux x64 tar.gz；GitHub直接下载完整压缩包。Gitee仓库附件1 GB配额已满，保留历史发行，当前仅在Gitee托管固件、APK、源码、校验文件和发行说明；桌面完整包使用下方同版GitHub直链，另附`DESKTOP-DOWNLOADS.txt`。使用`SHA256SUMS`核验，再完整解压运行`CAN-Scope.exe`或`CAN-Scope`，无需Python。Windows未代码签名。
+
+- [Windows x64完整包](https://github.com/QianmoNai/Wireless-CAN-Analyzer/releases/download/suite-2026.11.06/CAN-Scope-Desktop-1.2.20-Windows-x64.zip)
+- [Linux x64完整包](https://github.com/QianmoNai/Wireless-CAN-Analyzer/releases/download/suite-2026.11.06/CAN-Scope-Desktop-1.2.20-Linux-x64.tar.gz)
+
 
 固件仅适用于本项目ESP32-S3 / 4MB Flash；ZIP含bootloader、分区表、app、Linux/Windows烧录脚本、构建信息和校验文件，按包内说明选择实际端口，不执行全片擦除。默认固件关闭实验双机6Mbps、测试回环和BLE诊断；CAN TLS批次64、UART TLS批次16，UART retry=25ms / TTL=1000ms，实验TCP_NODELAY/关闭省电均OFF。
 
