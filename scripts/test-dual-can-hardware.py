@@ -342,6 +342,7 @@ def main():
         report['ok']=True
     except Exception as e:
         report['failure']=type(e).__name__
+        report['failure_message']=str(e)[:240]
         if fixture:
             report['failed_case']=getattr(fixture,'active_case',None)
             try:

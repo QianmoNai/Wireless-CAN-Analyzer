@@ -18,16 +18,30 @@ void board_status_led_update(bool connected,uint32_t rx_count,uint32_t tx_count,
 { (void)connected;(void)rx_count;(void)tx_count;(void)now_ms; }
 // Additional CAN-owner scenario consumes frames with no App connection.
 static bool simulated_dual;static unsigned dual_taken;
+static unsigned dual_test_case,dual_test_flags,dual_generation_checks;
+static uint32_t simulated_dual_generation=1;
+static bool dual_completion_seen;
 void dual_link_set_owner(TaskHandle_t owner) {(void)owner;}
 void dual_link_can_rx(const uint8_t packet[20]) {(void)packet;}
 bool dual_link_can_take(uint8_t packet[20]) {
- if(!simulated_dual||dual_taken>=3)return false;
+ if(!simulated_dual||dual_taken>=(dual_test_case?1:3))return false;
  memset(packet,0,20);packet[0]=1;packet[1]=0x10;packet[2]=dual_taken;packet[3]=8;
+ if(dual_test_case)packet[2]=dual_test_flags;
  wire_put_u32(packet+4,0x321+dual_taken);memset(packet+8,dual_taken+1,8);dual_taken++;return true;
+}
+bool dual_link_can_take_timed(uint8_t packet[20],uint32_t *created,uint32_t *generation) {
+ if(!dual_link_can_take(packet))return false;
+ *created=(uint32_t)(esp_timer_get_time()/1000)-(dual_test_case==29?90:0);
+ *generation=simulated_dual_generation;return true;
+}
+uint32_t dual_link_generation(void) {
+ if(dual_test_case==34&&dual_completion_seen&&++dual_generation_checks==3)simulated_dual_generation++;
+ return simulated_dual_generation;
 }
 bool dual_link_connected(void) {return simulated_dual;}
 bool network_dual_mode(void) {return simulated_dual;}
 static uint32_t simulated_dual_drops,simulated_bridge_drops;
+void dual_link_can_tx_failed(void) {simulated_dual_drops++;}
 uint32_t dual_link_dropped(void) {return simulated_dual_drops;}
 struct queue {size_t size;unsigned count,limit;uint8_t data[4096];};
 static struct queue *allocated[8];static unsigned allocated_count;
@@ -61,7 +75,17 @@ void vTaskDelay(unsigned ms){
  assert(owner_priority>5);
  now_ms+=ms;
  if(inflight){assert(inflight->header.id==snapshot_id);assert(inflight->buffer_len==snapshot_len);assert(!memcmp(inflight->buffer,snapshot,snapshot_len));if(!(scenario==16&&now_ms<400)){bool failed=((scenario==4||scenario==9)&&tx_num==2)||scenario==10||scenario==11||(scenario==12&&tx_num<4);
- if(failed&&driver_callbacks.on_error){twai_error_event_data_t error={0};if(scenario==11||scenario==12)error.err_flags.arb_lost=true;else error.err_flags.ack_err=true;driver_callbacks.on_error((void*)1,&error,NULL);}
+ if(dual_test_case){
+  failed=dual_test_case==24?tx_num<3:true;
+  dual_completion_seen=true;
+  if(dual_test_case==30)simulated_dual_generation++;
+  if(dual_test_case==31)simulated_dual=false;
+  if(dual_test_case==33)simulated_uart=true;
+ }
+ if(failed&&driver_callbacks.on_error){twai_error_event_data_t error={0};if(dual_test_case){
+ if(dual_test_case!=26&&dual_test_case!=28)error.err_flags.arb_lost=true;
+ if(dual_test_case==26||dual_test_case==27)error.err_flags.ack_err=true;
+ }else if(scenario==11||scenario==12)error.err_flags.arb_lost=true;else error.err_flags.ack_err=true;driver_callbacks.on_error((void*)1,&error,NULL);}
  if(!failed)completed_tx_bits+=snapshot_len==8?111:79;
  twai_tx_done_event_data_t e={.is_tx_success=!failed};inflight=NULL;driver_callbacks.on_tx_done((void*)1,&e,NULL);}}
  if(now_ms==100&&(scenario==2||scenario==8))link_up=false;
@@ -114,8 +138,10 @@ int twai_node_reconfig_timing(twai_node_handle_t n,const twai_timing_advanced_co
 int twai_node_get_info(twai_node_handle_t n,twai_node_status_t*s,void*x){memset(s,0,sizeof(*s));s->state=driver_state;return 0;}
 int twai_node_recover(twai_node_handle_t n){if(scenario!=17)driver_state=0;return 0;}
 int twai_node_receive_from_isr(twai_node_handle_t n,twai_frame_t*f){if(!receive_ready)return 2;receive_ready=false;f->header=receive_header;return 0;}
-int twai_node_transmit(twai_node_handle_t n,const twai_frame_t*f,int wait){assert(!inflight);assert(f->buffer_len<=8);snapshot_id=f->header.id;snapshot_len=f->buffer_len;memcpy(snapshot,f->buffer,f->buffer_len);memset(last_data,0,8);memcpy(last_data,f->buffer,f->buffer_len);tx_num++;last_tx_ms=now_ms;if(scenario==19)return ESP_ERR_INVALID_STATE;inflight=f;return 0;}
+int twai_node_transmit(twai_node_handle_t n,const twai_frame_t*f,int wait){assert(!inflight);assert(f->buffer_len<=8);snapshot_id=f->header.id;snapshot_len=f->buffer_len;memcpy(snapshot,f->buffer,f->buffer_len);memset(last_data,0,8);memcpy(last_data,f->buffer,f->buffer_len);tx_num++;last_tx_ms=now_ms;if(dual_test_case){assert(f->header.ide==!!(dual_test_flags&1)&&f->header.rtr==!!(dual_test_flags&2));}
+ if(scenario==19||dual_test_case==32)return ESP_ERR_INVALID_STATE;inflight=f;return 0;}
 void ble_bridge_init(QueueHandle_t q,QueueHandle_t queries){
+ if(dual_test_case)return;
  if(scenario==22){bridge_packet_t rate={.bytes={1,0x12}};wire_put_u32(rate.bytes+4,1000000);wire_put_u32(rate.bytes+16,0x622);xQueueSend(q,&rate,0);stop_flag=true;return;}
  if(scenario==23){bridge_packet_t query={.bytes={1,0x14}};wire_put_u32(query.bytes+4,0x123);wire_put_u32(query.bytes+8,20);wire_put_u32(query.bytes+16,0x623);xQueueSend(queries,&query,0);stop_flag=true;return;}
  if(scenario==0||scenario==13||scenario==14||scenario==17||scenario==20)return;
@@ -300,6 +326,23 @@ int main(void){
  assert(tx_num>=40&&tx_num<=47&&query_ack_count==1&&query_acks[0].bytes[2]==0&&wire_u32(query_acks[0].bytes+16)==0x623);
  for(unsigned i=0;i<allocated_count;i++)free(allocated[i]);allocated_count=0;
  puts("PASS: first status-query lease after session reset survives delayed owner cleanup.");
+ // Exercise the real owner, completion ISR and mutable TX buffer, not only
+ // the retry policy helper. Only pure, known arbitration failures may replay.
+ for(unsigned flags=0;flags<4;flags++)for(unsigned test=24;test<=34;test++){
+  scenario=dual_test_case=test;dual_test_flags=flags;dual_generation_checks=0;dual_completion_seen=false;
+  simulated_dual_generation=7;simulated_dual_drops=0;simulated_dual=true;simulated_uart=false;dual_taken=0;
+  link_up=false;timer_active=false;busy=false;stop_flag=false;inflight=NULL;receive_ready=false;
+  now_ms=tx_num=rate_changes=driver_state=0;completed_tx_bits=emitted_load_count=raw_tx_events=query_ack_count=0;
+  tx_count=tx_failed=tx_arbitration=raw_tx_success_events=raw_tx_failure_events=raw_tx_arbitration_events=raw_query_events=tx_uart_logs=0;
+  if(setjmp(done)==0)app_main();
+  assert(dual_taken==1&&tx_uart_logs==0&&!timer_active);
+  if(test==24)assert(tx_num==3&&tx_count==1&&tx_arbitration==2&&simulated_dual_drops==0);
+  else if(test==25)assert(tx_num==3&&tx_count==0&&tx_arbitration==3&&simulated_dual_drops==1);
+  else assert(tx_num==1&&tx_count==0&&simulated_dual_drops==1);
+  for(unsigned i=0;i<allocated_count;i++)free(allocated[i]);allocated_count=0;
+ }
+ dual_test_case=0;simulated_dual=false;simulated_uart=false;
+ puts("PASS: real CAN owner bounded arbitration retry, STD/EXT/RTR lifetime, terminal accounting, mixed/unknown/ACK/driver no replay, original expiry, generation and UART/disconnect cancellation.");
  assert(rate_events>0);
  puts("PASS: actual firmware owner loop: boot silence, bounded pulse, disconnect stop, explicit stop, TX failure abort, bitrate timing, queued pulse cancellation, TX buffer lifetime, 1000 Hz polling payload/pacing, polling disconnect and TX failure; device-timed rate publication.");
  puts("PASS: CAN load owner integration: all successful TX origins, no duplicate/failed TX, queue-full RX, periodic wire events, rate-change window and real query TX telemetry without UART flood.");

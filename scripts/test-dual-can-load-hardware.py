@@ -20,10 +20,10 @@ from can_scope.usb_transport import prepare_usb
 from hardware_bench_lock import hardware_bench_lock
 from usb_management import LocalUsb
 
-STATS=('tx_queued tx_busy tx_errors skipped_slots tx_done_ms rx_unique '
+STATS=('tx_queued tx_busy tx_errors skipped_slots tx_done_at rx_unique '
        'rx_duplicates rx_out_of_order rx_gap_events rx_bad rx_stale '
-       'rx_last_sequence rx_first_ms rx_last_ms').split()
-HEAD='command rate_hz frames nonce request done result active started_ms finished_ms'.split()
+       'rx_last_sequence rx_first_at rx_last_at').split()
+HEAD='command rate_hz frames nonce request done result active started_at finished_at'.split()
 
 
 def module(name,filename):
@@ -40,11 +40,13 @@ def main():
     parser.add_argument('--b',required=True)
     parser.add_argument('--rates',type=int,nargs='+',default=[20,50,100,200,500,1000])
     parser.add_argument('--seconds',type=int,default=10)
+    parser.add_argument('--microseconds',action='store_true',help='Use the opt-in microsecond fixture source; suppresses only its local LCD while load runs')
     parser.add_argument('--stop-file',type=Path)
     parser.add_argument('--output',type=Path,required=True)
     args=parser.parse_args()
-    if not 1<=args.seconds<=60 or any(not 1<=r<=1000 for r in args.rates):
-        parser.error('Duration 1..60 seconds; rates 1..1000 frames/s/direction')
+    ceiling=10000 if args.microseconds else 1000
+    if not 1<=args.seconds<=60 or any(not 1<=r<=ceiling or r*args.seconds>300000 for r in args.rates):
+        parser.error(f'Duration 1..60 seconds; rates 1..{ceiling} frames/s/direction; at most300000 frames per phase')
     ports=[args.a,args.b];fixture=None;base=None;identities=[]
     report=dict(ok=False,scope='STM32 generates simultaneous paced source streams; independent physical CAN sinks verify nonce, every sequence, duplicates and order. Requested rate is separate from observed rate; no distance/motor proof',phases=[])
     args.output.parent.mkdir(parents=True,exist_ok=True)
@@ -57,8 +59,8 @@ def main():
             return dict(identity=identity.hex(),dual=u.dual(6),diagnostics=u.diagnostics(),monitor=u.monitor_drops())
         finally:u.close()
     def snapshot():
-        before=time.monotonic();words=fixture.read(base,38);after=time.monotonic()
-        return dict(**dict(zip(HEAD,words[:10])),bus=[dict(zip(STATS,words[10+i*14:24+i*14]))for i in range(2)],host_before_s=before,host_after_s=after)
+        before=time.monotonic();words=fixture.read(base,40 if args.microseconds else 38);after=time.monotonic()
+        return dict(**dict(zip(HEAD,words[:10])),bus=[dict(zip(STATS,words[10+i*14:24+i*14]))for i in range(2)],clock_hz=words[38]if args.microseconds else 1000,bus_mask=words[39]if args.microseconds else 3,host_before_s=before,host_after_s=after)
     def command(op,rate=0,count=0,nonce=0):
         request=fixture.next_request(base+16,base+20)
         config=[op,rate,count,nonce]if op else [0,*fixture.read(base+4,3)]
@@ -79,6 +81,12 @@ def main():
         fixture=hardware.Fixture(args.elf)
         if 'dual_load_bench'not in fixture.symbols:raise ValueError('Fixture has no continuous-load instrumentation')
         base=fixture.symbols['dual_load_bench'];report['fixture_image_sha256']=fixture.image_sha256
+        report['clock_hz']=1000000 if args.microseconds else 1000
+        if args.microseconds:
+            if not all(k in fixture.symbols for k in ['can_bench_clock_us','can_bench_tx_free']):raise ValueError('Microsecond fixture required')
+            before=fixture.read(fixture.symbols['can_bench_clock_us'])[0];time.sleep(.1)
+            after=fixture.read(fixture.symbols['can_bench_clock_us'])[0]
+            if not 50000<((after-before)&0xffffffff)<250000:raise RuntimeError('Microsecond fixture clock not advancing')
         # Verify both physical USB identities before any mode change/cleanup.
         for port in ports:
             u=LocalUsb(port)
@@ -112,7 +120,9 @@ def main():
                 phase['nonce']=nonce
                 phase_error=None
                 try:
-                    command(1,rate,rate*args.seconds,nonce)
+                    command(4 if args.microseconds else 1,rate,rate*args.seconds,nonce)
+                    admitted=snapshot()
+                    if admitted['clock_hz']!=report['clock_hz']or admitted['bus_mask']!=3:raise RuntimeError('Source clock or bus mismatch')
                     deadline=time.monotonic()+args.seconds+max(3,args.seconds*.25)
                     while True:
                         row=snapshot();phase['ticks'].append(row);save()
@@ -139,13 +149,17 @@ def main():
                 phase['physical_complete']=all(b['tx_queued']==n and b['rx_unique']==n and not any(b[k]for k in ['tx_errors','rx_duplicates','rx_out_of_order','rx_gap_events','rx_bad','rx_stale'])for b in frozen['bus'])
                 phase['observed_per_direction_hz']=[]
                 for b in frozen['bus']:
-                    elapsed=(b['tx_done_ms']-frozen['started_ms'])&0xffffffff
-                    receive=(b['rx_last_ms']-b['rx_first_ms'])&0xffffffff
-                    phase['observed_per_direction_hz'].append(dict(source=(n-1)*1000/elapsed if elapsed else None,destination=(b['rx_unique']-1)*1000/receive if receive and b['rx_unique']>1 else None))
+                    elapsed=(b['tx_done_at']-frozen['started_at'])&0xffffffff
+                    receive=(b['rx_last_at']-b['rx_first_at'])&0xffffffff
+                    phase['observed_per_direction_hz'].append(dict(source=(n-1)*report['clock_hz']/elapsed if elapsed else None,destination=(b['rx_unique']-1)*report['clock_hz']/receive if receive and b['rx_unique']>1 else None))
                 phase['requested_rate_qualified']=all(b['source']is not None and b['source']>=rate*.98 for b in phase['observed_per_direction_hz'])
                 phase['no_new_device_drops']=all(not any(d['monitor'].values())for d in phase['deltas'])
                 phase['accounting_complete']=all(d==dict(sent=n,received=n,dropped=0)for d in phase['dual_deltas'])
-                phase['ok']=phase_error is None and phase['physical_complete']and phase['requested_rate_qualified']and phase['no_new_device_drops']and phase['accounting_complete']and not any(phase['health'].values())
+                phase['source_fifo_drained']=True
+                if args.microseconds:
+                    phase['source_fifo_free']=fixture.read(fixture.symbols['can_bench_tx_free'],2)
+                    phase['source_fifo_drained']=phase['source_fifo_free']==[8,8]
+                phase['ok']=phase_error is None and phase['physical_complete']and phase['source_fifo_drained']and phase['requested_rate_qualified']and phase['no_new_device_drops']and phase['accounting_complete']and not any(phase['health'].values())
                 save();print(json.dumps({k:phase[k]for k in ['requested_per_direction_hz','ok','observed_per_direction_hz','dual_deltas']}),flush=True)
                 if phase_error:raise phase_error
                 if not phase['ok']:raise AssertionError('Paced physical load qualification failed; see separate source, sink and accounting results')

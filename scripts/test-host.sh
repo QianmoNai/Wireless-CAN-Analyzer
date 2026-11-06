@@ -37,6 +37,10 @@ python3 tests/test_can_hardware_bench.py
 python3 tests/test_linux_tcp_info.py
 cc -std=c11 -Wall -Wextra -Werror -Ifirmware/main tests/test_dual_protocol.c tests/dual_crypto_host.c firmware/main/dual_protocol.c firmware/main/dual_session.c -lcrypto -o "$test_build_dir/test_dual_protocol"
 "$test_build_dir/test_dual_protocol"
+cc -std=c11 -Wall -Wextra -Werror -Ddual_mac=real_dual_mac -Ifirmware/main -c tests/dual_crypto_host.c -o "$test_build_dir/dual_cache_crypto.o"
+cc -std=c11 -Wall -Wextra -Werror -Ifirmware/main tests/test_dual_session_cache.c "$test_build_dir/dual_cache_crypto.o" firmware/main/dual_protocol.c firmware/main/dual_session.c -lcrypto -o "$test_build_dir/test_dual_session_cache"
+"$test_build_dir/test_dual_session_cache"
+compile_run test_dual_can_retry -Wall -Wextra -Werror
 cc -std=c11 -Wall -Wextra -Werror -Itests/dual_stubs -Ifirmware/main tests/test_dual_runtime.c tests/dual_runtime_a.c tests/dual_runtime_b.c tests/dual_crypto_host.c firmware/main/dual_protocol.c firmware/main/dual_session.c -lcrypto -o "$test_build_dir/test_dual_runtime"
 "$test_build_dir/test_dual_runtime"
 cc -std=c11 -Wall -Wextra -Werror -DCAN_DUAL_UART_LOOPBACK_TEST=1 -Itests/dual_stubs -Ifirmware/main tests/test_dual_runtime.c tests/dual_runtime_a.c tests/dual_runtime_b.c tests/dual_crypto_host.c firmware/main/dual_protocol.c firmware/main/dual_session.c -lcrypto -o "$test_build_dir/test_dual_uart_loopback"

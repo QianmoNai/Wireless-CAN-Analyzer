@@ -70,6 +70,8 @@ def main():
       if d['first_s']is None:d['first_s']=now
       d['last_s']=now
      link={'usb':UsbTransport,'ble':BleTransport,'wifi':LanTransport}[a.mode](received,lambda _:r['errors'].append('disconnect'))
+     def usb_codec():
+      return dict(crc_errors=link.decoder.crc_errors,discarded_bytes=link.decoder.discarded_bytes)if a.mode=='usb'else{}
      try:
       await bench.select(port,a.mode)
       if a.mode=='usb':await link.connect(port)
@@ -82,7 +84,7 @@ def main():
        if stop and stop.exists():raise InterruptedError('User stop')
        count=rate*a.seconds;nonce=secrets.randbelow(0xffffffff)+1
        current=dict(nonce=nonce,frames=count,bitmap=bytearray((count+7)//8),unique=0,duplicates=0,out_of_order=0,gap_events=0,bad=0,stale=0,next=0,first_s=None,last_s=None)
-       phase=dict(rate_requested_hz=rate,frames_requested=count,nonce=nonce,before=stats[-1],ticks=[],control_probe_ms=[]);r['phases'].append(phase);save()
+       phase=dict(rate_requested_hz=rate,frames_requested=count,nonce=nonce,before=stats[-1],ticks=[],control_probe_ms=[],usb_codec_before=usb_codec());r['phases'].append(phase);save()
        command(a.bus+1,rate,count,nonce)
        configured=snap()
        if configured['clock_hz']!=1000000 or configured['bus_mask']!=1<<(a.bus-1):raise RuntimeError('Source clock or selected bus mismatch')
@@ -117,13 +119,15 @@ def main():
        phase['source_fifo_free']=f.read(f.symbols['can_bench_tx_free'],2);phase['source_fifo_drained']=phase['source_fifo_free'][a.bus-1]==8
        phase['all_frames_received']=current['unique']==count and not any(current[k]for k in ['duplicates','out_of_order','bad','stale'])
        phase['no_new_reported_drops']=phase['status_delta']['drops']==0
-       phase['ok']=phase['source_fifo_drained']and phase['source_rate_qualified']and phase['all_frames_received']and phase['no_new_reported_drops']and not phase['status_delta']['failures']and not any(phase['health'].values())
+       phase['usb_codec_delta']={k:v-phase['usb_codec_before'][k]for k,v in usb_codec().items()}
+       phase['ok']=phase['source_fifo_drained']and phase['source_rate_qualified']and phase['all_frames_received']and phase['no_new_reported_drops']and not any(phase['usb_codec_delta'].values())and not phase['status_delta']['failures']and not any(phase['health'].values())
        phase['load_packets']=loads[-12:];save();print(json.dumps({k:phase[k]for k in ['rate_requested_hz','actual_source_hz','estimated_source_bus_percent_without_stuffing','all_frames_received','status_delta','ok']}),flush=True)
        # An observed wireless loss is a result, not an excuse to omit higher loads.
        if not phase['source_rate_qualified']:break
       r['ok']=len(r['phases'])==len(a.rates)and all(p['ok']for p in r['phases'])
      except BaseException as e:r.update(failure=type(e).__name__,failure_message=str(e)[:180])
      finally:
+      r['usb_codec_total']=usb_codec()
       try:command(0);r['source_stopped']=True
       except Exception as e:r['source_stop_failure']=type(e).__name__
       try:await link.close()

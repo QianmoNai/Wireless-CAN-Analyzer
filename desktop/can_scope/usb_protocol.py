@@ -17,6 +17,10 @@ def encode(session, payload):
 class Decoder:
     def __init__(self):
         self.buffer = bytearray()
+        # Rejected bytes are not a count of CAN frames. Keep them separate
+        # from CRC-invalid CUSB candidates and the application's queue drops.
+        self.discarded_bytes = 0
+        self.crc_errors = 0
 
     def feed(self, data):
         packets = []
@@ -36,7 +40,9 @@ class Decoder:
                 packets.append((struct.unpack_from('<I', self.buffer, start+4)[0], bytes(self.buffer[start+8:start+28])))
                 offset = start+32
             else:
+                self.crc_errors += 1
                 offset = start+1
         if offset:
+            self.discarded_bytes += offset - 32*len(packets)
             del self.buffer[:offset]
         return packets

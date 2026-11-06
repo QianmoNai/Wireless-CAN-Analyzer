@@ -54,6 +54,8 @@ class CodecTests(unittest.TestCase):
             out.extend(decoder.feed(bytes([byte])))
             self.assertLess(len(decoder.buffer),32)
         self.assertEqual(out,[(0x12345678,payload)]*2)
+        self.assertEqual(decoder.crc_errors, 1)
+        self.assertEqual(decoder.discarded_bytes, 10000+32)
     def test_packet_validation(self):
         for session,payload in [(0,HELLO),(1,b'bad')]:
             with self.assertRaises(ValueError):encode(session,payload)
@@ -67,9 +69,23 @@ class CodecTests(unittest.TestCase):
                 received.extend(decoder.feed(stream[start:start+chunk]))
                 self.assertLess(len(decoder.buffer), 32)
             self.assertEqual(received, expected)
+            self.assertEqual(decoder.crc_errors, 1)
+            self.assertEqual(decoder.discarded_bytes, 37)
         decoder = Decoder()
         self.assertEqual(decoder.feed(b'x'*100000+b'CUS'), [])
         self.assertEqual(decoder.feed(encode(1, HELLO)[3:]), [(1, HELLO)])
+        self.assertEqual(decoder.discarded_bytes, 100000)
+        self.assertEqual(decoder.crc_errors, 0)
+
+    def test_valid_fragmentation_has_no_rejections(self):
+        # Magic appearing inside a CRC-valid payload is data, not another frame.
+        frame = encode(1, b'\x01\x01'+b'CUSB'*4+b'\x00\x00')
+        for split in range(1, len(frame)):
+            decoder = Decoder()
+            self.assertEqual(decoder.feed(frame[:split]), [])
+            self.assertEqual((decoder.crc_errors, decoder.discarded_bytes), (0, 0))
+            self.assertEqual(decoder.feed(frame[split:]), [(1, frame[8:28])])
+            self.assertEqual((decoder.crc_errors, decoder.discarded_bytes), (0, 0))
 
 
 class UsbTests(unittest.IsolatedAsyncioTestCase):

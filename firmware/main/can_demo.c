@@ -17,8 +17,11 @@
 #include "board_status_led.h"
 #include "uart_bridge.h"
 #include "dual_link.h"
+#include "dual_can_retry.h"
 #include "network_link.h"
 #include "can_monitor.h"
+_Static_assert((unsigned)DUAL_CAN_RETRY_ARB==(unsigned)POLL_ERR_ARB,
+               "Dual retry requires the CAN owner's pure arbitration bit");
 static void publish_local_and_ble(const bridge_packet_t *packet)
 {
     board_ui_observe(packet);
@@ -208,6 +211,7 @@ void app_main(void)
     static bridge_packet_t active, pulse_command;
     static twai_frame_t frame;
     uint32_t counter = 0, bitrate = CAN_BITRATE, pulse_sent = 0, pulse_failed = 0;
+    dual_can_retry_t dual_retry={0};
     bool pending = false, recovering = false, demo = false, active_dual = false;
     bool pulse = false, final_frame = false;
     uint8_t ending = 0;
@@ -220,6 +224,8 @@ void app_main(void)
         if (pending && xQueueReceive(tx_done_queue, &result, 0) == pdTRUE) {
             bool success=result.success;
             pending = false;
+            if(active_dual && !dual_can_retry_result(&dual_retry,success,result.errors,(uint32_t)(esp_timer_get_time()/1000),dual_link_connected(),dual_link_generation()) && !success)
+                dual_link_can_tx_failed();
             report_tx(&active, success,result.errors,active_query==0&&!active_dual);
             if(active_query){poll_result(&polls,active_query,success,result.errors,esp_timer_get_time());active_query=0;}
             if (pulse) {
@@ -232,6 +238,7 @@ void app_main(void)
             }
         }
         if(uart_bridge_selected()) {
+            if(dual_retry.waiting){dual_retry.waiting=false;dual_link_can_tx_failed();}
             poll_clear(&polls,1);demo=false;
             if(pulse){publish_pulse(3,&pulse_command,pulse_sent,pulse_failed);pulse=false;}
             ble_bridge_set_motor_busy(false);
@@ -292,7 +299,12 @@ void app_main(void)
         if (!pending) {
             bridge_packet_t command;
             bool have_frame = false;active_dual=false;
-            if (pulse && (ending || now >= next_pulse)) {
+            bool waiting_dual_retry=dual_retry.waiting;
+            bool retry_dual=dual_can_retry_take(&dual_retry,(uint32_t)now,!recovering&&!pulse&&network_dual_mode()&&dual_link_connected(),dual_link_generation());
+            if(waiting_dual_retry&&!retry_dual)dual_link_can_tx_failed();
+            if(retry_dual) {
+                active_dual=true;have_frame=true;
+            } else if (pulse && (ending || now >= next_pulse)) {
                 active = pulse_command;
                 active.bytes[1] = 0x10;
                 active.bytes[2] = 0; // standard data frames only
@@ -305,7 +317,8 @@ void app_main(void)
                 }
                 next_pulse = now + 10;
                 have_frame = true;
-            } else if (!pulse && !recovering && network_dual_mode() && dual_link_can_take(active.bytes)) {
+            } else if (!pulse && !recovering && network_dual_mode() && dual_link_can_take_timed(active.bytes,&dual_retry.created,&dual_retry.generation)) {
+                dual_can_retry_begin(&dual_retry,dual_retry.created,dual_retry.generation);
                 active_dual=true;have_frame=true;
             } else if (!pulse && xQueueReceive(command_queue, &command, 0) == pdTRUE) {
                 if (command.bytes[1] == 0x11) {
@@ -353,7 +366,9 @@ void app_main(void)
                     have_frame=true;
                 }
             }
-            if(active_dual&&!dual_link_connected())have_frame=false;
+            if(active_dual && !dual_can_retry_live(&dual_retry,(uint32_t)(esp_timer_get_time()/1000),network_dual_mode()&&dual_link_connected(),dual_link_generation())) {
+                have_frame=false;dual_retry.waiting=false;dual_link_can_tx_failed();
+            }
             if (have_frame) {
                 frame = (twai_frame_t){
                     .header = {.id = wire_u32(active.bytes + 4), .dlc = active.bytes[3],
@@ -367,6 +382,7 @@ void app_main(void)
                 esp_err_t err = twai_node_transmit(node, &frame, 0);
                 if (err == ESP_OK) pending = true;
                 else {
+                    if(active_dual){dual_retry.waiting=false;dual_link_can_tx_failed();}
                     atomic_store(&tx_inflight,false);
                     atomic_store(&inflight_frame_bits,0);
                     report_tx(&active, false,POLL_ERR_DRIVER,active_query==0&&!active_dual);

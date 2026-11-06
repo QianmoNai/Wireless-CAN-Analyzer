@@ -745,7 +745,7 @@ void dual_link_can_rx(const uint8_t p[20]) {
   else
     wake_worker();
 }
-bool dual_link_can_take(uint8_t p[20]) {
+bool dual_link_can_take_timed(uint8_t p[20],uint32_t *created,uint32_t *epoch) {
   if (atomic_load(&requested_uart) || !dual_link_connected() || !can_in)
     return false;
   can_message_t m;
@@ -764,10 +764,15 @@ bool dual_link_can_take(uint8_t p[20]) {
     p[3] = m.data[1];
     memcpy(p + 4, m.data + 2, 4);
     memcpy(p + 8, m.data + 6, 8);
+    *created=m.created;*epoch=m.generation;
     return true;
   }
   return false;
 }
+bool dual_link_can_take(uint8_t p[20]) {
+ uint32_t created,epoch;return dual_link_can_take_timed(p,&created,&epoch);
+}
+void dual_link_can_tx_failed(void) { atomic_fetch_add(&drop_count,1); }
 void dual_link_view(dual_view_t *out) {
   memset(out, 0, sizeof(*out));
   if (!worker) {

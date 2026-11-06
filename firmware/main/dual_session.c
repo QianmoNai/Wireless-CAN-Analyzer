@@ -1,4 +1,5 @@
 #include "dual_session.h"
+static bool derive_key(const dual_session_t *s, uint8_t key[32]);
 bool dual_session_start(dual_session_t *s, unsigned role,
                         const uint8_t key[32]) {
   uint8_t copy[32];
@@ -61,12 +62,19 @@ bool dual_session_receive_hello(dual_session_t *s, const uint8_t *p, size_t n,
     return false;
   s->hello_rx = sequence;
   if (dual_equal(v + 16, s->local, 16)) {
+    if (!s->traffic_ready) {
+      if (!derive_key(s, s->traffic_key)) {
+        dual_zero(s->traffic_key, sizeof(s->traffic_key));
+        return false;
+      }
+      s->traffic_ready = true;
+    }
     s->online = true;
     s->last_seen = now;
   }
   return true;
 }
-static bool session_key(const dual_session_t *s, uint8_t key[32]) {
+static bool derive_key(const dual_session_t *s, uint8_t key[32]) {
   uint8_t context[48];
   memcpy(context, "CAN-SESSION-v1", 15);
   context[15] = 0;
@@ -83,22 +91,21 @@ static void nonce(uint8_t out[13], unsigned role, unsigned type, uint32_t seq) {
 size_t dual_session_encode(const dual_session_t *s, unsigned type, uint32_t seq,
                            const uint8_t *data, size_t len,
                            uint8_t out[DUAL_MAX_PACKET]) {
-  if (!s->online || !seq || (type != DUAL_DATA && type != DUAL_ACK && type != DUAL_UART) ||
+  if (!s->online || !s->traffic_ready || !seq || (type != DUAL_DATA && type != DUAL_ACK && type != DUAL_UART) ||
       len > 190)
     return 0;
   size_t n = dual_header(out, type, s->role, 36 + len + 16);
-  uint8_t *v = out + DUAL_HEADER, k[32], iv[13];
+  uint8_t *v = out + DUAL_HEADER, iv[13];
   memcpy(v, s->local, 16);
   memcpy(v + 16, s->remote, 16);
   dual_put32(v + 32, seq);
   nonce(iv, s->role, type, seq);
-  bool ok = session_key(s, k) && dual_seal(k, iv, out, 44, data, len, out + 44);
-  dual_zero(k, 32);
+  bool ok = dual_seal(s->traffic_key, iv, out, 44, data, len, out + 44);
   return ok ? n : 0;
 }
 bool dual_session_decode(const dual_session_t *s, const uint8_t *p, size_t n,
                          uint32_t *seq, uint8_t *plain, size_t *len) {
-  if (!s->online || !dual_packet_valid(p, n, s->role) || n < 60 ||
+  if (!s->online || !s->traffic_ready || !dual_packet_valid(p, n, s->role) || n < 60 ||
       (p[4] != DUAL_DATA && p[4] != DUAL_ACK && p[4] != DUAL_UART))
     return false;
   const uint8_t *v = p + DUAL_HEADER;
@@ -106,10 +113,9 @@ bool dual_session_decode(const dual_session_t *s, const uint8_t *p, size_t n,
   if (!*seq || !dual_equal(v, s->remote, 16) ||
       !dual_equal(v + 16, s->local, 16))
     return false;
-  uint8_t k[32], iv[13];
+  uint8_t iv[13];
   nonce(iv, p[5], p[4], *seq);
-  bool ok = session_key(s, k) && dual_open(k, iv, p, 44, p + 44, n - 44, plain);
-  dual_zero(k, 32);
+  bool ok = dual_open(s->traffic_key, iv, p, 44, p + 44, n - 44, plain);
   if (ok)
     *len = n - 60;
   return ok;

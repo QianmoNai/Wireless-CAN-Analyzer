@@ -20,6 +20,10 @@ int dual_link_usb_command(const uint8_t request[20], uint8_t reply[20]);
 bool dual_link_connected(void);
 void dual_link_can_rx(const uint8_t packet[20]);
 bool dual_link_can_take(uint8_t packet[20]);
+// Preserve the destination admission age and session for bounded CAN retries.
+bool dual_link_can_take_timed(uint8_t packet[20],uint32_t *created,uint32_t *generation);
+// Count a terminal physical CAN failure once, after any permitted retry.
+void dual_link_can_tx_failed(void);
 uint32_t dual_link_dropped(void);
 
 // Data-type changes create a fresh session and discard queued old-type traffic.

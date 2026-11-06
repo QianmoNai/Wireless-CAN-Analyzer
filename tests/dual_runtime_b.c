@@ -10,7 +10,9 @@
 #define dual_link_view dual_b_view
 #define dual_link_connected dual_b_connected
 #define dual_link_can_rx dual_b_can_rx
+#define dual_link_can_take_timed dual_b_can_take_timed
 #define dual_link_can_take dual_b_can_take
+#define dual_link_can_tx_failed dual_b_can_tx_failed
 #define dual_link_dropped dual_b_dropped
 #define dual_link_set_uart dual_b_set_uart
 #define dual_link_reset_data dual_b_reset_data

@@ -28,6 +28,7 @@
   void dual_##n##_tick(void);
 DECLARE(a) DECLARE(b) static int current;
 void dual_a_test_fresh_queue_time(void);
+void dual_a_test_can_origin_and_terminal_drop(void);
 static uint32_t time_ms;
 void sim_clock_set(uint32_t value) { time_ms=value; }
 static recv_cb_t rx[2];
@@ -336,7 +337,8 @@ int main(void) {
   pair_devices();
   current=0;dual_a_test_fresh_queue_time();
   uint32_t before_wrap=time_ms;sim_clock_set(0);
-  dual_a_test_fresh_queue_time();sim_clock_set(before_wrap);
+  dual_a_test_fresh_queue_time();
+  dual_a_test_can_origin_and_terminal_drop();sim_clock_set(before_wrap);
   assert(stored[0] && stored[1] &&
          !memcmp(storage[0] + 11, storage[1] + 11, 32));
   // Bidirectional bridge preserves standard/extended IDs, RTR and DLC.

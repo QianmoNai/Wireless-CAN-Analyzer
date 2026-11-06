@@ -1,9 +1,9 @@
 #pragma once
 #include "dual_protocol.h"
 typedef struct {
-  uint8_t role, key[32], local[16], remote[16];
+  uint8_t role, key[32], local[16], remote[16], traffic_key[32];
   uint32_t hello_tx, hello_rx, tx_sequence, rx_sequence, last_seen, generation;
-  bool ready, have_remote, online;
+  bool ready, have_remote, online, traffic_ready;
 } dual_session_t;
 bool dual_session_start(dual_session_t *s, unsigned role,
                         const uint8_t key[32]);

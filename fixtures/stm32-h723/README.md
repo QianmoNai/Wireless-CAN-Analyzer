@@ -39,3 +39,5 @@ PYTHONPATH=desktop desktop/.venv/bin/python scripts/test-dual-can-hardware.py \
 ```
 
 OpenOCD 需已使用 J-Link/SWD 连接对应 STM32，并在本机 TCP 6666 提供 Tcl 接口。这里的计时包含 SWD 观察开销，不作为无线延迟测量。ST 启动文件保留原版权头，适用 [ST 许可证](LICENSE-ST.txt)；其他文件遵循仓库许可证。
+
+双机连续负载使用`scripts/test-dual-can-load-hardware.py --a <A-by-id> --b <B-by-id> --elf <匹配的台架ELF> --microseconds --rates 100 200 --seconds 60 --stop-file <停止标记> --output <报告>`，显式选择微秒双路源，检查实际源速率、独立目的CAN、确认/丢弃和两路FIFO排空；不传`--microseconds`时保留旧毫秒源。每档最多300000帧，较高请求值仍须通过实际源速率门槛。此入口同样不负责烧录或镜像恢复。

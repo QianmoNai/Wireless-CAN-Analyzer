@@ -48,6 +48,18 @@ with sync_playwright() as p:
  assert page.locator('#rxCount').inner_text()=='—'
  assert page.locator('#loadBar').evaluate("el=>el.style.width")=='1.22%'
  assert '包含持续查询' in page.locator('#loadHint').inner_text()
+ # App drops must update without waiting for a type-4 device status. Detail
+ # delivery can suppress that status, including batches with stale config.
+ page.evaluate("onNative('motorSamples',{dropped:23,key:'stale config',items:[]})")
+ assert page.locator('#dropStatus').inner_text().endswith('App 23')
+ assert 'App 丢弃 23' in page.locator('#lossNote').inner_text()
+ page.evaluate("onNative('packets',{dropped:24,items:[]})")
+ assert page.locator('#dropStatus').inner_text().endswith('App 24')
+ page.evaluate("onNative('motorSamples',{dropped:0,key:'stale config',items:[]})")
+ assert page.locator('#dropStatus').inner_text().endswith('App 0')
+ page.evaluate("window.dropLabelChanges=0;window.dropObserver=new MutationObserver(rows=>{dropLabelChanges+=rows.length});dropObserver.observe($('dropStatus'),{childList:true});for(let i=0;i<1000;i++)onNative('motorSamples',{dropped:0,key:'stale config',items:[]})")
+ assert page.evaluate('dropLabelChanges')==0
+ page.evaluate('dropObserver.disconnect()')
  # Raw traffic, dropped telemetry and type-4 batching cannot change device load.
  page.evaluate("""() => {
  onNative('packets',{dropped:900,items:['0101000801020000010203040506070800000000']});
