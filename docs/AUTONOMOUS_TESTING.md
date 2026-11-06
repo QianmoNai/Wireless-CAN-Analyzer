@@ -62,3 +62,5 @@ Android1.21.11 / Desktop1.2.22将像素桶极值和单次绘图的间断阈值�
 ### 定时查询开关的确认状态
 
 `scripts/test-can-query-toggle-hardware.py --fixture stm32h723-dual --elf <ELF> --surface android|desktop --mode usb|ble|wifi --port <by-id> --channel 1|2 --bus 1|2 --repeat 20 --output <报告>`，桌面另加`--binary`，Android不支持USB Host。需要固件1.24.7诊断及STM32模拟达妙反馈，沿用已保存的身份、Android独立台架包/CDP；身份不符不会执行模式或清理写入。实际点击开关后分别核对等待锁定、最终原生确认、最终DOM及实际反馈；退出恢复配置、USB/周期数据，新增丢弃失败，不把未知结果当作成功或自动重发。
+
+受控Android Wi-Fi→USB切换已可全程自主完成：USB身份限定的模式更改、App断线/查询停止、恢复Wi-Fi后的明确重连、禁止隐式恢复查询及手动重新启停均有STM32实际接收计数核对。1.21.11基线暴露EOF提示`null`，1.21.12清晰提示已通过相同实机流程；这不是偶发Wi-Fi发送超时根因已修复的证据。

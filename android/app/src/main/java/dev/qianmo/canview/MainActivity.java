@@ -691,7 +691,7 @@ public class MainActivity extends Activity {
             // This runs outside the WebView/UI Looper, so per-frame drawing cannot
             // delay lease renewals or discard a confirmation already in the inbox.
             drainControlEvents();
-            if(writing&&now>=writeDeadline){fail("通信写入超时，请重新连接");}
+            if(writing&&now>=writeDeadline){fail(LanTransport.commandTimeoutMessage(lan!=null));}
             queryFailure(queries.expire(now));
             for(String key:queries.recovered(now))queryStatus(key,false,"查询已停止，可重新开启");
             FeedbackQueries.Request request=queries.poll(now,ready&&!deviceWifiMode&&!deviceUart&&devicePolling&&!writing&&!networkBusy()&&now>=settingsHoldUntil);

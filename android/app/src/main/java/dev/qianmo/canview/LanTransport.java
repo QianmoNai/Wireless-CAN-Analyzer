@@ -41,7 +41,15 @@ final class LanTransport implements AutoCloseable {
   }catch(Exception e){failure(e);}
  },"CAN-LAN-connect").start();}
  boolean send(byte[] p){return !closed&&p.length==20&&writes.offer(p.clone());}
- private void failure(Exception e){if(closed)return;close();listener.failed(this,e instanceof SocketTimeoutException?"局域网连接超时，请检查 Wi-Fi 和设备模式":"局域网连接中断或验证失败："+e.getMessage());}
+ static String failureMessage(Exception e){
+  if(e instanceof SocketTimeoutException)return "局域网连接超时，请检查 Wi-Fi 和设备模式";
+  if(e instanceof EOFException)return "设备已断开局域网连接，请检查 Wi-Fi 和设备通信模式后重新连接";
+  String detail=e.getMessage();
+  return detail==null||detail.trim().isEmpty()?"局域网连接中断，请检查 Wi-Fi 和设备通信模式后重新连接":"局域网连接中断或验证失败："+detail;
+ }
+ // LAN send() only enqueues a command; writeDone comes from the device ACK.
+ static String commandTimeoutMessage(boolean lan){return lan?"局域网指令未在限时内确认，请检查连接后重新连接":"蓝牙指令写入未在限时内完成，请重新连接";}
+ private void failure(Exception e){if(closed)return;close();listener.failed(this,failureMessage(e));}
  public synchronized void close(){
   if(closed)return;
   closed=true;writes.clear();

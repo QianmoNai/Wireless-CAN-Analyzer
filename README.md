@@ -127,12 +127,12 @@ Android 需 Android 8.0+；Windows 支持 Windows 10 / 11 x64；Linux 桌面包�
 
 ### 使用当前源码
 
-Android1.21.11 / Desktop1.2.22降低长历史曲线绘图开销，已完成两端高频实体CAN显示检查并更新本机安装；Desktop1.2.21另增加实际查询频率与停止原因显示。新增版本尚未纳入上方完整发行套件，Android单次Wi-Fi超时和双无线压力丢弃继续单独追踪，验证条件见性能记录。
+Android1.21.11 / Desktop1.2.22降低长历史曲线绘图开销，已完成两端高频实体CAN显示检查并更新本机安装；Desktop1.2.21另增加实际查询频率与停止原因显示。Android1.21.12另修正断线空原因与指令确认超时提示，正常BLE/Wi-Fi和主动切换流程已实机验证。新增版本尚未纳入上方完整发行套件，Android单次Wi-Fi超时和双无线压力丢弃继续单独追踪，验证条件见性能记录。
 
 | 组件 | 源码版本 | 入口 |
 | --- | --- | --- |
 | ESP32-S3 固件 | **1.24.7** | [构建与烧录](#build) |
-| Android App | **1.21.11** | [Android 构建](#build-android) |
+| Android App | **1.21.12** | [Android 构建](#build-android) |
 | CAN Scope Desktop | **1.2.22** | [桌面使用说明](desktop/README.md) |
 
 固件1.24.7、Android1.21.10及Desktop1.2.20已纳入完整发行套件。新增CAN批量接收、首页摘要和曲线开销优化；修复Android就绪前通知丢弃、TLS断开闪退及返回操作，桌面USB取消清理、身份重连和跨通道全屏恢复，以及查询确认期间的开关状态；固件增加物理USB自主配对并修复双机队列误判过期、首命令清理及USB管理回压干扰无线会话。正式固件关闭实验双机6Mbps；双机高强度实物矩阵使用的实验镜像未随正式附件发布。发行内容与验证边界见[发行说明](docs/releases/suite-2026.11.06.md)，详细条件、结果与未通过的候选见[性能与验证记录](docs/PERFORMANCE.md)。双路模拟器源码见[STM32H723台架](fixtures/stm32-h723/README.md)。
