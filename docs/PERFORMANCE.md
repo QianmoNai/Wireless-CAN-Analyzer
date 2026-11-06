@@ -446,3 +446,9 @@ Desktop1.2.22 USB高频五阶段通过：75秒收到46841条实际达妙详情�
 B端Wi-Fi同包/同原生通信代码、仅注入优化前绘图函数的隔离对照六阶段也通过，三类详情反馈龄7/74/21ms、14点分项无新增；报告`android-1.21.11-2-wifi-prior-renderer.json`明确标注覆盖范围，不是旧完整APK。最终时间线包含实际`queryState`事件，仍有128条有界上限。新旧绘图均未重现第一次断开，因此不据此宣称已证明无关或已修复。
 
 随后在生产CAN模式直接读取已有受认证TLS数值诊断，未改UART数据模式或固件：B端同次启动累计一次TLS发送超时，最大阻塞1503399µs、调用1508652µs，errno11；两次Wi-Fi断开，最后原因2（当前本机ESP-IDF定义为AUTH_EXPIRE）。前后两次诊断boot_id相同；第二次用查询前后主机时钟给设备采样夹定时间，TLS超时对应04:52:16.021–16.384 UTC，最后Wi-Fi断开对应04:52:23.716–24.079 UTC，均在首次失败04:50:37–04:52:37 UTC窗口中。报告`can-wifi-diag-b-{after-renderer-trials,clock-anchor,first-failure-correlation}.json`。此证据将设备TLS与无线事件关联到失败窗口，但只有最后断开原因，不能还原第一次断开的原因或将认证过期判为根因；读取时−59dBm也不是失败时RSSI。已有TLS超时边界和电源/TCP默认配置保持不变。
+
+后续B端诊断：Desktop1.2.22安装程序启用既有`--wifi-diag-log`后，高频五阶段通过，75秒详情35533条、60秒窗口28251条，129份逐秒设备快照内TLS发送失败/超时及Wi-Fi断开均无新增。报告`desktop-detail-highrate-dm-2-wifi-1.2.22-diag.json`和私有数值JSONL；包含诊断开销，UART字节/序号字段不表示CAN流量，不当作生产吞吐基准。Android1.21.11 B端Wi-Fi高频五阶段也通过，75秒34942条、窗口27771条，三项设备/App丢弃无新增、CAN错误零；报告`android-detail-highrate-dm-2-wifi-1.21.11-events.json`保留逐秒有界状态/写完成/查询时间线。前后只读快照boot_id相同，三项无线/TLS错误计数增量均为零，既有第一次失败计数仍保留。
+
+连续台架请求检查扩展到共享`Fixture`：单路、双路发送及速率握手现在必须先确认旧请求完成，再各自递增非零32位序号；载荷标签不再兼作SWD握手序号，双路在写任一帧缓冲前先检查两端。新增六项纯内存回归覆盖未完成时无写入、双路全预检、回绕、不同代次与相同载荷标签连续发送，进入主机检查。它加固测试的可重复性，不改变产品CAN或无线策略。实物重新配对按两台USB身份限定并独立核对SAS，全程无需LCD/按键；随后双向同时发起的500条标准/扩展/远程、DLC0–8矩阵逐帧目标CAN核对通过，两端各sent/received250、dropped0，七项总线健康全零，恢复USB/1Mbps及周期模拟。报告`dual-can-autonomous-repair-and-physical.json`、`dual-can-request-generations-physical.json`；当前物理镜像含实验6M，不能当作正式默认无线速率认证。非对称250k/500k协调速率验证继续进行。
+
+共享Fixture新序号规则的250k/500k非对称实物验证50条通过，两端各sent/received25、dropped0；停控制器→设分析仪速率→启动控制器及结束恢复1Mbps均完成，USB和周期模拟恢复成功，报告`dual-can-request-generations-independent-rates.json`。包含新增六项请求归属检查的完整本地主机回归通过，日志`host-checks-fixture-request-ownership.log`；02bab2b远端主检查42167999169也成功。

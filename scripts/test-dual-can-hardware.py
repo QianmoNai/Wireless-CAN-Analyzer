@@ -93,6 +93,12 @@ class Fixture:
         for symbol in ['can1_periodic','can2_periodic']:
             self.write(self.symbols[symbol],[value])
 
+    def next_request(self,request_address,completed_address):
+        previous=self.read(request_address)[0]
+        if self.read(completed_address)[0]!=previous:
+            raise RuntimeError('Previous fixture request has no confirmed outcome; refusing overwrite')
+        return ((previous+1)&0xffffffff)or 1
+
     def set_rate(self,bus,rate):
         """Bench-only stop/start handshake; caller coordinates analyzer timing."""
         if bus not in (0,1)or rate not in (0,125000,250000,500000,1000000):
@@ -100,8 +106,7 @@ class Fixture:
         if 'can_bitrate_bench'not in self.symbols:
             raise ValueError('Fixture does not support bitrate control')
         base=self.symbols['can_bitrate_bench']+bus*24
-        request=secrets.randbelow(0xffffffff)+1
-        if request==self.read(base+8)[0]:request=(request%0xffffffff)+1
+        request=self.next_request(base+4,base+8)
         self.write(base,[rate,request])
         deadline=time.monotonic()+2
         while time.monotonic()<deadline:
@@ -121,6 +126,7 @@ class Fixture:
     def transfer(self,bus,identifier,dlc,flags,sequence):
         source=self.symbols['can_bench']+bus*52
         dest=self.symbols['can_bench']+(1-bus)*52
+        request=self.next_request(source+16,source+20)
         before=self.read(dest+48)[0]
         remote=bool(flags&2)
         data=bytes(8) if remote else bytes((sequence*17+i*29)&255 for i in range(dlc))+bytes(8-dlc)
@@ -132,12 +138,12 @@ class Fixture:
         if self.read(source,4)!=words:
             raise RuntimeError('SWD request was not written intact')
         started=time.monotonic()
-        self.write(source+16,[sequence])
+        self.write(source+16,[request])
         deadline=started+2
         delivered=False
         while time.monotonic()<deadline:
             state=self.read(source+20,3)
-            if state[0]==sequence:
+            if state[0]==request:
                 if state[1]:
                     raise RuntimeError('STM32 CAN enqueue failed')
                 delivered=True
@@ -164,6 +170,9 @@ class Fixture:
     def transfer_pair(self,identifier,dlc,flags,sequence):
         """Start both physical controllers without waiting for either delivery."""
         bases=[self.symbols['can_bench']+bus*52 for bus in range(2)]
+        # Preflight both controllers before changing either frame buffer.
+        # The caller's sequence labels payloads, never the SWD handshake.
+        requests=[self.next_request(base+16,base+20)for base in bases]
         before=[self.read(base+48)[0] for base in bases]
         frames=[]
         remote=bool(flags&2)
@@ -175,13 +184,13 @@ class Fixture:
         self.active_case=dict(simultaneous=True,id=hex(identifier),dlc=dlc,flags=flags,
                               expected_frames=[frame.hex() for frame in frames])
         started=time.monotonic()
-        for base in bases:
-            self.write(base+16,[sequence])
+        for base,request in zip(bases,requests):
+            self.write(base+16,[request])
         rows=[None,None]
         while time.monotonic()-started<2:
             for bus in range(2):
                 state=self.read(bases[bus]+20,3)
-                if state[0]!=sequence:
+                if state[0]!=requests[bus]:
                     continue
                 if state[1]:
                     raise RuntimeError('STM32 CAN enqueue failed')
