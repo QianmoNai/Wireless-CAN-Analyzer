@@ -12,7 +12,6 @@ import importlib.util
 import json
 from pathlib import Path
 import re
-import secrets
 import struct
 import subprocess
 import time
@@ -100,7 +99,7 @@ def main():
             raise RuntimeError('A did not report the missing peer offline')
         report['offline_detected']=True
         source=fixture.symbols['can_bench']
-        sequence=secrets.randbelow(0xffff)+1
+        sequence=fixture.next_request(source+16,source+20)
         frame=struct.pack('<IBB8sBB',0x6b0,0,8,b'OFFLINE!',0,0)
         fixture.write(source,list(struct.unpack('<IIII',frame)))
         fixture.write(source+16,[sequence])

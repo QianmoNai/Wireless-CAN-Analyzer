@@ -47,13 +47,16 @@ def capture_monitor(phase):
     try:
         if usb.identity().hex()!=saved['id']:
             raise ValueError('USB diagnostics identity differs from the selected wireless analyzer')
+        observed_before=time.time()
         components=usb.monitor_drops()
+        observed_after=time.time()
     finally:
         usb.close()
     rows=report.setdefault('monitor_diagnostics',[])
     baseline=rows[0]['components'] if rows else components
     delta={key:(value-baseline[key])&0xffffffff for key,value in components.items()}
-    rows.append(dict(phase=phase,components=components,delta=delta))
+    rows.append(dict(phase=phase,components=components,delta=delta,
+                     host_before_s=observed_before,host_after_s=observed_after))
     save()
     if any(delta.values()):
         raise AssertionError('CAN monitor drop component increased during '+phase)
@@ -129,6 +132,7 @@ with hardware_bench_lock():
                 report['initial_device_drops'] = page.evaluate('firmwareDrops')
                 capture_monitor('connected-before-phases')
                 for name, action in [('raw', None), ('dji-detail', 'dashboardOpen(JSON.stringify(watchedMotors[0].config))'), ('imu-detail', 'dashboardOpen(JSON.stringify(watchedMotors[7].config))'), ('dm-detail', 'dashboardOpen(JSON.stringify(watchedMotors[3].config));setMotorPolling(JSON.stringify(watchedMotors[3].config),true)'), ('pause-filter', "showTab('live');togglePause();$('filter').value='201';renderFrames()"), ('home', "togglePause();$('filter').value='';showTab('motor')")]:
+                    phase_started=time.time()
                     if action:
                         page.evaluate(action)
                     if name == 'home':
@@ -139,8 +143,11 @@ with hardware_bench_lock():
                         frozen_before=page.evaluate("({html:$('frames').innerHTML,raw:rawReceived})")
                     page.evaluate('for(const key in perf)perf[key]=[]')
                     page.wait_for_timeout(a.seconds * 1000)
-                    row = page.evaluate("({connected,appDrops,firmwareDrops,rawReceived,telemetryEvents:[...telemetryEvents],nativeTimeline:[...nativeTimeline],frames:frames.length,history:{rx:frameHistory.rx.length,tx:frameHistory.tx.length},errors:[...nativeErrors],roster:dashboardSnapshot(),detail:detailMotor?{ready:detailReady,count:detailSamples.length,feedbackAge:detailMotor.time?Date.now()-detailMotor.time:null,values:detailMotor.feedback&&detailMotor.feedback.values,state:$('detailState').textContent,canRate:$('detailCanRate').textContent,appRate:$('detailAppRate').textContent}:null,perf:Object.fromEntries(Object.entries(perf).map(([k,a])=>[k,{count:a.length,max:a.length?Math.max(...a):0,p95:[...a].sort((a,b)=>a-b)[Math.floor(a.length*.95)]||0}]))})")
+                    sampled_before=time.time()
+                    row = page.evaluate("({uiNowMs:performance.now(),connected,appDrops,firmwareDrops,rawReceived,telemetryEvents:[...telemetryEvents],nativeTimeline:[...nativeTimeline],frames:frames.length,history:{rx:frameHistory.rx.length,tx:frameHistory.tx.length},errors:[...nativeErrors],roster:dashboardSnapshot(),detail:detailMotor?{ready:detailReady,count:detailSamples.length,feedbackAge:detailMotor.time?Date.now()-detailMotor.time:null,values:detailMotor.feedback&&detailMotor.feedback.values,state:$('detailState').textContent,canRate:$('detailCanRate').textContent,appRate:$('detailAppRate').textContent}:null,perf:Object.fromEntries(Object.entries(perf).map(([k,a])=>[k,{count:a.length,max:a.length?Math.max(...a):0,p95:[...a].sort((a,b)=>a-b)[Math.floor(a.length*.95)]||0}]))})")
                     row['name'] = name
+                    row['host_timing']=dict(phase_started_s=phase_started,
+                                            sampled_before_s=sampled_before,sampled_after_s=time.time())
                     row['device_drop_delta'] = row['firmwareDrops'] - report['initial_device_drops'] & 4294967295
                     report['phases'].append(row)
                     capture_monitor(name)
@@ -165,7 +172,9 @@ with hardware_bench_lock():
                 report['failure_message'] = str(e)[:300]
                 report['ok'] = False
                 try:
-                    report['failure_snapshot'] = page.evaluate("({connected,nativeTimeline:[...nativeTimeline],appDrops,firmwareDrops,detail:detailMotor?{ready:detailReady,feedbackAge:detailMotor.time?Date.now()-detailMotor.time:null}:null})")
+                    report['failure_snapshot_host_before_s']=time.time()
+                    report['failure_snapshot'] = page.evaluate("({uiNowMs:performance.now(),connected,nativeTimeline:[...nativeTimeline],appDrops,firmwareDrops,detail:detailMotor?{ready:detailReady,feedbackAge:detailMotor.time?Date.now()-detailMotor.time:null}:null})")
+                    report['failure_snapshot_host_after_s']=time.time()
                 except Exception as snapshot_error:
                     report['failure_snapshot_error'] = type(snapshot_error).__name__
                 save()

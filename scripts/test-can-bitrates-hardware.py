@@ -116,9 +116,10 @@ async def main(args):
                     # Same formats in the reverse direction, observed by the app transport.
                     report['active']['stage']='stm32-to-analyzer'
                     received.clear();sequence+=1
+                    request=fixture.next_request(base+16,base+20)
                     fixture.write(base,list(struct.unpack('<IIII',expected)))
-                    fixture.write(base+16,[sequence])
-                    await wait(lambda:fixture.read(base+20,2)==[sequence,0])
+                    fixture.write(base+16,[request])
+                    await wait(lambda:fixture.read(base+20,2)==[request,0])
                     await wait(lambda:any(p[1]==1 and u32(p,4)==identifier for p in received))
                     reverse=next(p for p in received if p[1]==1 and u32(p,4)==identifier)
                     if reverse[2]!=(int(extended)|int(remote)*2)or reverse[3]!=8 or (not remote and reverse[8:16]!=data):

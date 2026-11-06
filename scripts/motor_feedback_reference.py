@@ -4,7 +4,6 @@ The Python reference never calls the product JavaScript decoder. These are
 simulated feedback frames, not evidence from actual motors or an actual IMU.
 """
 import math
-import secrets
 import struct
 import time
 
@@ -58,9 +57,8 @@ def vectors():
 
 def inject(fixture,bus,identifier,payload,flags=0):
     base=fixture.symbols['can_bench']+bus*52
+    request=fixture.next_request(base+16,base+20)
     frame=struct.pack('<IBB8sBB',identifier,flags&1,len(payload),payload,int(bool(flags&2)),0)
-    request=secrets.randbelow(0xffffffff)+1
-    if request==fixture.read(base+20)[0]:request=(request%0xffffffff)+1
     words=list(struct.unpack('<IIII',frame));fixture.write(base,words)
     if fixture.read(base,4)!=words:raise AssertionError('SWD feedback frame mismatch')
     fixture.write(base+16,[request]);deadline=time.monotonic()+2

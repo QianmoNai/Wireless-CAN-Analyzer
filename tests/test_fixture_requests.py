@@ -8,6 +8,7 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path[:0]=[str(ROOT/'scripts'),str(ROOT/'desktop')]
 spec=importlib.util.spec_from_file_location('fixture_requests',ROOT/'scripts/test-dual-can-hardware.py')
 module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+import motor_feedback_reference as feedback
 
 
 class MemoryFixture(module.Fixture):
@@ -74,6 +75,20 @@ class Requests(unittest.TestCase):
         f=MemoryFixture();f.handshake(0x2018,0xffffffff,0xffffffff,rate=True)
         f.set_rate(1,0);self.assertEqual(f.read(0x2018,6),[0,1,1,0,0,1])
         f.set_rate(1,1000000);self.assertEqual(f.read(0x2018,6),[1000000,2,2,0,1000000,0])
+
+    def test_feedback_injection_preserves_an_unconfirmed_frame(self):
+        f=MemoryFixture();f.handshake(0x1034,20,19);before=dict(f.memory)
+        with self.assertRaisesRegex(RuntimeError,'confirmed outcome'):
+            feedback.inject(f,1,0x680,bytes([1,73,0,0,0,128,255,255]))
+        self.assertEqual(f.writes,[]);self.assertEqual(f.memory,before)
+
+    def test_feedback_injection_uses_new_requests_across_wrap(self):
+        f=MemoryFixture();f.handshake(0x1034,0xffffffff,0xffffffff)
+        payload=bytes([1,73,0,0,0,128,255,255])
+        for expected in [1,2]:
+            feedback.inject(f,1,0x680,payload)
+            self.assertEqual(f.memory[0x1034+16],expected)
+        self.assertEqual(f.memory[0x1000+48],2)
 
 
 if __name__=='__main__':unittest.main()
