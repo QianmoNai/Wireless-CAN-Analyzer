@@ -117,9 +117,9 @@
 
 ### 使用发行包
 
-**[下载最新完整套件 →](https://github.com/QianmoNai/Wireless-CAN-Analyzer/releases/tag/suite-2026.11.06)** · [Gitee 国内下载](https://gitee.com/qianmonai/Wireless-CAN-Analyzer/releases/suite-2026.11.06)
+**[下载最新完整套件 →](https://github.com/QianmoNai/Wireless-CAN-Analyzer/releases/tag/suite-2026.11.06-r2)** · [Gitee 国内下载](https://gitee.com/qianmonai/Wireless-CAN-Analyzer/releases/suite-2026.11.06-r2)
 
-本次完整套件包含固件 **1.24.7**、Android **1.21.10** 和 Desktop **1.2.20**（Windows / Linux x64）。GitHub提供完整附件；Gitee托管固件、APK、源码及校验文件，仓库附件1 GB配额已满，桌面端通过发行页中的同版GitHub链接下载，保留历史发行。各组件独立编号，下载后按 Release 中的 SHA256SUMS 校验。
+本次完整套件包含固件 **1.24.8**、Android **1.21.15** 和 Desktop **1.2.24**（Windows / Linux x64）。GitHub提供完整附件；Gitee托管固件、APK、源码及校验文件，仓库附件1 GB配额已满，桌面端通过发行页中的同版GitHub链接下载，保留历史发行。各组件独立编号，下载后按 Release 中的 SHA256SUMS 校验。
 
 Android 需 Android 8.0+；Windows 支持 Windows 10 / 11 x64；Linux 桌面包以 Ubuntu 24.04 构建。桌面包完整解压后运行 `CAN-Scope` / `CAN-Scope.exe`，无需另装 Python。固件适用于本项目 ESP32-S3 / 4 MB Flash，按包内 README.txt 烧录。
 
@@ -127,15 +127,15 @@ Android 需 Android 8.0+；Windows 支持 Windows 10 / 11 x64；Linux 桌面包�
 
 ### 使用当前源码
 
-Android1.21.11 / Desktop1.2.22降低长历史曲线绘图开销，已完成两端高频实体CAN显示检查并更新本机安装；Desktop1.2.21另增加实际查询频率与停止原因显示。Android1.21.12修正断线空原因与指令确认超时提示，1.21.13按块读取TLS明文并保持逐帧独立交付，正常BLE/Wi-Fi和五分钟高频详情已实机验证。Android1.21.14 / Desktop1.2.23减少详情批次内重复配置校验，保持每条反馈、接收龄与历史规则，手机及Linux实机验收通过并已更新本机安装。新增版本尚未纳入上方完整发行套件，Android偶发Wi-Fi超时/丢弃和双无线压力丢弃继续单独追踪，验证条件见性能记录。
+当前套件已纳入长历史曲线和详情批次优化、Android TLS按块读取、实际查询频率及App丢弃计数刷新修复，以及固件双机会话密钥缓存和明确仲裁失败的有限重试。默认PHY双机送达、高负载无线丢弃和偶发Wi-Fi超时仍有未解决问题，详见[CAN高负载说明](docs/CAN_HIGH_LOAD.md)。
 
 | 组件 | 源码版本 | 入口 |
 | --- | --- | --- |
-| ESP32-S3 固件 | **1.24.7** | [构建与烧录](#build) |
-| Android App | **1.21.14** | [Android 构建](#build-android) |
-| CAN Scope Desktop | **1.2.23** | [桌面使用说明](desktop/README.md) |
+| ESP32-S3 固件 | **1.24.8** | [构建与烧录](#build) |
+| Android App | **1.21.15** | [Android 构建](#build-android) |
+| CAN Scope Desktop | **1.2.24** | [桌面使用说明](desktop/README.md) |
 
-固件1.24.7、Android1.21.10及Desktop1.2.20已纳入完整发行套件。新增CAN批量接收、首页摘要和曲线开销优化；修复Android就绪前通知丢弃、TLS断开闪退及返回操作，桌面USB取消清理、身份重连和跨通道全屏恢复，以及查询确认期间的开关状态；固件增加物理USB自主配对并修复双机队列误判过期、首命令清理及USB管理回压干扰无线会话。正式固件关闭实验双机6Mbps；双机高强度实物矩阵使用的实验镜像未随正式附件发布。发行内容与验证边界见[发行说明](docs/releases/suite-2026.11.06.md)，详细条件、结果与未通过的候选见[性能与验证记录](docs/PERFORMANCE.md)。双路模拟器源码见[STM32H723台架](fixtures/stm32-h723/README.md)。
+固件1.24.8、Android1.21.15及Desktop1.2.24已纳入完整发行套件。正式固件关闭实验双机6Mbps；双向各200帧/秒的实物通过结果来自单独6Mbps实验镜像，默认PHY本次仍有目的CAN送达超时。发行内容、安装说明及已知限制见[发行说明](docs/releases/suite-2026.11.06-r2.md)，详细条件与未通过候选见[性能与验证记录](docs/PERFORMANCE.md)。双路模拟器源码见[STM32H723台架](fixtures/stm32-h723/README.md)。
 
 ```bash
 git clone git@github.com:QianmoNai/Wireless-CAN-Analyzer.git
