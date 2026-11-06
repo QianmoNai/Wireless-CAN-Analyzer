@@ -52,6 +52,8 @@ Android与四档速率入口可加`--monitor-diagnostics`（要求固件1.24.7�
 
 ### 绘图与窗口恢复
 
+Android1.21.11 / Desktop1.2.22候选将像素桶极值和单次绘图的间断阈值缓存于局部变量。`tests/test_motor_curve.cjs`用独立桶列表算法核对72组原始样本引用顺序，涵盖1600点边界、60000点、不同宽度/采样率及NaN、缺失值和正负无穷，另核对主副量有限边界与冻结双温度曲线。合成历史的手机/Qt交替耗时测量与实际CAN验收分开记录，不由绘图回调推断帧率或传输吞吐。
+
 `tests/test_motor_curve.cjs`随主机检查运行，校验电机合并扫描的主/副值边界及完整曲线路径语义。`desktop/tests/test_chart_window.py`模拟合成器延后确认退出全屏、快速跨通道新开全屏、普通窗口基准、隐藏通道请求及关闭/删除，验证不会覆盖原始最大化状态或执行过期恢复。实际Qt用`desktop/tests/fullscreen_tabs.py --switches 50 --settle-ms 250 --output <报告>`复验；该入口使用合成连接状态、不打开硬件。Desktop1.2.19源码在Niri/XWayland的50次切换通过，包含窗口修复的最终包单次实际XCB及离屏smoke均通过；物理CAN功能以独立硬件报告为准。
 
 

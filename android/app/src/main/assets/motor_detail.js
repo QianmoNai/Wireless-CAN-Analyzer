@@ -168,8 +168,8 @@ function drawDetailSeries(s,root,points,span,start,width,height){
  if(s.imu){for(const p of points){const v=p.values[s.key];if(Number.isFinite(v)){count++;lo=Math.min(lo,v);hi=Math.max(hi,v);primary.push(p);}if(s.extra){const extra=p.values[s.extra];if(Number.isFinite(extra)){count++;lo=Math.min(lo,extra);hi=Math.max(hi,extra);}}}}
  else{const bounds={};selected=detailBoundedPeakPoints(primary,s.key,span,start,width,bounds,s.extra);selectedExtra=s.extra?detailPeakPoints(primary,s.extra,span,start,width):[];({count,lo,hi}=bounds);}
  if(!count){lo=0;hi=1;}if(hi===lo){lo-=1;hi+=1;}const pad=(hi-lo)*.08;lo-=pad;hi+=pad;
- const inset=Math.min(15,height*.1),plotHeight=height-2*inset;
- const path=key=>{let result='',last=null;for(const p of s.imu?detailPeakPoints(primary,key,span,start,width):key===s.key?selected:selectedExtra){const v=p.values[key];if(!Number.isFinite(v)){last=null;continue}const x=(p.t-start)/span*width,y=height-inset-(v-lo)/(hi-lo)*plotHeight;result+=(last===null||p.t-last>Math.max(250,3000/detailAppliedHz)?'M':'L')+x.toFixed(2)+','+y.toFixed(2);if(last===null||p.t-last>Math.max(250,3000/detailAppliedHz))result+='l.1,0';last=p.t;}return result;};
+ const inset=Math.min(15,height*.1),plotHeight=height-2*inset,gap=Math.max(250,3000/detailAppliedHz);
+ const path=key=>{let result='',last=null;for(const p of s.imu?detailPeakPoints(primary,key,span,start,width):key===s.key?selected:selectedExtra){const v=p.values[key];if(!Number.isFinite(v)){last=null;continue}const x=(p.t-start)/span*width,y=height-inset-(v-lo)/(hi-lo)*plotHeight;result+=(last===null||p.t-last>gap?'M':'L')+x.toFixed(2)+','+y.toFixed(2);if(last===null||p.t-last>gap)result+='l.1,0';last=p.t;}return result;};
  const setPath=(node,value)=>{if(node.getAttribute('d')!==value)node.setAttribute('d',value)};
  setPath(nodes.trace,path(s.key));setPath(nodes.extra,s.extra?path(s.extra):'');setFrameText(nodes.scale[0],count?fmt(lo)+' '+s.unit:'等待数据');setFrameText(nodes.scale[1],count?fmt(hi)+' '+s.unit:'');setFrameText(nodes.axis[0],(span<1000?span+' ms':span/1000+' 秒')+'前');setFrameText(nodes.axis[1],detailFrozen===null?'现在':'已暂停');
 }
@@ -256,7 +256,9 @@ function detailPeakPoints(points,key,span,start,width=400){
  if(points.length<=1600)return points;
  // Retain indices into the immutable history instead of allocating an array
  // for every pixel bucket; gaps still terminate a bucket immediately.
- const out=[];let first=0,lo=0,hi=0,bucket=-1,last=null;
+ // Cache bucket values as well as indices; an invalid first value keeps
+ // the original comparison semantics until the next bucket.
+ const out=[];const gap=Math.max(250,3000/detailAppliedHz);let first=0,lo=0,hi=0,low,high,bucket=-1,last=null;
  function flush(end){
   if(end<first)return;
   out.push(points[first]);
@@ -266,9 +268,9 @@ function detailPeakPoints(points,key,span,start,width=400){
   if(end>first)out.push(points[end]);
  }
  for(let i=0;i<points.length;i++){
-  const p=points[i],b=Math.floor((p.t-start)*width/span);
-  if(i===0||b!==bucket||(last!==null&&p.t-last>Math.max(250,3000/detailAppliedHz))){flush(i-1);first=lo=hi=i;}
-  else {if(p.values[key]<points[lo].values[key])lo=i;if(p.values[key]>points[hi].values[key])hi=i;}
+  const p=points[i],v=p.values[key],b=Math.floor((p.t-start)*width/span);
+  if(i===0||b!==bucket||(last!==null&&p.t-last>gap)){flush(i-1);first=lo=hi=i;low=high=v;}
+  else {if(v<low){lo=i;low=v;}if(v>high){hi=i;high=v;}}
   bucket=b;last=p.t;
  }
  flush(points.length-1);return out;
@@ -284,7 +286,9 @@ function detailBoundedPeakPoints(points,key,span,start,width=400,bounds,extra=nu
  }
  // Retain indices into the immutable history instead of allocating an array
  // for every pixel bucket; gaps still terminate a bucket immediately.
- const out=[];let first=0,lo=0,hi=0,bucket=-1,last=null;
+ // Cache bucket values as well as indices; an invalid first value keeps
+ // the original comparison semantics until the next bucket.
+ const out=[];const gap=Math.max(250,3000/detailAppliedHz);let first=0,lo=0,hi=0,low,high,bucket=-1,last=null;
  function flush(end){
   if(end<first)return;
   out.push(points[first]);
@@ -294,10 +298,10 @@ function detailBoundedPeakPoints(points,key,span,start,width=400,bounds,extra=nu
   if(end>first)out.push(points[end]);
  }
  for(let i=0;i<points.length;i++){
-  const p=points[i],b=Math.floor((p.t-start)*width/span);
-  if(bounds){const v=p.values[key];if(Number.isFinite(v)){count++;min=Math.min(min,v);max=Math.max(max,v);}if(extra){const v=p.values[extra];if(Number.isFinite(v)){count++;min=Math.min(min,v);max=Math.max(max,v);}}}
-  if(i===0||b!==bucket||(last!==null&&p.t-last>Math.max(250,3000/detailAppliedHz))){flush(i-1);first=lo=hi=i;}
-  else {if(p.values[key]<points[lo].values[key])lo=i;if(p.values[key]>points[hi].values[key])hi=i;}
+  const p=points[i],v=p.values[key],b=Math.floor((p.t-start)*width/span);
+  if(bounds){if(Number.isFinite(v)){count++;min=Math.min(min,v);max=Math.max(max,v);}if(extra){const v=p.values[extra];if(Number.isFinite(v)){count++;min=Math.min(min,v);max=Math.max(max,v);}}}
+  if(i===0||b!==bucket||(last!==null&&p.t-last>gap)){flush(i-1);first=lo=hi=i;low=high=v;}
+  else {if(v<low){lo=i;low=v;}if(v>high){hi=i;high=v;}}
   bucket=b;last=p.t;
  }
  flush(points.length-1);if(bounds)Object.assign(bounds,{count,lo:min,hi:max});return out;

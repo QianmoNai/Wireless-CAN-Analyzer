@@ -13,6 +13,37 @@ const {chromium}=require('playwright');
   const result=await page.evaluate(()=>{
    const check=(value,message)=>{if(!value)throw Error(message)};
    let cases=0;
+   // Independent bucket-list oracle: extrema must retain source references,
+   // including a non-finite first value, equal extrema and time gaps.
+   function reference(points,key,span,start,width){
+    if(points.length<=1600)return points;
+    const out=[];let group=[],bucket,last=null;
+    function flush(){
+     if(!group.length)return;
+     let lo=0,hi=0;
+     for(let i=1;i<group.length;i++){
+      if(group[i].values[key]<group[lo].values[key])lo=i;
+      if(group[i].values[key]>group[hi].values[key])hi=i;
+     }
+     for(const index of [...new Set([0,lo,hi,group.length-1])].sort((a,b)=>a-b))out.push(group[index]);
+     group=[];
+    }
+    for(const point of points){
+     const next=Math.floor((point.t-start)*width/span);
+     if(group.length&&(next!==bucket||point.t-last>Math.max(250,3000/detailAppliedHz)))flush();
+     group.push(point);bucket=next;last=point.t;
+    }
+    flush();return out;
+   }
+   let oracleCases=0;
+   for(const hz of [1,50,1000])for(const width of [1,400,1920])for(const size of [1600,1601,3202,60000]){
+    detailAppliedHz=hz;
+    const points=Array.from({length:size},(_,i)=>({t:i*.75+(i>=1700?400:0),values:{position:[NaN,undefined,Infinity,-Infinity,-5,0,5][i%7],mos:i%13?i%11:NaN}}));
+    const expected=reference(points,'position',60000,-137.2,width);
+    for(const selected of [detailPeakPoints(points,'position',60000,-137.2,width),detailBoundedPeakPoints(points,'position',60000,-137.2,width,{},'mos')]){
+     check(selected.length===expected.length&&selected.every((point,i)=>point===expected[i]),'bucket reference mismatch');oracleCases++;
+    }
+   }
    for(const size of [0,1,1600,1601,3202,60000])for(const extra of [null,'mos']){
     const points=Array.from({length:size},(_,i)=>({t:i+(i>=1601?400:0),values:{position:i%17?Math.sin(i):NaN,mos:i%19?-i:NaN}}));
     const before=JSON.stringify(points),bounds={};
@@ -44,9 +75,9 @@ const {chromium}=require('playwright');
    check(root.querySelector('.detail-scale').textContent.includes('94'),'secondary temperature missing from shared scale');
    detailTogglePause();const frozen=paths.join('|');detailClock+=1000;drawDetail();
    check([...root.querySelectorAll('.trace,.trace-extra')].map(p=>p.getAttribute('d')).join('|')===frozen,'frozen geometry changed');
-   return {cases};
+   return {cases,oracleCases};
   });
-  assert.equal(result.cases,12);assert.deepEqual(errors,[]);
+  assert.equal(result.cases,12);assert.equal(result.oracleCases,72);assert.deepEqual(errors,[]);
   console.log('Motor curves: finite shared bounds, NaN/time gaps, immutable extrema references, 60000 samples and frozen dual-temperature geometry PASS');
  }finally{await browser.close()}
 })().catch(error=>{console.error(error);process.exitCode=1});
