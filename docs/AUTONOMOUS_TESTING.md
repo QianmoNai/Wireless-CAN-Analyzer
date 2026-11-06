@@ -33,7 +33,7 @@
 - `scripts/test-usb-reconnect-hardware.py`：桌面按 USB 身份跨复位重连；必须指定模拟器台架、已核对设备端口及esptool路径。
 - `scripts/test-android-config-import-hardware.py`：独立台架包的原生SAF键盘导入；核对ADB/CDP进程、已有数字文件名备份及断开状态，只确认一次。导入清除网络信任，随后`test-android-can-hardware.py --mode ble --restore-wifi-trust`从实际设置按钮重新认证；首次配对由`android_pairing.py`读取身份核对的物理USB当前临时码并操作原生通知/确认，仅内存处理。
 - `desktop/tests/multichannel_hardware.py`：实际发行包两路实物并存，原生标签切换、隐藏流静默、独有测试帧归属；端口按顺序对应已保存通道1/2及STM32 CAN1/2，写入前核对物理身份与保存身份一致；要求固件1.24.7并比较两台只读三项丢弃。`--detail-fullscreen`在每轮原始流后打开物理DJI反馈详情、核对X11全屏属性及隐藏通道退出，需要xprop及实际X11窗口管理器。追加`--query-dm`会在两通道同时开启独立达妙查询，切换期间检查两端仍续租，全屏选择达妙而非DJI，并在退出前分别等待停止确认。`--query-metrics`配合`--query-dm`检查Desktop1.2.21双通道独立实际频率与详情DOM；`--query-rates A B`可指定两路查询频率（度量专项默认100/500Hz，普通查询默认各100Hz）；隐藏通道按模式3静默，激活后才要求周期统计。专用帧先核对STM32请求/完成序号相等，再递增，避免重跑复用已完成请求或覆盖未知结局。
-- `scripts/test-android-can-hardware.py`：Android台架包实际WebView、六阶段CAN显示和清理；`--verify-import-guard`通过真实原生桥接确认在线导入被拒绝且保持连接；`--history-limit 10000 --seconds 20`填满RX历史，并检查暂停DOM不变时CAN仍持续到达。
+- `scripts/test-android-can-hardware.py`：Android台架包实际WebView、六阶段CAN显示和清理；`--verify-import-guard`通过真实原生桥接确认在线导入被拒绝且保持连接；`--history-limit 10000 --seconds 20`填满RX历史，并检查暂停DOM不变时CAN仍持续到达。详情要求物理反馈龄小于界面的2秒过期阈值；最近128条原生状态、写完成、查询状态和模式事件及异常现场单独保存，避免累计样本数掩盖停滞。
 - `desktop/tests/can_operations_hardware.py`：发行包原生文件操作与实际CAN发送核对；有界保存最近24条查询/错误事件、关闭前后状态及失败位置，超时保留原报告；`--all-bitrates`在速率台架上通过界面应用四档并收取物理CAN；`--monitor-seconds 5..60`加入六阶段参数/曲线观察，`--detail-window 60`扩大可见历史，不修改采样；`--history-limit 10000 --monitor-seconds 20`检查填满RX、暂停及大历史CSV导出逐格核对。
 
 主要物理测试入口共用进程锁，第二个测试会在改变模式前被拒绝，防止两个测试互相干扰。锁在正常结束或进程退出时释放。
@@ -52,7 +52,7 @@ Android与四档速率入口可加`--monitor-diagnostics`（要求固件1.24.7�
 
 ### 绘图与窗口恢复
 
-Android1.21.11 / Desktop1.2.22候选将像素桶极值和单次绘图的间断阈值缓存于局部变量。`tests/test_motor_curve.cjs`用独立桶列表算法核对72组原始样本引用顺序，涵盖1600点边界、60000点、不同宽度/采样率及NaN、缺失值和正负无穷，另核对主副量有限边界与冻结双温度曲线。合成历史的手机/Qt交替耗时测量与实际CAN验收分开记录，不由绘图回调推断帧率或传输吞吐。
+Android1.21.11 / Desktop1.2.22将像素桶极值和单次绘图的间断阈值缓存于局部变量。`tests/test_motor_curve.cjs`用独立桶列表算法核对72组原始样本引用顺序，涵盖1600点边界、60000点、不同宽度/采样率及NaN、缺失值和正负无穷，另核对主副量有限边界与冻结双温度曲线。合成历史的手机/Qt交替耗时测量与实际CAN验收分开记录，不由绘图回调推断帧率或传输吞吐。
 
 `tests/test_motor_curve.cjs`随主机检查运行，校验电机合并扫描的主/副值边界及完整曲线路径语义。`desktop/tests/test_chart_window.py`模拟合成器延后确认退出全屏、快速跨通道新开全屏、普通窗口基准、隐藏通道请求及关闭/删除，验证不会覆盖原始最大化状态或执行过期恢复。实际Qt用`desktop/tests/fullscreen_tabs.py --switches 50 --settle-ms 250 --output <报告>`复验；该入口使用合成连接状态、不打开硬件。Desktop1.2.19源码在Niri/XWayland的50次切换通过，包含窗口修复的最终包单次实际XCB及离屏smoke均通过；物理CAN功能以独立硬件报告为准。
 

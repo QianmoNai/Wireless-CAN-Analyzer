@@ -94,7 +94,7 @@ with hardware_bench_lock():
                     page.evaluate(setup)
                 else:
                     page.evaluate("window.perf={batch:[],draw:[],stream:[],long:[],raf:[]};const timedDraw=drawDetail;drawDetail=()=>{let t=performance.now();timedDraw();perf.draw.push(performance.now()-t)};showTab('live')")
-                page.evaluate("()=>{window.nativeErrors=[];window.telemetryEvents=[];window.nativeTimeline=[];window.rawReceived=0;const original=onNative;onNative=(k,d)=>{original(k,d);if(['state','error','telemetryMode','writeDone','polling'].includes(k)){const event={kind:k,at:performance.now()};for(const field of ['value','message','mode','hz','success','enabled','pending'])if(d[field]!==undefined)event[field]=d[field];nativeTimeline.push(event);if(nativeTimeline.length>128)nativeTimeline.shift();}if(k==='error')nativeErrors.push(d.message);if(k==='packets')for(const item of d.items||[]){const bytes=parsePacket(item.hex||item);if(bytes&&bytes[1]===1)rawReceived++;}if(k==='telemetryMode')telemetryEvents.push({mode:d.mode,hz:d.hz,at:performance.now()})}}")
+                page.evaluate("()=>{window.nativeErrors=[];window.telemetryEvents=[];window.nativeTimeline=[];window.rawReceived=0;const original=onNative;onNative=(k,d)=>{original(k,d);if(['state','error','telemetryMode','writeDone','queryState'].includes(k)){const event={kind:k,at:performance.now()};for(const field of ['value','message','mode','hz','success','enabled','pending'])if(d[field]!==undefined)event[field]=d[field];nativeTimeline.push(event);if(nativeTimeline.length>128)nativeTimeline.shift();}if(k==='error')nativeErrors.push(d.message);if(k==='packets')for(const item of d.items||[]){const bytes=parsePacket(item.hex||item);if(bytes&&bytes[1]===1)rawReceived++;}if(k==='telemetryMode')telemetryEvents.push({mode:d.mode,hz:d.hz,at:performance.now()})}}")
                 if a.mode == 'ble':
                     page.evaluate("invoke('connectionMode','ble');invoke('scan')")
                     page.wait_for_function('(address)=>deviceMap.has(address)', arg=saved['address'], timeout=25000)
@@ -150,7 +150,7 @@ with hardware_bench_lock():
                     subprocess.run(['adb', '-s', a.phone, 'exec-out', 'screencap', '-p'], stdout=shot.open('wb'), check=True)
                     if not row['connected']:
                         raise ConnectionError('Phone disconnected')
-                    if name in ('dji-detail','imu-detail','dm-detail') and (row['detail'] is None or row['detail']['feedbackAge'] is None or row['detail']['feedbackAge'] >= 3000):
+                    if name in ('dji-detail','imu-detail','dm-detail') and (row['detail'] is None or row['detail']['feedbackAge'] is None or row['detail']['feedbackAge'] >= 2000):
                         raise AssertionError('Physical detail feedback became stale during '+name)
                     if name=='raw'and a.history_limit==10000 and a.seconds>=20 and row['history']['rx']!=10000:
                         raise AssertionError('Physical RX history did not reach its configured maximum')
