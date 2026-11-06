@@ -26,6 +26,7 @@ cc -std=c11 -Wall -Wextra -Werror -DCONFIG_BLE_TEST_DIAGNOSTICS=1 -Itests/uart_s
 cc -std=c11 -Wall -Wextra -Werror -Itests/usb_stubs -Ifirmware/main tests/test_usb_link.c -o "$test_build_dir/test_usb_link"
 "$test_build_dir/test_usb_link"
 compile_run test_usb_protocol -Wall -Wextra -Werror
+python3 tests/test_usb_crc.py
 cc -std=c11 -Wall -Wextra -Werror -Itests/settings_stubs -Itests/usb_stubs -Ifirmware/main tests/test_device_settings.c firmware/main/board_ui_model.c -o "$test_build_dir/test_device_settings"
 "$test_build_dir/test_device_settings"
 compile_run test_network_protocol firmware/main/network_protocol.c
@@ -71,6 +72,7 @@ python3 tests/test_ble_startup_hardware.py
 python3 tests/test_fixture_requests.py
 python3 tests/test_hardware_bench_lock.py
 python3 tests/test_usb_management.py
+python3 tests/test_usb_delivery_loss_hardware.py
 python3 tests/test_ble_connection_glue.py
 python3 tests/test_ble_can_batch.py
 python3 tests/test_wifi_handoff.py
@@ -79,6 +81,7 @@ python3 tests/test_wifi_tx_power.py
 python3 tests/test_wifi_socket_diag.py
 python3 tests/test_wifi_batch.py
 python3 tests/test_wifi_tls_flow.py
+python3 tests/test_transport_drop_ownership.py
 python3 tests/test_wifi_tls_check.py
 node tests/test_imu.js
 node tests/test_motor_catalog.js

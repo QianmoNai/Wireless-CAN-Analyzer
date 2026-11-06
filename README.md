@@ -131,11 +131,11 @@ Android 需 Android 8.0+；Windows 支持 Windows 10 / 11 x64；Linux 桌面包�
 
 | 组件 | 源码版本 | 入口 |
 | --- | --- | --- |
-| ESP32-S3 固件 | **1.24.8** | [构建与烧录](#build) |
-| Android App | **1.21.15** | [Android 构建](#build-android) |
+| ESP32-S3 固件 | **1.24.9（未发布）** | [构建与烧录](#build) |
+| Android App | **1.21.16（未发布）** | [Android 构建](#build-android) |
 | CAN Scope Desktop | **1.2.24** | [桌面使用说明](desktop/README.md) |
 
-固件1.24.8、Android1.21.15及Desktop1.2.24已纳入完整发行套件。正式固件关闭实验双机6Mbps；双向各200帧/秒的实物通过结果来自单独6Mbps实验镜像，默认PHY本次仍有目的CAN送达超时。发行内容、安装说明及已知限制见[发行说明](docs/releases/suite-2026.11.06-r2.md)，详细条件与未通过候选见[性能与验证记录](docs/PERFORMANCE.md)。双路模拟器源码见[STM32H723台架](fixtures/stm32-h723/README.md)。
+当前固件源码1.24.9另补齐USB/LAN接受事件后的失败计数，并减少USB CRC计算工作；尚未发布，也未提高无损速率资格。Android源码1.21.16改为按实际安装包显示设置页版本，避免旧的固定版本文字。固件1.24.8、Android1.21.15及Desktop1.2.24已纳入完整发行套件。正式固件关闭实验双机6Mbps；双向各200帧/秒的实物通过结果来自单独6Mbps实验镜像，默认PHY本次仍有目的CAN送达超时。发行内容、安装说明及已知限制见[发行说明](docs/releases/suite-2026.11.06-r2.md)，详细条件与未通过候选见[性能与验证记录](docs/PERFORMANCE.md)。双路模拟器源码见[STM32H723台架](fixtures/stm32-h723/README.md)。
 
 ```bash
 git clone git@github.com:QianmoNai/Wireless-CAN-Analyzer.git

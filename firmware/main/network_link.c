@@ -222,21 +222,28 @@ static bool tls_write_count(esp_tls_t *tls,const uint8_t *p,size_t n,size_t *com
 static bool tls_write_all(esp_tls_t *tls,const uint8_t *p,size_t n){
  size_t completed;return tls_write_count(tls,p,n,&completed);
 }
-static bool tls_write_batch(esp_tls_t *tls,const uint8_t *batch,unsigned count){
+static bool tls_write_batch(esp_tls_t *tls,const uint8_t *batch,unsigned count,unsigned epoch){
  size_t completed;
  if(tls_write_count(tls,batch,count*20,&completed))return true;
+ // A mode change can interrupt a write before the loop observes its epoch.
+ // It owns intentional cancellation, rather than an abnormal delivery loss.
+ bool failed=network_wifi_mode()&&epoch==atomic_load(&network_epoch);
  // Fully written 20-byte frames already belong to the receiver. A partial
  // frame is unusable at EOF, so its entire UART payload is discarded once.
  for(unsigned i=completed/20;i<count;i++){
   bridge_packet_t packet;memcpy(packet.bytes,batch+20*i,20);
   wifi_diag_drop(WD_DROP_TLS,&packet);
-  uart_bridge_drop_packet(&packet);
+  if(failed)ble_bridge_delivery_failed(&packet);else uart_bridge_drop_packet(&packet);
  }
  return false;
 }
 static void discard_network_queue(QueueHandle_t queue){
  bridge_packet_t packet;
  while(xQueueReceive(queue,&packet,0)==pdTRUE){wifi_diag_drop(WD_DROP_LAN_RESET,&packet);uart_bridge_drop_packet(&packet);}
+}
+static void discard_failed_network_queue(QueueHandle_t queue){
+ bridge_packet_t packet;
+ while(xQueueReceive(queue,&packet,0)==pdTRUE){wifi_diag_drop(WD_DROP_LAN_RESET,&packet);ble_bridge_delivery_failed(&packet);}
 }
 static bool data_socket_options(int fd){
 #ifdef CAN_WIFI_TCP_NODELAY
@@ -299,7 +306,7 @@ static void serve_client(int fd){
   uint8_t batch[20*CAN_WIFI_BATCH_CAPACITY];unsigned count=collect_batch(batch);
   wifi_diag_queue(WD_LAN_RAW_DEPTH,WD_LAN_RAW_HIGH,uxQueueMessagesWaiting(raw_out));
   wifi_diag_queue(WD_LAN_CONTROL_DEPTH,WD_LAN_CONTROL_HIGH,uxQueueMessagesWaiting(control_out));
-  if(count&&!tls_write_batch(tls,batch,count)){close_reason=WD_CLOSE_WRITE;break;}
+  if(count&&!tls_write_batch(tls,batch,count,epoch)){close_reason=WD_CLOSE_WRITE;break;}
   int n=esp_tls_conn_read(tls,incoming+at,20-at);
   if(n>0){at+=n;last_rx=millis();if(at==20){at=0;
    if(incoming[0]==1&&incoming[1]==0x7f){if(!tls_write_all(tls,incoming,20)){close_reason=WD_CLOSE_WRITE;break;}continue;}
@@ -320,7 +327,12 @@ static void serve_client(int fd){
   vTaskDelay(pdMS_TO_TICKS(2)?pdMS_TO_TICKS(2):1);
  }
  wifi_diag_add(WD_TCP_CLOSES,1,WD_NOW_SEQUENCE);wifi_diag_set(WD_TCP_CLOSE_REASON,close_reason,WD_NOW_SEQUENCE);
- atomic_store(&linked,false);discard_network_queue(raw_out);discard_network_queue(control_out);if(epoch==atomic_load(&network_epoch))ble_bridge_reset_session();
+ atomic_store(&linked,false);
+ // A lost association also exits the loop without an I/O error. Only the
+ // control-plane epoch/mode identifies an intentional cancellation.
+ if(epoch!=atomic_load(&network_epoch)||!network_wifi_mode()){discard_network_queue(raw_out);discard_network_queue(control_out);}
+ else{discard_failed_network_queue(raw_out);discard_failed_network_queue(control_out);}
+ if(epoch==atomic_load(&network_epoch))ble_bridge_reset_session();
  wifi_diag_queue(WD_LAN_RAW_DEPTH,WD_LAN_RAW_HIGH,uxQueueMessagesWaiting(raw_out));
  wifi_diag_queue(WD_LAN_CONTROL_DEPTH,WD_LAN_CONTROL_HIGH,uxQueueMessagesWaiting(control_out));
  done:esp_tls_server_session_delete(tls);close(fd);

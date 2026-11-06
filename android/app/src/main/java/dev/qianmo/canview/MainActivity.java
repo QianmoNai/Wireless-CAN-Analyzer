@@ -740,6 +740,11 @@ public class MainActivity extends Activity {
             }
             @Override public void onPageFinished(WebView view, String url) {
                 if (closed) return;
+                String version="";
+                try { version=getPackageManager().getPackageInfo(getPackageName(),0).versionName; }
+                catch (PackageManager.NameNotFoundException ignored) {}
+                String about="CAN Scope "+version+" · 本地运行，无云端服务 · 退出到后台时断开监控连接，返回后可重新连接。";
+                view.evaluateJavascript("document.querySelectorAll('.protocol').forEach(p=>p.textContent="+JSONObject.quote(about)+")",null);
                 applyStoredImport(DevicePanel.this);
             }
         });

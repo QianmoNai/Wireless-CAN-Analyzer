@@ -12,6 +12,9 @@ int ble_bridge_settings_command(const uint8_t bytes[20],bridge_packet_t *reply);
 void ble_bridge_reset_session(void);
 void ble_bridge_publish(const bridge_packet_t *packet);
 uint32_t ble_bridge_dropped(void);
+/* Accepted transport packet lost on delivery failure. The caller owns it once;
+ * immediate enqueue rejection is still counted by the publishing bridge. */
+void ble_bridge_delivery_failed(const bridge_packet_t *packet);
 bool ble_bridge_connected(void);
 /* Actual negotiated GAP interval, in 1.25 ms units; 0 = no connection. */
 uint16_t ble_bridge_connection_interval(void);

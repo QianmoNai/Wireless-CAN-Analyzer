@@ -20,7 +20,7 @@ typedef struct {
  const uint8_t *serverkey_buf; size_t serverkey_bytes;
  unsigned tls_handshake_timeout_ms;
 } esp_tls_cfg_server_t;
-typedef struct {unsigned left; uint8_t kind;} queue_t;
+typedef struct queue {unsigned left; uint8_t kind;} queue_t;
 static queue_t control,raw;
 static queue_t *control_out=&control,*raw_out=&raw;
 static atomic_uint network_epoch;
@@ -33,7 +33,8 @@ static unsigned clock_ms,delays,queue_calls,auth_reads,data_reads,closes,deletes
 static unsigned auth_offset,writes,body_writes,command_calls;
 static bool handshake_ok,options_ok,nonblocking,authenticated,write_stall;
 static bool uart_selected,switch_data,switch_failure,handshake_switch;
-static unsigned option_calls;
+static unsigned option_calls,delivery_failures;
+static bool epoch_on_write,epoch_on_eof,offline_in_read,wifi_online=true;
 static int auth_want,write_mode,write_step;
 int64_t esp_timer_get_time(void){return (int64_t)clock_ms*1000;}
 static uint32_t millis(void){return clock_ms;}
@@ -45,7 +46,7 @@ static uint32_t millis(void){return clock_ms;}
 void vTaskDelay(unsigned ticks){assert(ticks>0);delays++;clock_ms+=ticks*CAN_TEST_TICK_MS;}
 static bool network_wifi_mode(void){return true;}
 bool uart_bridge_selected(void){return uart_selected;}
-static bool network_connected(void){return atomic_load(&linked);}
+static bool network_connected(void){return wifi_online&&atomic_load(&linked);}
 static esp_tls_t *esp_tls_init(void){return &context;}
 static int esp_tls_server_session_create(esp_tls_cfg_server_t *cfg,int fd,esp_tls_t *tls){
  assert(fd==23&&tls==&context&&cfg->tls_handshake_timeout_ms==4000);
@@ -81,15 +82,17 @@ static int esp_tls_conn_read(esp_tls_t *tls,void *p,size_t n){
   unsigned take=n<7?n:7;memcpy(p,fake+auth_offset,take);auth_offset+=take;return (int)take;
  }
  data_reads++;
+ if(offline_in_read){wifi_online=false;raw.left=2;return ESP_TLS_ERR_SSL_WANT_READ;}
  if(data_reads==1)return ESP_TLS_ERR_SSL_WANT_READ;
  if(data_reads==2)return ESP_TLS_ERR_SSL_WANT_WRITE;
  /* A command split over two reads, then EOF. No packet repr is logged. */
  if(data_reads==3){assert(n==20);memset(p,0,5);((uint8_t*)p)[0]=1;((uint8_t*)p)[1]=0x19;return 5;}
  if(data_reads==4){assert(n==15);memset(p,0,15);return 15;}
- assert(data_reads==5);return 0;
+ assert(data_reads==5);if(epoch_on_eof){atomic_fetch_add(&network_epoch,1);raw.left=2;}return 0;
 }
 static int esp_tls_conn_write(esp_tls_t *tls,const void *p,size_t n){
  assert(tls==&context&&n>0);writes++;
+ if(nonblocking&&epoch_on_write){atomic_fetch_add(&network_epoch,1);raw.left=2;return -1234;}
  if(write_stall)return ESP_TLS_ERR_SSL_WANT_WRITE;
  if(write_mode){
   int step=write_step++;
@@ -115,6 +118,7 @@ void ble_bridge_reset_session(void){
  if(!atomic_load(&linked)){control=(queue_t){1,18};raw=(queue_t){2,19};}
 }
 static void uart_bridge_drop_packet(const bridge_packet_t *p){(void)p;}
+void ble_bridge_delivery_failed(const bridge_packet_t *p){delivery_failures++;uart_bridge_drop_packet(p);}
 static bool tls_diagnostic_reply(esp_tls_t *tls,uint32_t request){(void)tls;(void)request;assert(0);return false;}
 int ble_bridge_command(const uint8_t p[20]){
  assert(p[0]==1&&p[1]==0x19);command_calls++;
@@ -125,7 +129,7 @@ int ble_bridge_command(const uint8_t p[20]){
 static void reset(void){
  clock_ms=delays=queue_calls=auth_reads=data_reads=closes=deletes=auth_offset=writes=body_writes=command_calls=0;
  handshake_ok=options_ok=true;nonblocking=authenticated=write_stall=false;auth_want=write_mode=write_step=0;
- uart_selected=true;switch_data=switch_failure=handshake_switch=false;option_calls=0;
+ uart_selected=true;switch_data=switch_failure=handshake_switch=false;option_calls=delivery_failures=0;epoch_on_write=epoch_on_eof=offline_in_read=false;wifi_online=true;
  control=(queue_t){0};raw=(queue_t){0};network_epoch=0;linked=false;wifi_diag_mode(1);
 }
 int main(void){
@@ -156,6 +160,14 @@ int main(void){
  reset();handshake_switch=true;serve_client(23);
  assert(!uart_selected&&option_calls==2&&data_reads==5&&closes==1);
  wifi_diag_snapshot(&snapshot);assert(snapshot.records[WD_TCP_NODELAY].value==1);
+#endif
+#if CAN_TEST_DELIVERY_EPOCH_FENCE
+ reset();epoch_on_write=true;serve_client(23);
+ assert(network_epoch==1&&!delivery_failures&&closes==1&&!atomic_load(&linked));
+ reset();epoch_on_eof=true;serve_client(23);
+ assert(network_epoch==1&&!delivery_failures&&closes==1&&!atomic_load(&linked));
+ reset();offline_in_read=true;serve_client(23);
+ assert(network_epoch==0&&delivery_failures==2&&closes==1&&!atomic_load(&linked));
 #endif
  puts("handshake fences, partial control-first batch, split first frame, WANT yield/deadline, common auth-WANT abort");
 }

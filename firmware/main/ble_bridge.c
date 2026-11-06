@@ -756,6 +756,10 @@ void ble_bridge_publish(const bridge_packet_t *packet)
     }
 }
 uint32_t ble_bridge_dropped(void) { return atomic_load(&dropped); }
+void ble_bridge_delivery_failed(const bridge_packet_t *packet) {
+    atomic_fetch_add(&dropped,1);
+    uart_bridge_drop_packet(packet);
+}
 uint16_t ble_bridge_connection_interval(void) {
     struct ble_gap_conn_desc desc;
     int handle=atomic_load(&connection);

@@ -57,6 +57,7 @@ def main():
     parser.add_argument('--display', default=':1')
     parser.add_argument('--niri-socket', help='Optional compositor IPC socket for focus on a Niri/Xwayland desktop')
     parser.add_argument('--screenshots', action='store_true', help='Capture native dialogs using ffmpeg')
+    parser.add_argument('--wifi-diag-log',type=Path,help='Optional private numeric TLS/queue diagnostics; Wi-Fi only, adds query traffic')
     parser.add_argument('--reset-usb-reconnect',type=Path,metavar='ESPTOOL',
                         help='USB only: watchdog-reset this analyzer and test packaged identity reconnect')
     parser.add_argument('--all-bitrates',action='store_true',help='Rate-enabled fixture only: apply all four rates through the actual GUI')
@@ -67,6 +68,8 @@ def main():
     args = parser.parse_args()
     if args.reset_usb_reconnect and args.mode!='usb':
         parser.error('--reset-usb-reconnect requires --mode usb')
+    if args.wifi_diag_log and args.mode!='wifi':
+        parser.error('--wifi-diag-log requires --mode wifi')
     if args.monitor_seconds and not 5<=args.monitor_seconds<=60:
         parser.error('--monitor-seconds must be zero or 5..60')
     import asyncio
@@ -107,7 +110,9 @@ def main():
                     return False
 
             with args.output.with_suffix('.qt.log').open('w') as log:
-                proc = subprocess.Popen([str(args.binary.resolve())], env=env, stdout=log, stderr=subprocess.STDOUT)
+                command=[str(args.binary.resolve())]
+                if args.wifi_diag_log:command+=['--wifi-diag-log',str(args.wifi_diag_log.resolve())]
+                proc = subprocess.Popen(command, env=env, stdout=log, stderr=subprocess.STDOUT)
                 wait_until(debugger_ready)
                 with sync_playwright() as pw:
                     browser = pw.chromium.connect_over_cdp(f'http://127.0.0.1:{port}', no_defaults=True)
@@ -119,7 +124,10 @@ def main():
                     setup = next(ast.literal_eval(n.value) for n in tree.body if isinstance(n, ast.Assign)
                                  and any(isinstance(t, ast.Name) and t.id == 'setup' for t in n.targets))
                     page.evaluate(setup)
-                    page.evaluate("""()=>{window.queryAudit=[];const prior=onNative;onNative=(kind,data)=>{
+                    page.evaluate("""()=>{window.queryAudit=[];window.sendAudit=[];const prior=onNative;onNative=(kind,data)=>{
+                        if(['manualResult','error','state'].includes(kind)){
+                            sendAudit.push({kind,data,at:Date.now()});if(sendAudit.length>40)sendAudit.shift();
+                        }
                         if(kind==='queryState'||kind==='error'){
                             queryAudit.push({kind,data,at:Date.now()});if(queryAudit.length>24)queryAudit.shift();
                         }return prior(kind,data)
@@ -228,6 +236,7 @@ def main():
                     base = fixture.symbols['can_bench']+(args.bus-1)*52
                     for identifier, extended, remote, dlc in [(0x6a0, False, False, 8),
                             (0x1abcde, True, False, 8), (0x6a1, False, True, 8), (0x1abcdf, True, True, 0)]:
+                        report['active_operation']='manual-'+hex(identifier)
                         data = bytes([0x12, 0x34, 0xab, 0xcd, 0, 0x55, 0xaa, 0xff])
                         before = fixture.read(base+48)[0]
                         previous = page.evaluate("$('sendResult').firstElementChild?.dataset.token||''")
@@ -238,7 +247,12 @@ def main():
                         if not remote:
                             page.locator('#sendData').fill(data.hex(' '))
                         page.locator('#sendOnce').click()
-                        page.wait_for_function("previous=>$('sendResult').firstElementChild?.dataset.token!==previous&&$('sendResult').firstElementChild?.dataset.state==='success'", arg=previous, timeout=5000)
+                        try:
+                            page.wait_for_function("previous=>$('sendResult').firstElementChild?.dataset.token!==previous&&$('sendResult').firstElementChild?.dataset.state==='success'", arg=previous, timeout=5000)
+                        except Exception:
+                            report['manual_failure_state']=page.evaluate("({connected,events:sendAudit,results:[...$('sendResult').children].map(p=>({token:p.dataset.token,state:p.dataset.state,text:p.textContent})),message:$('connectionMessage').textContent})")
+                            report['manual_failure_physical']=dict(before_rx=before,state=fixture.read(base,13),health=fixture.health())
+                            raise
                         wait_until(lambda: fixture.read(base+48)[0] > before, 3)
                         actual = struct.pack('<IIII', *fixture.read(base+32, 4))
                         if (struct.unpack_from('<I', actual)[0] != identifier or actual[4] != int(extended)
@@ -247,6 +261,7 @@ def main():
                             raise AssertionError('Desktop frame differs from physical CAN reception')
                         report['frames'].append(dict(id=hex(identifier), extended=extended, remote=remote,
                                                      dlc=dlc, physical_match=True))
+                    report['manual_events']=page.evaluate('sendAudit')
                     # Pause display; retention continues, so capture export at submission.
                     page.evaluate('togglePause()')
                     def file_dialog(button, path, title):

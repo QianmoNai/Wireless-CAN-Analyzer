@@ -53,6 +53,7 @@ unsigned ulTaskNotifyTake(int clear,unsigned ticks){(void)clear;now+=ticks;retur
 void usb_serial_jtag_set_select_notif_callback(usj_select_notif_callback_t callback){(void)callback;}
 int64_t esp_timer_get_time(void){return (int64_t)now*1000;}
 bool network_usb_mode(void){return mode==4;}
+static atomic_uint network_epoch;
 bool network_wifi_mode(void){return mode==1;}
 bool usb_serial_jtag_is_connected(void){return true;}
 int usb_serial_jtag_driver_install(const usb_serial_jtag_driver_config_t*c){(void)c;return 0;}
@@ -146,25 +147,25 @@ int main(void){
  // LAN batches: count only uncompleted frames and a partial final frame.
  uint8_t batch[60];memcpy(batch,raw.bytes,20);memcpy(batch+20,rejected.bytes,20);memcpy(batch+40,ack.bytes,20);
  before=drop_total;write_at=0;write_results[0]=20;write_results[1]=5;write_results[2]=-1;
- assert(!tls_write_batch(NULL,batch,3));assert(drop_total==before+7);
+ assert(!tls_write_batch(NULL,batch,3,0));assert(drop_total==before+7);
  before=drop_total;write_at=0;write_results[0]=-1;
- assert(!tls_write_batch(NULL,batch,3));assert(drop_total==before+12+7);
+ assert(!tls_write_batch(NULL,batch,3,0));assert(drop_total==before+12+7);
  before=drop_total;write_at=0;write_results[0]=999;
- assert(tls_write_batch(NULL,batch,3));assert(drop_total==before);
+ assert(tls_write_batch(NULL,batch,3,0));assert(drop_total==before);
  write_at=0;write_results[0]=999;assert(tls_write_all(NULL,batch,60));
  QueueHandle_t lan=xQueueCreate(2,sizeof(bridge_packet_t));xQueueSend(lan,&raw,0);xQueueSend(lan,&ack,0);
  before=drop_total;discard_network_queue(lan);assert(drop_total==before+12);
  discard_network_queue(lan);assert(drop_total==before+12);
  wifi_diag_snapshot_t d0,d1;wifi_diag_snapshot(&d0);
  write_at=0;write_results[0]=ESP_TLS_ERR_SSL_WANT_WRITE;write_results[1]=ESP_TLS_ERR_SSL_WANT_READ;write_results[2]=999;
- assert(tls_write_batch(NULL,batch,3));wifi_diag_snapshot(&d1);
+ assert(tls_write_batch(NULL,batch,3,0));wifi_diag_snapshot(&d1);
  assert(d1.records[WD_TLS_WANT_EVENTS].value-d0.records[WD_TLS_WANT_EVENTS].value==2);
  assert(d1.records[WD_TLS_BLOCK_US_TOTAL].value-d0.records[WD_TLS_BLOCK_US_TOTAL].value==10000);
  assert(d1.records[WD_TLS_BLOCK_US_MAX].value>=10000);
  // Timed-out partial ownership is unchanged; diagnostic observations do not
  // manufacture another drop, and clearing empty queues cannot recount it.
  wifi_diag_snapshot(&d0);before=drop_total;forced_write_rc=ESP_TLS_ERR_SSL_WANT_WRITE;
- assert(!tls_write_batch(NULL,batch,3));forced_write_rc=0;
+ assert(!tls_write_batch(NULL,batch,3,0));forced_write_rc=0;
  wifi_diag_snapshot(&d1);
  assert(d1.records[WD_TLS_SEND_TIMEOUTS].value==d0.records[WD_TLS_SEND_TIMEOUTS].value+1);
  assert(d1.records[WD_TLS_SEND_FAILURES].value==d0.records[WD_TLS_SEND_FAILURES].value+1);
@@ -178,7 +179,7 @@ int main(void){
 with tempfile.TemporaryDirectory(prefix="can-uart-downstream-") as temporary:
     harness = Path(temporary) / "downstream.c"
     binary = Path(temporary) / "downstream"
-    source = PRELUDE + function("uart_bridge.c", "void uart_bridge_drop_packet(")
+    source = PRELUDE + function("uart_bridge.c", "void uart_bridge_drop_packet(") + function("ble_bridge.c", "void ble_bridge_delivery_failed(")
     source += '#include "usb_link.c"\n' + PLATFORM
     for marker in ("static uint32_t packet_generation(", "static void wifi_note_queue(", "static bool enqueue_packet(", "static bool dequeue_item(", "static bool dequeue_packet(", "static bool packet_connected(", "static bool notify_connected(", "static bool notify_send(", "static void notify_delay(",
                    "static void deliver_packet(", "static void discard_raw_queue(", "bool ble_bridge_uart_publish("):

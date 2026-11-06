@@ -44,6 +44,7 @@ with tempfile.TemporaryDirectory(prefix='wifi-tls-flow-') as directory:
         tick_ms = 10 if name.startswith('new100hz') else 1
         functions = [function(source, marker) for marker in markers]
         if name != 'old16':
+            functions.insert(-1, function(source, 'static void discard_failed_network_queue('))
             functions.insert(-1, function(source, 'static unsigned collect_batch('))
         c = path / (name+'.c')
         c.write_text(prelude.replace('/* PRODUCTION_FUNCTIONS */', '\n'.join(functions)))
@@ -51,6 +52,7 @@ with tempfile.TemporaryDirectory(prefix='wifi-tls-flow-') as directory:
         subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror',
                         '-DCAN_WIFI_TCP_NODELAY=0', '-DCAN_WIFI_TLS_BATCH='+str(batch),
                         '-DCAN_TEST_TICK_MS='+str(tick_ms),
+                        '-DCAN_TEST_DELIVERY_EPOCH_FENCE='+str(int(name!='old16')),
                         '-DCAN_WIFI_CAN_TCP_NODELAY='+str(int(name == 'newcan16')),
                         '-I'+str(ROOT/'firmware/main'), '-I'+str(ROOT/'tests/stubs'),
                         str(c), str(ROOT/'firmware/main/wifi_uart_diag.c'),

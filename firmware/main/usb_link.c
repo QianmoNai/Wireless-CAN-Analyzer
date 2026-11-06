@@ -29,15 +29,19 @@ static usb_decoder_t decoder;
 static uint32_t millis(void){return (uint32_t)(esp_timer_get_time()/1000);}
 bool usb_link_connected(void){return network_usb_mode()&&atomic_load(&session_id)&&
     (uint32_t)(millis()-atomic_load(&last_ping))<4000&&usb_serial_jtag_is_connected();}
-static void discard_queue(QueueHandle_t queue){
+static void discard_queue(QueueHandle_t queue,bool failed){
     queued_t q;
-    while(xQueueReceive(queue,&q,0)==pdTRUE)uart_bridge_drop_packet(&q.packet);
+    while(xQueueReceive(queue,&q,0)==pdTRUE){
+        if(failed)ble_bridge_delivery_failed(&q.packet);
+        else uart_bridge_drop_packet(&q.packet);
+    }
 }
 // The same guard serializes mode changes, command submission and session resets.
-static void clear_session(void){
+static void clear_session_failed(bool failed){
     atomic_store(&session_id,0);decoder.used=0;
-    discard_queue(raw_out);discard_queue(control_out);
+    discard_queue(raw_out,failed);discard_queue(control_out,failed);
 }
+static void clear_session(void){clear_session_failed(false);}
 void usb_link_reset(void){
     if(!guard)return;
     xSemaphoreTake(guard,portMAX_DELAY);clear_session();xSemaphoreGive(guard);
@@ -124,7 +128,7 @@ static void service(const uint8_t *bytes,int n){
     bool ok=true;
     if(!network_usb_mode()&&atomic_load(&session_id))clear_session();
     {
-        if(atomic_load(&session_id)&&!usb_link_connected()){clear_session();ble_bridge_reset_session();}
+        if(atomic_load(&session_id)&&!usb_link_connected()){clear_session_failed(true);ble_bridge_reset_session();}
         for(int i=0;i<n&&ok;i++){
             uint32_t session;uint8_t payload[20];
             if(usb_decode(&decoder,bytes[i],&session,payload))ok=incoming(session,payload);
@@ -138,13 +142,13 @@ static void service(const uint8_t *bytes,int n){
             if(q.session==atomic_load(&session_id))ok=send_packet(q.session,q.packet.bytes);
             // A partial CUSB frame has no usable payload. Accepted queued UART
             // packets are owned here; queue rejection is owned by the caller.
-            if(!ok || q.session!=atomic_load(&session_id))uart_bridge_drop_packet(&q.packet);
+            if(!ok || q.session!=atomic_load(&session_id))ble_bridge_delivery_failed(&q.packet);
         }
         if(!ok){
             // A management reply outside a USB data session owns no BLE/TLS
             // queues or polling leases. Drop its decoder state, not theirs.
             bool owned=atomic_load(&session_id)!=0;
-            clear_session();
+            clear_session_failed(owned);
             if(owned)ble_bridge_reset_session();
         }
     }

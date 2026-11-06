@@ -11,7 +11,15 @@ static inline uint32_t usb_get32(const uint8_t *p) {
 static inline void usb_put32(uint8_t *p,uint32_t v) { for(unsigned i=0;i<4;i++)p[i]=(uint8_t)(v>>(8*i)); }
 static inline uint32_t usb_crc(const uint8_t *p,unsigned n) {
     uint32_t crc=UINT32_MAX;
-    for(unsigned i=0;i<n;i++){crc^=p[i];for(unsigned j=0;j<8;j++)crc=(crc>>1)^(0xedb88320u&-(crc&1u));}
+    // IEEE CRC32 in two four-bit steps per byte; the wire format is unchanged.
+    static const uint32_t nibble[16]={
+        0x00000000u,0x1db71064u,0x3b6e20c8u,0x26d930acu,
+        0x76dc4190u,0x6b6b51f4u,0x4db26158u,0x5005713cu,
+        0xedb88320u,0xf00f9344u,0xd6d6a3e8u,0xcb61b38cu,
+        0x9b64c2b0u,0x86d3d2d4u,0xa00ae278u,0xbdbdf21cu};
+    for(unsigned i=0;i<n;i++){
+        crc^=p[i];crc=(crc>>4)^nibble[crc&15];crc=(crc>>4)^nibble[crc&15];
+    }
     return ~crc;
 }
 static inline void usb_encode(uint8_t out[32],uint32_t session,const uint8_t payload[20]) {

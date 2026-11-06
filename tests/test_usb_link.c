@@ -31,6 +31,8 @@ static unsigned resets,commands_received,command_status,uart_dropped;
 void uart_bridge_drop_packet(const bridge_packet_t *p){
  if(p->bytes[0]==1&&p->bytes[1]==19&&p->bytes[2]>=1&&p->bytes[2]<=12&&!p->bytes[3])uart_dropped+=p->bytes[2];
 }
+static unsigned delivery_dropped;
+void ble_bridge_delivery_failed(const bridge_packet_t *p){delivery_dropped++;uart_bridge_drop_packet(p);}
 static uint8_t sent[32768];static size_t sent_count;
 int64_t esp_timer_get_time(void){return (int64_t)now*1000+work_us;}
 bool network_usb_mode(void){return selected;}
@@ -206,6 +208,21 @@ int main(void){
  selected=true;sent_count=0;hello(950);reset_before=resets;short_write_call=write_calls+2;
  feed(950,monitor);assert(!usb_link_connected()&&resets==reset_before+1);
  short_write_call=0;service(NULL,0);assert(resets==reset_before+1);
+ // CAN losses after transport admission must be counted once, including the
+ // failed in-flight frame and the queued tail. Queue rejection stays caller-owned.
+ hello(1000);bridge_packet_t can={.bytes={1,1,0,8}};
+ unsigned delivery_before=delivery_dropped,uart_before=uart_dropped;
+ for(unsigned i=0;i<128;i++)assert(usb_link_send(&can));
+ assert(!usb_link_send(&can)&&delivery_dropped==delivery_before);
+ assert(usb_link_send(&control));short_write=true;service(NULL,0);short_write=false;
+ assert(!usb_link_connected()&&delivery_dropped==delivery_before+129&&uart_dropped==uart_before);
+ hello(1001);service(NULL,0);assert(delivery_dropped==delivery_before+129);
+ // Explicit user/session reset is intentional; physical loss is a failure.
+ assert(usb_link_send(&can));usb_link_reset();assert(delivery_dropped==delivery_before+129);
+ hello(1002);assert(usb_link_send(&can));physical=false;service(NULL,0);physical=true;
+ assert(delivery_dropped==delivery_before+130);
+ hello(1003);assert(usb_link_send(&can));now+=4001;service(NULL,0);
+ assert(delivery_dropped==delivery_before+131&&!usb_link_connected());
  free(raw_out->data);free(raw_out);free(control_out->data);free(control_out);
  puts("USB firmware: sessions, priority/backpressure, short write, worker wake, input fairness, frame/time budgets and starvation protection PASS");
 }
