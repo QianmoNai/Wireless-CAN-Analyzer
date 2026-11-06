@@ -7,13 +7,19 @@ static uint32_t get32(const uint8_t *p) {
 static void put32(uint8_t *p,uint32_t n) {
   for (unsigned i=0;i<4;i++) p[i]=(uint8_t)(n>>(8*i));
 }
-static void poll(volatile CAN_LoadControl *c,CAN_LoadState *s,uint32_t now,
-                  uint32_t clock_hz,bool allowed,CAN_LoadSend send,void *context) {
+static void poll(volatile CAN_LoadControl *c,CAN_LoadState *s,uint32_t now_ms,
+                  uint32_t now_us,uint32_t clock_hz,bool allowed,CAN_LoadSend send,void *context) {
   uint32_t request=c->request;
+  /* Choose the clock from the same published request that admission consumes.
+   * An SWD request can arrive between the caller's inspection and this poll. */
+  uint32_t command=c->command;
+  if (!clock_hz) clock_hz=request && request!=c->done && command?
+      (command==1?1000U:1000000U):(s->clock_hz?s->clock_hz:1000U);
+  uint32_t now=clock_hz==1000?now_ms:now_us;
   if (request && request!=c->done) {
-    if (c->command==0) {
+    if (command==0) {
       s->receiving=false;c->active=0;c->result=0;
-    } else if (c->command>4 || (c->command==1)!=(clock_hz==1000) ||
+    } else if (command>4 || (command==1)!=(clock_hz==1000) ||
                !c->rate_hz || c->rate_hz>(clock_hz==1000?1000U:10000U) ||
                !c->frames || c->frames>CAN_LOAD_MAX_FRAMES || !c->nonce || !send) {
       c->result=1;
@@ -25,7 +31,7 @@ static void poll(volatile CAN_LoadControl *c,CAN_LoadState *s,uint32_t now,
       memset(s,0,sizeof(*s));
       memset((void *)c->bus,0,sizeof(c->bus));
       s->rate_hz=c->rate_hz;s->frames=c->frames;s->nonce=c->nonce;
-      s->clock_hz=clock_hz;s->bus_mask=c->command==2?1:c->command==3?2:3;
+      s->clock_hz=clock_hz;s->bus_mask=command==2?1:command==3?2:3;
       c->clock_hz=s->clock_hz;c->bus_mask=s->bus_mask;
       s->started_at=now;s->receiving=true;
       s->next_due[0]=s->next_due[1]=now;
@@ -82,11 +88,16 @@ bool CAN_LoadReceive(volatile CAN_LoadControl *c,CAN_LoadState *s,unsigned bus,
 }
 void CAN_LoadPoll(volatile CAN_LoadControl *c,CAN_LoadState *s,uint32_t now,
                   bool allowed,CAN_LoadSend send,void *context) {
-  poll(c,s,now,1000,allowed,send,context);
+  poll(c,s,now,0,1000,allowed,send,context);
 }
 void CAN_LoadPollUs(volatile CAN_LoadControl *c,CAN_LoadState *s,uint32_t now,
                     bool allowed,CAN_LoadSend send,void *context) {
-  poll(c,s,now,1000000,allowed,send,context);
+  poll(c,s,0,now,1000000,allowed,send,context);
+}
+void CAN_LoadPollClocks(volatile CAN_LoadControl *c,CAN_LoadState *s,
+                        uint32_t now_ms,uint32_t now_us,
+                        bool allowed,CAN_LoadSend send,void *context) {
+  poll(c,s,now_ms,now_us,0,allowed,send,context);
 }
 uint32_t CAN_LoadClock(uint32_t cycles,uint32_t cycles_per_us,
                        uint32_t *previous,uint32_t *remainder,uint32_t *micros) {

@@ -107,6 +107,24 @@ int main(void) {
   assert(calls[0]==2 && calls[1]==2 && control.bus[0].skipped_slots==9);
   fresh(10001,3,9);control.command=2;
   CAN_LoadPollUs(&control,&state,0,true,send_frame,&control);assert(control.result==1 && !calls[0]);
+  // Idle state retains the preceding run's clock. A newly published request
+  // chooses its own clock inside admission, including opposite-clock starts.
+  for (unsigned op=1;op<=4;op++) {
+    fresh(op==1?1000:7500,3,9);control.command=op;
+    state.clock_hz=op==1?1000000:1000;
+    CAN_LoadPollClocks(&control,&state,12,345000,true,send_frame,&control);
+    assert(!control.result && control.done==control.request);
+    assert(control.clock_hz==(op==1?1000U:1000000U));
+    assert(control.started_at==(op==1?12U:345000U));
+    assert(control.bus_mask==(op==2?1U:op==3?2U:3U));
+    // Config changes without publishing a request cannot retime an active run.
+    control.command=op==1?2:1;
+    CAN_LoadPollClocks(&control,&state,13,345134,true,send_frame,&control);
+    assert(control.clock_hz==(op==1?1000U:1000000U));
+    control.command=0;control.request++;
+    CAN_LoadPollClocks(&control,&state,14,345268,true,send_frame,&control);
+    assert(!control.active && !control.result && control.done==control.request);
+  }
   // DWT conversion carries fractional cycles and handles the 32-bit wrap.
   uint32_t previous=UINT32_MAX-199,remainder=0,micros=UINT32_MAX;
   assert(CAN_LoadClock(0,400,&previous,&remainder,&micros)==UINT32_MAX && remainder==200);

@@ -33,6 +33,10 @@ void CAN_LoadPoll(volatile CAN_LoadControl *, CAN_LoadState *, uint32_t now,
                   bool allowed, CAN_LoadSend send, void *context);
 void CAN_LoadPollUs(volatile CAN_LoadControl *, CAN_LoadState *, uint32_t now,
                     bool allowed, CAN_LoadSend send, void *context);
+/* Request admission selects its clock internally; no caller-side SWD race. */
+void CAN_LoadPollClocks(volatile CAN_LoadControl *, CAN_LoadState *,
+                        uint32_t now_ms, uint32_t now_us,
+                        bool allowed, CAN_LoadSend send, void *context);
 /* Incremental DWT conversion preserves cycle-counter wrap and fractional us. */
 uint32_t CAN_LoadClock(uint32_t cycles, uint32_t cycles_per_us,
                        uint32_t *previous, uint32_t *remainder, uint32_t *micros);

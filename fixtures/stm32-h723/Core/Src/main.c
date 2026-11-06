@@ -246,16 +246,13 @@ int main(void)
         !can_bitrate_bench[0].paused && !can_bitrate_bench[1].paused &&
         can_bench[0].trigger==can_bench[0].done && can_bench[1].trigger==can_bench[1].done;
     uint32_t now_us=load_micros();
-    bool new_load_request=dual_load_bench.request && dual_load_bench.request!=dual_load_bench.done;
-    bool load_us=new_load_request && dual_load_bench.command?
-        dual_load_bench.command>=2:dual_load_state.clock_hz==1000000U;
-    if (load_us) CAN_LoadPollUs(&dual_load_bench,&dual_load_state,now_us,load_allowed,load_send,NULL);
-    else CAN_LoadPoll(&dual_load_bench,&dual_load_state,HAL_GetTick(),load_allowed,load_send,NULL);
+    CAN_LoadPollClocks(&dual_load_bench,&dual_load_state,HAL_GetTick(),now_us,
+                       load_allowed,load_send,NULL);
     can_bench_tx_free[0]=HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1);
     can_bench_tx_free[1]=HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan2);
     /* Fixture display work must not set the source rate ceiling. This affects
      * only explicit microsecond stress runs; the analyzers and apps still draw. */
-    if (load_us && dual_load_bench.active) continue;
+    if (dual_load_state.clock_hz==1000000U && dual_load_bench.active) continue;
 #endif
     LCD_Status display = {
       .tx = can_tx_queued, .busy = can_tx_busy, .rx = can_rx_count,
