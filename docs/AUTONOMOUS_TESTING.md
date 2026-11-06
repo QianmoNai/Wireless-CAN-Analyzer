@@ -1,6 +1,6 @@
 # CAN 模式自主测试台架
 
-2026-11-06曾按用户要求暂停，后续已获指令恢复。暂停时安装Android1.21.10、Desktop1.2.20，物理固件保持1.24.7；已完成查询开关140轮、手机四场景及导入后四场景、桌面三传输整包和两台同时达妙查询九组合。收尾快照为`pause-checkpoint.json`。恢复后已重新核对ADB、两台USB、J-Link及运行镜像；Android Wi-Fi后台租约专项补验通过，Desktop1.2.21实际查询频率显示完成78轮开关、三路整包操作和双通道63轮显示/全屏；无线压力及初始化仍出现转发丢弃，整体无丢弃门槛未通过，本机入口保留1.2.20、候选1.2.21单独保存，详见性能记录。
+2026-11-06曾按用户要求暂停，后续已获指令恢复。暂停时安装Android1.21.10、Desktop1.2.20，物理固件保持1.24.7；已完成查询开关140轮、手机四场景及导入后四场景、桌面三传输整包和两台同时达妙查询九组合。收尾快照为`pause-checkpoint.json`。恢复后已重新核对ADB、两台USB、J-Link及运行镜像；Android Wi-Fi后台租约专项补验通过，Desktop1.2.21实际查询频率显示完成78轮开关、三路整包操作和双通道63轮显示/全屏；无线压力及初始化仍出现转发丢弃，整体无丢弃门槛未通过，本机入口依据已通过的显示功能证据更新1.2.21，保留1.2.20；无线无丢弃资格仍未通过，详见性能记录。
 
 当前台架为两台原生 USB ESP32-S3、J-Link/STM32H723 独立双 CAN、ADB Android 手机和 Linux 桌面。测试只对虚拟电机/IMU及专用测试 ID 操作。原始报告保存于本机 `dist/can-go-20261106/autonomy-audit/`；构建、模拟与物理结果分别记录在 [性能记录](PERFORMANCE.md)。
 
@@ -23,6 +23,7 @@
 ## 可重复入口
 
 - `scripts/test-can-hardware.py`：USB/BLE/Wi-Fi、虚拟电机查询及设备计数。
+- `scripts/test-ble-startup-hardware.py --fixture stm32h723-dual --elf <运行镜像ELF> --port <by-id> --channel 1|2 --repeat 3 --output <报告>`：原生BLE启动分段，覆盖模式选择前、连接、原始流、实际达妙查询反馈、停止确认及恢复后的计数。功能完成与无丢弃分别记录，任何新增设备/App丢弃均使整体失败；无实际CAN或查询反馈也失败。身份、镜像或初始总线健康不匹配时不切模式。`--compare-mtu`仅用于隔离BlueZ私有API比较，可能额外启停通知，并非生产连接策略；`--diagnostics`显式要求临时固件的只读诊断特征，默认不读可能过期的服务缓存项。此入口不代替GUI操作验收。
 - `scripts/test-can-bitrates-hardware.py`：四档速率的停发协调和双向物理帧核对。
 - `scripts/test-usb-command-admission-hardware.py`：不加延时的USB握手后首条设置命令受理与执行结果核对。
 - `scripts/test-usb-management-isolation-hardware.py`：需要本机PyUSB/libusb权限，按物理身份临时接管该分析仪CDC数据接口；512条只读查询期间暂停bulk IN读取，核对无线静默模式不被重置，随后恢复监控、内核CDC驱动及USB＋CAN。只在明确STM32模拟器台架运行，不重放超时请求。
