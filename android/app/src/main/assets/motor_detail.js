@@ -106,19 +106,25 @@ function detailHome(){closeMotorDetail(false);if(window.CanAndroid&&typeof CanAn
 function detailRetarget(m){if(m!==detailMotor)return;closeDetailChartFullscreen();detailReady=false;clearDetail();resetDetailStream();if(window.CanAndroid&&typeof CanAndroid.showDetail==='function')CanAndroid.showDetail(JSON.stringify(m.config))}
 window.motorDetailSupport=d=>{detailSupported=!!d.supported;detailMaxHz=d.maxHz||0;detailChannel=d.channel||'';if(detailMotor)$('detailSource').textContent=detailChannel;refreshDetail()};
 window.motorDetailMode=d=>{if(detailMotor){if(d.mode!==2)closeDetailChartFullscreen();detailReady=d.mode===2;detailAppliedHz=d.hz||20;resetDetailRates();$('detailSampleResult').textContent=detailReady?'已应用上报上限 '+detailAppliedHz+' Hz':'';clearDetail();resetDetailStream();detailMotor.feedback=null;detailMotor.time=0;refreshDetail()}};
-window.motorDetailSample=function(d){
- const m=detailMotor;if(!m||!connected||!detailReady||JSON.stringify(m.config)!==d.key)return;
- const a=parsePacket(d.hex);if(!a||a[1]!==11||(a[2]&3)||a[3]>8)return;
+function appendDetailSample(m,hex,age){
+ const a=parsePacket(hex);if(!a||a[1]!==11||(a[2]&3)||a[3]>8)return;
  const c=m.config,p=Motors.profiles[c.profile],data=Array.from(a.slice(8,8+a[3]));let f;
  try{f=p.family==='imu'?Motors.imuFeedback(c.feedbackId,c.feedbackId,data):p.family==='dji'?Motors.djiFeedback(c.profile,c.id,c.feedbackId,data,c.feedbackId):Motors.dmFeedback(c.id,c.feedbackId,c.feedbackId,data,c.limits)}catch(e){return}
  if(!f||!f.values)return;
- const stamp=u32(a,16),now=Date.now()-Math.max(0,Number(d.age)||0);if(detailLastStamp!==null){const delta=(stamp-detailLastStamp)>>>0;if(delta>0x7fffffff){clearDetail();resetDetailStream();}else detailClock+=delta;}
+ const stamp=u32(a,16),now=Date.now()-Math.max(0,Number(age)||0);if(detailLastStamp!==null){const delta=(stamp-detailLastStamp)>>>0;if(delta>0x7fffffff){clearDetail();resetDetailStream();}else detailClock+=delta;}
  detailLastStamp=stamp;detailLastArrival=now;detailAppCount++;recordDetailFrame(c.feedbackId,data,stamp);if(p.family==='imu'){const old=m.feedback;const times={...(old&&old.times)};for(const k of Object.keys(f.values))times[k]=now;m.feedback={...f,values:{...(old&&old.values),...f.values},times};}else m.feedback=f;m.time=now;watchedDirty=true;
  detailSamples.push({t:detailClock,values:f.values});
  while(detailSamples.length-detailSampleHead>60000||(detailSamples.length-detailSampleHead>1&&detailClock-detailSamples[detailSampleHead].t>60000))detailSampleHead++;
  if(detailSampleHead>=2048){detailSamples=detailSamples.slice(detailSampleHead);detailSampleHead=0;}
  // Record every sample; paint the latest state once per screen refresh.
  requestDetailPaint();
+}
+window.motorDetailSample=function(d){const m=detailMotor;if(!m||!connected||!detailReady||JSON.stringify(m.config)!==d.key)return;appendDetailSample(m,d.hex,d.age)};
+window.motorDetailSamples=function(d,deliveryAge){
+ // A native batch has one config key. Validate it once before synchronous
+ // delivery; each sample still retains its own bytes, age and timestamp.
+ const m=detailMotor;if(!m||!connected||!detailReady||JSON.stringify(m.config)!==d.key)return;
+ for(const item of d.items||[])appendDetailSample(m,item.hex,(item.age||0)+deliveryAge);
 };
 function detailTogglePause(){detailFrozenSamples=detailFrozen===null?detailSamples.slice(detailSampleHead):[];detailFrozen=detailFrozen===null?detailEnd():null;$('detailPause').textContent=detailFrozen===null?'暂停曲线':'继续曲线';drawDetail()}
 function detailEnd(){return detailClock+(detailLastArrival?Date.now()-detailLastArrival:0)}

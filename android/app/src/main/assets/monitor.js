@@ -56,7 +56,7 @@ window.onNative=function(type,d){
  else if(type==='scanStart'){deviceMap.clear();$('deviceList').replaceChildren()}
  else if(type==='device'){deviceMap.set(d.address,d);renderDevices()}
  else if(type==='packets'){appDrops=d.dropped||0;d.items.forEach(item=>nativePacket(item,deliveryAge))}
- else if(type==='motorSamples'){appDrops=d.dropped||0;for(const item of d.packets||[])nativePacket(item,deliveryAge);for(const item of d.items||[])if(window.motorDetailSample)motorDetailSample({key:d.key,hex:item.hex,age:(item.age||0)+deliveryAge});}
+ else if(type==='motorSamples'){appDrops=d.dropped||0;for(const item of d.packets||[])nativePacket(item,deliveryAge);if(window.motorDetailSamples)motorDetailSamples(d,deliveryAge);else for(const item of d.items||[])if(window.motorDetailSample)motorDetailSample({key:d.key,hex:item.hex,age:(item.age||0)+deliveryAge});}
  else if(type==='writeDone'&&!d.success&&window.deviceWriteFailed)deviceWriteFailed('设备未接受设置，请重试');
 };
 function renderDevices(){const root=$('deviceList');root.replaceChildren();for(const d of deviceMap.values()){const button=document.createElement('button');button.className='device';const text=document.createElement('div'),name=document.createElement('strong'),addr=document.createElement('small'),signal=document.createElement('span');name.textContent=d.name;addr.textContent=d.address;text.append(name,addr);signal.className='chip';signal.textContent=d.transport==='usb'?'USB':d.transport==='wifi'?'Wi-Fi':d.rssi+' dBm';button.append(text,signal);button.onclick=()=>{$('scanHint').textContent='正在连接 '+d.name+'…';invoke('connect',d.address)};root.append(button)}}
