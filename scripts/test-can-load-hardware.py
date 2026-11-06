@@ -166,6 +166,20 @@ def main():
       except Exception as e:r['source_stop_failure']=type(e).__name__
       try:await link.close()
       except Exception as e:r['link_close_failure']=type(e).__name__
+      if a.mode=='wifi'and a.wifi_diagnostics and r['errors']:
+       # The source is stopped. A fresh authenticated, read-only connection
+       # may recover the server's final failure counters without a mode reset.
+       # Never resend an outstanding CAN command or resume a query lease.
+       diagnostic=Snapshot(secrets.randbelow(0xffffffff)+1)
+       recovery=LanTransport(diagnostic.receive,lambda _:None)
+       try:
+        await asyncio.wait_for(bench.connect_wifi(recovery,saved),8)
+        await recovery.write(wifi_query(diagnostic.token))
+        r['wifi_failure_diagnostic_after_reconnect']=await asyncio.wait_for(asyncio.shield(diagnostic.future),3)
+       except Exception as e:r['wifi_failure_diagnostic_unavailable']=type(e).__name__
+       finally:
+        diagnostic.cancel()
+        await recovery.close()
       try:
        await prepare_usb(port,data=0)
        r['restored_usb_can']=True
