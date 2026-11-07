@@ -52,6 +52,8 @@ with sync_playwright() as p:
  # delivery can suppress that status, including batches with stale config.
  page.evaluate("onNative('motorSamples',{dropped:23,key:'stale config',items:[]})")
  assert page.locator('#dropStatus').inner_text().endswith('App 23')
+ assert '设备累计丢弃 0' in page.locator('#dropStatus').get_attribute('aria-label')
+ assert '不含 CAN 错误计数' in page.locator('#dropStatus').get_attribute('title')
  assert 'App 丢弃 23' in page.locator('#lossNote').inner_text()
  page.evaluate("onNative('packets',{dropped:24,items:[]})")
  assert page.locator('#dropStatus').inner_text().endswith('App 24')
