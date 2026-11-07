@@ -134,6 +134,14 @@ class LanTransport:
         self.writer = None
         self.tasks = []
         self.closed = False
+        self._disconnect_notified = False
+
+    def _notify_disconnected(self, message):
+        """Report one physical disconnect even if read and heartbeat fail together."""
+        if self.closed or self._disconnect_notified:
+            return
+        self._disconnect_notified = True
+        self.disconnected(message)
 
     async def connect(self, ip, fingerprint, token, port=PORT, *, identity=None):
         pin, key = secret(fingerprint), secret(token)
@@ -179,8 +187,7 @@ class LanTransport:
         except asyncio.CancelledError:
             pass
         except Exception:
-            if not self.closed:
-                self.disconnected('局域网连接中断或超时')
+            self._notify_disconnected('局域网连接中断或超时')
 
     async def heartbeat(self):
         try:
@@ -190,8 +197,7 @@ class LanTransport:
         except asyncio.CancelledError:
             pass
         except Exception:
-            if not self.closed:
-                self.disconnected('局域网心跳失败')
+            self._notify_disconnected('局域网心跳失败')
 
     async def write(self, p):
         if self.closed or not self.writer or len(p) != 20:

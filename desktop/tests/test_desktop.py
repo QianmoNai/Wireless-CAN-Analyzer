@@ -16,6 +16,16 @@ from can_scope.transports import LanTransport, BleTransport
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_disconnect_callback_is_idempotent(self):
+        errors=[]
+        client=LanTransport(lambda _:None,errors.append)
+        client._notify_disconnected('read failed')
+        client._notify_disconnected('heartbeat failed')
+        self.assertEqual(errors,['read failed'])
+        client.closed=True
+        client._notify_disconnected('late failure')
+        self.assertEqual(errors,['read failed'])
+
     def test_remote_device_settings_validation(self):
         p = device_settings_command(network=4, data=1, baud=115200, token=42)
         self.assertEqual(p, bytes((1, 25, 1, 7, 4, 1)) + bytes(2) + (115200).to_bytes(4, 'little') + bytes(4) + (42).to_bytes(4, 'little'))
@@ -420,8 +430,6 @@ class TlsTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):
                 await client.connect('127.0.0.1','00'*32,'12'*32,self.port,identity='0123456789ab')
         self.assertEqual(self.auth,[])
-
-
 
 class BleTests(unittest.IsolatedAsyncioTestCase):
     async def test_batched_notifications_validate_then_preserve_order(self):
