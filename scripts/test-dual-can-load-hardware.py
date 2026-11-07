@@ -99,6 +99,19 @@ def main():
         if snapshot()['active']:raise RuntimeError('Existing load run must be explicitly stopped by its owner')
         try:
             fixture.quiet(0)
+            # A missing CAN acknowledgement can leave the controller's TX
+            # FIFO occupied before the paced run starts. Capture that physical
+            # precondition explicitly so a wiring/transceiver fault is not
+            # reported as wireless loss after a long timeout.
+            if args.microseconds:
+                deadline = time.monotonic() + 1
+                free = fixture.read(fixture.symbols['can_bench_tx_free'], 2)
+                while free != [8, 8] and time.monotonic() < deadline:
+                    time.sleep(.02)
+                    free = fixture.read(fixture.symbols['can_bench_tx_free'], 2)
+                report['preflight_tx_fifo_free'] = free
+                if free != [8, 8]:
+                    raise RuntimeError('STM32 CAN TX FIFO not idle before load; check CAN transceiver power, CANH/CANL, common ground and termination')
             asyncio.run(pairing.select(args.b,3));asyncio.run(pairing.select(args.a,2))
             deadline=time.monotonic()+15
             while True:
