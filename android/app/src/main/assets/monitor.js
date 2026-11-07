@@ -38,7 +38,17 @@ function parsePacket(hex){
  for(let i=0;i<20;i++){const hi=packetNibbles[hex.charCodeAt(i*2)],lo=packetNibbles[hex.charCodeAt(i*2+1)];if(hi===undefined||lo===undefined||hi<0||lo<0)return null;a[i]=hi*16+lo;}
  return a[0]===1?a:null;
 }
-function renderDropCounts(){$('dropStatus').textContent='设备 '+firmwareDrops+' · App '+appDrops;updateHistoryNote()}
+function renderDropCounts(){
+ const status=$('dropStatus');
+ status.textContent='设备 '+firmwareDrops+' · App '+appDrops;
+ // Keep the compact counter readable on a phone, but expose the scope of each
+ // counter to touch users and screen readers. The device value is the ESP32
+ // lifetime total (CAN/bridge/dual forwarding); the App value is this process'
+ // bounded delivery queue total. Neither number is a CAN bus error count.
+ const label='设备累计丢弃 '+firmwareDrops+'；App 本次运行丢弃 '+appDrops+'；不含 CAN 错误计数';
+ status.title=label;status.setAttribute('aria-label',label);
+ updateHistoryNote()
+}
 function updateAppDrops(value){const next=value||0;if(next===appDrops)return;appDrops=next;renderDropCounts()}
 function nativePacket(item,deliveryAge){if(item&&item.uart!==undefined&&window.uartBatch)uartBatch(item);else if(typeof item==='string')processPacket(item);else processPacket(item.hex,(item.age||0)+deliveryAge)}
 function processPacket(hex,age=0){
