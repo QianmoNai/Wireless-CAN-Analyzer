@@ -70,7 +70,7 @@ window.uartMode=false;
  }
  function mode(enabled){const previous=window.uartMode;window.uartMode=enabled;
   document.querySelector('[data-tab="live"]').hidden=enabled;document.querySelector('[data-tab="motor"]').hidden=enabled;
-  if(previous!==enabled){stop('数据类型已改变，已停止后续发送');lastSequence=null;resetWatchedFeedback();if(enabled)showTab('uart');else if(!panel.hidden)showTab('motor');}
+  if(previous!==enabled){stop('数据类型已改变，已停止后续发送');lastSequence=null;resetWatchedFeedback();if(window.uartWaveformReset)window.uartWaveformReset();if(enabled)showTab('uart');else if(!panel.hidden)showTab('motor');}
   $('uartModeHint').textContent=enabled?`UART 已启用 · TX=GPIO43，RX=GPIO44 · ${baud} baud，8N1。波特率在设备屏幕设置，须与外部单片机一致。`:'当前为 CAN。请在设备屏幕「设置 → 数据选择」选择 UART；两种数据互斥。';
   document.body.classList.toggle('uart-mode',enabled);
   document.querySelector('.hero .overline').textContent=enabled?'WIRELESS UART MONITOR':'WIRELESS CAN MONITOR';
@@ -85,6 +85,7 @@ window.uartMode=false;
   const firstPart=Math.min(bytes.length,buffer.length-head);
   buffer.set(bytes.subarray(0,firstPart),head);buffer.set(bytes.subarray(firstPart),0);
   head=(head+bytes.length)%buffer.length;count=Math.min(buffer.length,count+bytes.length);changed=true;
+  if(window.uartWaveformBytes)window.uartWaveformBytes(bytes);
  }
  // Desktop batches contain only contiguous runs; gaps split runs in Python.
  window.uartBatch=row=>receiveBytes(Uint8Array.from(row.uart.match(/../g)||[],x=>parseInt(x,16)),row.first,row.last);
@@ -96,7 +97,7 @@ window.uartMode=false;
  };
  function finish(){if(pending&&pending.acked&&pending.written){const resolve=pending.resolve;clearTimeout(pending.timer);pending=null;resolve();}}
  window.uartEvent=(type,d)=>{
-  if(type==='state'){reported=false;portReady=false;lastSequence=null;count=head=lost=0;resetLog();changed=true;stop('连接状态改变，已停止发送');mode(false);stats();controls();}
+  if(type==='state'){reported=false;portReady=false;lastSequence=null;count=head=lost=0;resetLog();changed=true;stop('连接状态改变，已停止发送');if(window.uartWaveformReset)window.uartWaveformReset();mode(false);stats();controls();}
   if(type==='writeDone'&&pending){if(d.success){pending.written=true;finish();}else stop('通信写入失败，已停止后续发送');}
   if(type==='error'&&pending)stop(d.message||'通信错误');
  };
@@ -112,7 +113,7 @@ window.uartMode=false;
   finally{if(epoch===run){sending=false;controls();}}
  };
  $('uartCancel').onclick=()=>stop('已停止后续发送，已提交的字节可能仍在输出');
- $('uartClear').onclick=()=>{count=head=lost=0;resetLog();lastSequence=null;changed=true;stats();render();};
+ $('uartClear').onclick=()=>{count=head=lost=0;resetLog();lastSequence=null;changed=true;if(window.uartWaveformReset)window.uartWaveformReset();stats();render();};
  $('uartPause').onclick=()=>{paused=!paused;$('uartPause').textContent=paused?'继续显示':'暂停显示';changed=true;render();};
  $('uartDisplay').onchange=()=>{changed=true;render();};
  $('uartFormat').onchange=()=>{$('uartInput').placeholder=$('uartFormat').value==='hex'?'HEX 示例：01 02 FF 00':'输入 UTF-8 文本';};

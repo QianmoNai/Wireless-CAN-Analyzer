@@ -93,6 +93,7 @@ node tests/test_motor_query.cjs
 node tests/test_desktop_query_metrics.cjs
 node tests/test_uart_ui.cjs
 node tests/test_uart_render.cjs
+node tests/test_uart_waveform.cjs
 java_src=android/app/src/main/java/dev/qianmo/canview
 javac -encoding UTF-8 -d "$test_build_dir/java" \
     "$java_src/LanTransport.java" "$java_src/MonitorCommands.java" "$java_src/FeedbackQueries.java" "$java_src/HomeTelemetry.java" \
