@@ -727,7 +727,7 @@ public class MainActivity extends Activity {
         web.setWebViewClient(new WebViewClient() {
             @Override public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
                 String url = request.getUrl().toString();
-                if (url.equals(origin + "uart.js") || url.equals(origin + "index.html") || url.equals(origin + "motors.js") || url.equals(origin + "history.js") || url.equals(origin + "monitor.js") || url.equals(origin + "motor_roster.js") || url.equals(origin + "motor_detail.js") || url.equals(origin + "device_settings.js") || url.equals(origin + "network_settings.js") || url.equals(origin + "config_io.js")) {
+                if (url.equals(origin + "uart.js") || url.equals(origin + "uart_waveform.js") || url.equals(origin + "index.html") || url.equals(origin + "motors.js") || url.equals(origin + "history.js") || url.equals(origin + "monitor.js") || url.equals(origin + "motor_roster.js") || url.equals(origin + "motor_detail.js") || url.equals(origin + "device_settings.js") || url.equals(origin + "network_settings.js") || url.equals(origin + "config_io.js")) {
                     String asset = request.getUrl().getLastPathSegment();
                     try { return new WebResourceResponse(asset.endsWith(".js") ? "application/javascript" : "text/html", "UTF-8", getAssets().open(asset)); }
                     catch (Exception e) { return new WebResourceResponse("text/plain", "UTF-8", 500, "Error", null, null); }
