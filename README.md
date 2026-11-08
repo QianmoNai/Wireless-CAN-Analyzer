@@ -117,9 +117,9 @@
 
 ### 使用发行包
 
-**[下载最新完整套件 →](https://github.com/QianmoNai/Wireless-CAN-Analyzer/releases/tag/suite-2026.11.06-r2)** · [Gitee 国内下载](https://gitee.com/qianmonai/Wireless-CAN-Analyzer/releases/suite-2026.11.06-r2)
+**[下载最新完整套件 →](https://github.com/QianmoNai/Wireless-CAN-Analyzer/releases/tag/suite-2026.11.08-r1)** · [Gitee 国内下载](https://gitee.com/qianmonai/Wireless-CAN-Analyzer/releases/suite-2026.11.08-r1)
 
-本次完整套件包含固件 **1.24.8**、Android **1.21.15** 和 Desktop **1.2.24**（Windows / Linux x64）。GitHub提供完整附件；Gitee托管固件、APK、源码及校验文件，仓库附件1 GB配额已满，桌面端通过发行页中的同版GitHub链接下载，保留历史发行。各组件独立编号，下载后按 Release 中的 SHA256SUMS 校验。
+本次完整套件包含固件 **1.24.9**、Android **1.21.16** 和 Desktop **1.2.24**（Windows / Linux x64）。GitHub提供完整附件；Gitee托管固件、APK、源码及校验文件，仓库附件1 GB配额已满，桌面端通过发行页中的同版GitHub链接下载，保留历史发行。各组件独立编号，下载后按 Release 中的 SHA256SUMS 校验。
 
 Android 需 Android 8.0+；Windows 支持 Windows 10 / 11 x64；Linux 桌面包以 Ubuntu 24.04 构建。桌面包完整解压后运行 `CAN-Scope` / `CAN-Scope.exe`，无需另装 Python。固件适用于本项目 ESP32-S3 / 4 MB Flash，按包内 README.txt 烧录。
 
