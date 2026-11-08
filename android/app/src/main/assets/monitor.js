@@ -47,6 +47,7 @@ function renderDropCounts(){
  // bounded delivery queue total. Neither number is a CAN bus error count.
  const label='设备累计丢弃 '+firmwareDrops+'；App 本次运行丢弃 '+appDrops+'；不含 CAN 错误计数';
  status.title=label;status.setAttribute('aria-label',label);
+ status.dataset.state=(firmwareDrops||appDrops)?'congested':'clear';
  updateHistoryNote()
 }
 function updateAppDrops(value){const next=value||0;if(next===appDrops)return;appDrops=next;renderDropCounts()}

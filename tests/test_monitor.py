@@ -54,11 +54,13 @@ with sync_playwright() as p:
  assert page.locator('#dropStatus').inner_text().endswith('App 23')
  assert '设备累计丢弃 0' in page.locator('#dropStatus').get_attribute('aria-label')
  assert '不含 CAN 错误计数' in page.locator('#dropStatus').get_attribute('title')
+ assert page.locator('#dropStatus').get_attribute('data-state')=='congested'
  assert 'App 丢弃 23' in page.locator('#lossNote').inner_text()
  page.evaluate("onNative('packets',{dropped:24,items:[]})")
  assert page.locator('#dropStatus').inner_text().endswith('App 24')
  page.evaluate("onNative('motorSamples',{dropped:0,key:'stale config',items:[]})")
  assert page.locator('#dropStatus').inner_text().endswith('App 0')
+ assert page.locator('#dropStatus').get_attribute('data-state')=='clear'
  page.evaluate("window.dropLabelChanges=0;window.dropObserver=new MutationObserver(rows=>{dropLabelChanges+=rows.length});dropObserver.observe($('dropStatus'),{childList:true});for(let i=0;i<1000;i++)onNative('motorSamples',{dropped:0,key:'stale config',items:[]})")
  assert page.evaluate('dropLabelChanges')==0
  page.evaluate('dropObserver.disconnect()')
